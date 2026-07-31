@@ -1,0 +1,27 @@
+{
+  "name": "la-exam",
+  "version": "1.0.0",
+  "description": "WhatsApp examination system with automatic marking scheme generation",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "start:backend": "node src/server.js",
+    "start:frontend": "node src/frontend.js",
+    "start:all": "node scripts/start-all.js",
+    "dev": "node --watch src/server.js",
+    "init": "node src/server.js --init",
+    "send": "node scripts/send-exam.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.21.2",
+    "multer": "^2.0.1",
+    "pdfjs-dist": "^4.10.38"
+  },
+  "engines": {
+    "node": ">=22.5"
+  },
+  "devDependencies": {
+    "pdfkit": "^0.19.1"
+  }
+}
