@@ -126,7 +126,6 @@ async function renderDashboard() {
     ${s.reviews ? `<div class="card alert-review">⚠️ <b>${s.reviews}</b> theory answer(s) pending AI/manual review. <a href="#/results">Review now</a></div>` : ''}
     <div class="dash-grid">
       <div class="hero">
-        <div class="hero-avatar">🎓</div>
         <div class="hero-body">
           <div class="hero-eyebrow">EXAMINATION SYSTEM</div>
           <h2>LAUNCH EXAMS<br><span class="yl">YOUR WAY</span></h2>

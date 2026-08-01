@@ -294,17 +294,6 @@ a { color: var(--primary); }
   pointer-events: none;
 }
 .hero > * { position: relative; z-index: 1; }
-.hero-avatar {
-  width: 84px;
-  height: 84px;
-  border-radius: 24px;
-  background: linear-gradient(135deg, var(--yellow), var(--yellow-deep));
-  display: grid;
-  place-items: center;
-  font-size: 2.1rem;
-  flex-shrink: 0;
-  box-shadow: 0 10px 24px rgba(249, 195, 0, .35);
-}
 .hero-body { flex: 1; min-width: 0; }
 .hero-eyebrow {
   display: inline-block;
@@ -320,8 +309,8 @@ a { color: var(--primary); }
 }
 .hero h2 { margin: 0 0 6px; font-size: 1.32rem; line-height: 1.1; color: #fff; }
 .hero .yl { color: var(--yellow); }
-.hero p { margin: 0 0 12px; font-size: .85rem; color: rgba(255, 255, 255, .75); max-width: 400px; }
-.hero-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+.hero p { margin: 0 0 14px; font-size: .85rem; color: rgba(255, 255, 255, .75); max-width: 400px; }
+.hero-actions { display: flex; align-items: center; gap: 10px; }
 
 .hero-stats {
   display: grid;
