@@ -148,28 +148,11 @@ async function renderDashboard() {
         <button class="btn btn-dark btn-block" onclick="location.hash='#/students'">Show More</button>
       </aside>
     </div>
-    <div class="cards-row">
-      <div class="mini yellow">
-        <h3>Create and run<br>exams</h3>
-        <p class="muted-sm">Manual, AI-generated, or from a PDF.</p>
-        <button class="btn btn-dark" onclick="location.hash='#/exams'">New Exam</button>
-      </div>
+    <div class="cards-row wide">
       <div class="mini black">
         <h3>Live Activity</h3>
         <div class="ring" style="--p:${pct}%"><div class="ring-inner">${s.active}<span class="ring-label">active</span></div></div>
         <p class="dim" style="text-align:center">${pct}% of attempts in progress</p>
-      </div>
-      <div class="mini yellow">
-        <h3>AI question<br>generation</h3>
-        <p class="muted-sm">Full marking schemes, automatically.</p>
-        <button class="btn btn-dark" onclick="location.hash='#/exams'">Try AI</button>
-      </div>
-    </div>
-    <div class="cards-row wide">
-      <div class="pro">
-        <h3>EXAM PRO</h3>
-        <p class="muted-sm">AI-generated questions with automatic marking schemes, delivered over WhatsApp with live results.</p>
-        <button class="btn btn-dark" onclick="location.hash='#/exams'">Build an Exam</button>
       </div>
       <div class="browse">
         <h3>Browse exams<br>by subject</h3>
