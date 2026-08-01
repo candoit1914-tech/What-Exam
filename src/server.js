@@ -162,6 +162,49 @@ ${rows}
 
 app.get('/.well-known/appspecific/com.chrome.devtools.json', (req, res) => res.json({ allowed_origins: [] }));
 
+app.get('/privacy', (req, res) => {
+  res.type('html').send(`<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Privacy Policy — La_Exam</title>
+<style>
+  :root{--bg:#0f172a;--card:#1e293b;--line:#334155;--fg:#e2e8f0;--muted:#94a3b8;--accent:#38bdf8}
+  *{box-sizing:border-box}
+  body{font-family:system-ui,sans-serif;background:var(--bg);color:var(--fg);margin:0;line-height:1.65}
+  .wrap{max-width:760px;margin:0 auto;padding:40px 20px 64px}
+  h1{font-size:24px;margin:0 0 4px}
+  .sub{color:var(--muted);margin:0 0 28px}
+  h2{font-size:16px;color:var(--accent);margin:24px 0 8px}
+  p{color:var(--fg);margin:6px 0}
+  a{color:var(--accent)}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px 20px;margin-top:8px}
+  footer{margin-top:40px;color:var(--muted);font-size:12px}
+</style></head><body><div class="wrap">
+<h1>Privacy Policy</h1>
+<p class="sub">La_Exam — last updated August 2026</p>
+
+<div class="card">
+<h2>1. Data we collect</h2>
+<p>La_Exam collects the information needed to run WhatsApp-based examinations: student name, WhatsApp phone number, exam responses, and exam results. We do not collect more personal data than is necessary for the service.</p>
+
+<h2>2. How we use your data</h2>
+<p>Your phone number is used solely to deliver exams and results to you over WhatsApp. Your responses are used to mark exams and produce results. No data is sold or shared with third parties for marketing.</p>
+
+<h2>3. Data storage</h2>
+<p>Data is stored on secure servers operated by the service provider (Render). We take reasonable measures to protect your information, but no method of transmission or storage is 100% secure.</p>
+
+<h2>4. WhatsApp</h2>
+<p>This service uses the WhatsApp Business Platform. By using the service you agree to WhatsApp's Terms of Service and acknowledge that message delivery is handled by WhatsApp/Meta.</p>
+
+<h2>5. Data retention &amp; deletion</h2>
+<p>Data is kept for as long as needed to administer exams. To request deletion of your data, contact the administrator of the school or institution that issued your exam.</p>
+
+<h2>6. Contact</h2>
+<p>For privacy questions, contact the institution administrator that provided this exam.</p>
+</div>
+
+<footer><a href="/">← Back to API</a> · La_Exam</footer>
+</div></body></html>`);
+});
+
 app.get('/health', (req, res) => res.json({ ok: true, appUrl: config.appUrl }));
 
 app.use((err, req, res, next) => {
