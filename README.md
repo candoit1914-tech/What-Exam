@@ -1,4 +1,4 @@
-# La_Exam — WhatsApp Examination System
+# What Exam — WhatsApp Examination System
 
 Exams with **automatic marking scheme generation** delivered over WhatsApp.
 

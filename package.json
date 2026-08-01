@@ -1,5 +1,5 @@
 {
-  "name": "la-exam",
+  "name": "what-exam",
   "version": "1.0.0",
   "description": "WhatsApp examination system with automatic marking scheme generation",
   "main": "src/server.js",

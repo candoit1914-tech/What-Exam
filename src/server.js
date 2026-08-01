@@ -142,7 +142,7 @@ app.get('/', (req, res) => {
 </style></head><body><div class="wrap">
 <header>
   <div>
-    <h1>La_Exam API</h1>
+    <h1>What Exam API</h1>
     <p class="sub">Backend server &mdash; JSON API, WhatsApp webhook, and reports</p>
   </div>
   <div class="badges">
@@ -153,7 +153,7 @@ app.get('/', (req, res) => {
 <p class="sub">Admin dashboard: <a href="${config.frontendUrl}">${config.frontendUrl}</a> &middot; Webhook: <code>${config.appUrl}/webhook/whatsapp</code></p>
 ${rows}
 <footer>
-  <span>La_Exam v1.0.0</span>
+  <span>What Exam v1.0.0</span>
   <a href="${config.frontendUrl}">Dashboard</a>
   <a href="/health">Health</a>
 </footer>
@@ -179,11 +179,11 @@ app.get('/privacy', (req, res) => {
   footer{margin-top:40px;color:var(--muted);font-size:12px}
 </style></head><body><div class="wrap">
 <h1>Privacy Policy</h1>
-<p class="sub">La_Exam — last updated August 2026</p>
+<p class="sub">What Exam — last updated August 2026</p>
 
 <div class="card">
 <h2>1. Data we collect</h2>
-<p>La_Exam collects the information needed to run WhatsApp-based examinations: student name, WhatsApp phone number, exam responses, and exam results. We do not collect more personal data than is necessary for the service.</p>
+<p>What Exam collects the information needed to run WhatsApp-based examinations: student name, WhatsApp phone number, exam responses, and exam results. We do not collect more personal data than is necessary for the service.</p>
 
 <h2>2. How we use your data</h2>
 <p>Your phone number is used solely to deliver exams and results to you over WhatsApp. Your responses are used to mark exams and produce results. No data is sold or shared with third parties for marketing.</p>
@@ -201,7 +201,7 @@ app.get('/privacy', (req, res) => {
 <p>For privacy questions, contact the institution administrator that provided this exam.</p>
 </div>
 
-<footer><a href="/">← Back to API</a> · La_Exam</footer>
+<footer><a href="/">← Back to API</a> · What Exam</footer>
 </div></body></html>`);
 });
 
@@ -220,7 +220,7 @@ if (require.main === module) {
       return;
     }
     app.listen(config.port, '0.0.0.0', () => {
-      console.log(`La_Exam admin running at http://localhost:${config.port}`);
+      console.log(`What Exam admin running at http://localhost:${config.port}`);
       console.log(`Webhook URL for WhatsApp: ${config.appUrl}/webhook/whatsapp`);
       console.log(
         config.whatsapp.accessToken

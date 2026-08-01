@@ -15,7 +15,7 @@ app.get('/health', (req, res) => res.json({ ok: true, name: 'la-exam-frontend' }
 
 if (require.main === module) {
   app.listen(config.frontendPort, '0.0.0.0', () => {
-    console.log(`La_Exam frontend running at http://localhost:${config.frontendPort}`);
+    console.log(`What Exam frontend running at http://localhost:${config.frontendPort}`);
     console.log(`Dashboard: http://localhost:${config.frontendPort} (backend: ${config.appUrl})`);
   });
 }

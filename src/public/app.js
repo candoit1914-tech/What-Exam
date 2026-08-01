@@ -1,4 +1,4 @@
-/* La_Exam admin dashboard — vanilla JS SPA */
+/* What Exam admin dashboard — vanilla JS SPA */
 
 const API_BASE = (window.API_BASE || 'http://localhost:3000').replace(/\/+$/, '');
 const $view = document.getElementById('view');
@@ -121,7 +121,7 @@ async function renderDashboard() {
     : '<div class="muted">No students yet. Send an exam to get started.</div>';
   const avs = students.slice(0, 5).map((p) => `<span>${esc(initials(p.name, p.phone))}</span>`).join('') || '<span>LA</span><span>EX</span><span>AM</span>';
   $view.innerHTML = `
-    <div class="page-head"><div class="ic">${I.compass}</div><h1>DISC<span class="yl">OVER</span></h1></div>
+    <div class="page-head"><div class="ic">${I.compass}</div><h1>OVER<span class="yl">VIEW</span></h1></div>
     <p class="sub">Overview of your examination system</p>
     ${s.reviews ? `<div class="card alert-review">⚠️ <b>${s.reviews}</b> theory answer(s) pending AI/manual review. <a href="#/results">Review now</a></div>` : ''}
     <div class="dash-grid">
@@ -825,7 +825,7 @@ async function renameStudent(id) {
 async function renderMessages() {
   const msgs = await api('/api/messages');
   $view.innerHTML = `
-    <div class="page-head"><div class="ic">${I.envelope}</div><h1>MESS<span class="yl">AGES</span></h1></div>
+    <div class="page-head"><div class="ic">${I.envelope}</div><h1>DELI<span class="yl">VERY</span></h1></div>
     <p class="sub">WhatsApp delivery status for outbound messages</p>
     <div class="card"><table>
       <thead><tr><th>Recipient</th><th>Type</th><th>Status</th><th>Message ID</th><th>Sent</th><th>Updated</th></tr></thead>
