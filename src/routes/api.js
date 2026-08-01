@@ -529,6 +529,15 @@ router.get('/students', (req, res) => {
   res.json(rows);
 });
 
+router.post('/students', (req, res) => {
+  const { name, phone } = req.body || {};
+  const normalized = examService.normalizePhone(phone);
+  if (!normalized) return res.status(400).json({ error: 'Enter a valid WhatsApp number.' });
+  const student = examService.getOrCreateStudent(normalized);
+  if (name) db.prepare('UPDATE students SET name = ? WHERE id = ?').run(String(name), student.id);
+  res.json(db.prepare('SELECT * FROM students WHERE id = ?').get(student.id));
+});
+
 router.patch('/students/:id', (req, res) => {
   if (req.body.name !== undefined) {
     db.prepare('UPDATE students SET name = ? WHERE id = ?').run(String(req.body.name), req.params.id);

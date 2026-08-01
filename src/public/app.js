@@ -718,8 +718,13 @@ async function resendResult(id) {
 async function renderStudents() {
   const students = await api('/api/students');
   $view.innerHTML = `
-    <h1>Students</h1>
-    <p class="muted">Everyone who has interacted with the exam bot</p>
+    <div class="spread">
+      <div>
+        <h1>Students</h1>
+        <p class="muted">Everyone who has interacted with the exam bot</p>
+      </div>
+      <button onclick="addStudentGlobal()">+ Add Student</button>
+    </div>
     <div class="card"><table>
       <thead><tr><th>Name</th><th>Phone</th><th>Exams</th><th>Attempts</th><th>First seen</th><th></th></tr></thead>
       <tbody>
@@ -740,6 +745,26 @@ async function renameStudent(id) {
   if (name == null) return;
   await api(`/api/students/${id}`, { method: 'PATCH', body: { name } });
   renderStudents();
+}
+
+async function addStudentGlobal() {
+  const body = `
+    <div class="field"><label>Student name</label><input id="stu_g_name" placeholder="e.g. Amy Takyiwaa"></div>
+    <div class="field"><label>WhatsApp number</label><input id="stu_g_phone" placeholder="e.g. 0269200946 or +233 24 123 4567"></div>
+    <div class="row" style="justify-content:flex-end"><button id="stu_g_save">Add Student</button></div>`;
+  const div = await openModal('Add Student', body);
+  if (!div) return;
+  document.querySelector('#stu_g_save').addEventListener('click', async () => {
+    const name = document.querySelector('#stu_g_name').value.trim();
+    const phone = document.querySelector('#stu_g_phone').value.trim();
+    if (!phone) return toast('Enter the student’s WhatsApp number.', true);
+    try {
+      await api('/api/students', { method: 'POST', body: { name, phone } });
+      div.remove();
+      toast(name ? `Added ${name}.` : 'Student added.');
+      renderStudents();
+    } catch (e) { toast(e.message, true); }
+  });
 }
 
 // ── Boot ───────────────────────────────────────────────────────────────
