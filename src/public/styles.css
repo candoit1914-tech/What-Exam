@@ -428,19 +428,23 @@ a { color: var(--primary); }
 }
 
 /* ── Tables ──────────────────────────────────────────────── */
-table { width: 100%; border-collapse: collapse; font-size: .88rem; }
+table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: .88rem; }
 th {
   text-align: left;
-  color: var(--muted);
-  font-weight: 600;
-  font-size: .7rem;
+  color: #16161a;
+  font-weight: 700;
+  font-size: .72rem;
   text-transform: uppercase;
   letter-spacing: .08em;
-  padding: 10px 12px;
-  border-bottom: 1px solid var(--line);
+  padding: 12px;
+  background: linear-gradient(135deg, var(--yellow), var(--yellow-soft));
 }
+th:first-child { border-top-left-radius: 12px; }
+th:last-child { border-top-right-radius: 12px; }
 td { padding: 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
 tr:last-child td { border-bottom: none; }
+tr:last-child td:first-child { border-bottom-left-radius: 12px; }
+tr:last-child td:last-child { border-bottom-right-radius: 12px; }
 tbody tr:hover { background: #fdfbf5; }
 
 /* ── Badges ──────────────────────────────────────────────── */
