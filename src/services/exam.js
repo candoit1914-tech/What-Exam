@@ -252,20 +252,37 @@ async function sendExamToRecipients(examId) {
   const report = { sent: 0, failed: 0, errors: [] };
 
   for (const student of recipients) {
-    const existing = db.prepare('SELECT id FROM sessions WHERE exam_id = ? AND student_id = ?').get(examId, student.id);
-    if (existing) continue; // already has a session
-    const session = createSession(examId, student.id);
+    let session = db.prepare('SELECT * FROM sessions WHERE exam_id = ? AND student_id = ?').get(examId, student.id);
+    let fresh = false;
+
     try {
-      await wa.sendText(
-        student.phone,
-        `📢 ${exam.title} is ready.\n\nReply with your answer to each question. Your exam starts now.`
-      );
+      if (!session) {
+        session = createSession(examId, student.id);
+        fresh = true;
+      } else if (session.status === 'abandoned') {
+        db.prepare(
+          `UPDATE sessions SET status='in_progress', current_q_order=1, started_at=datetime('now'), ended_at=NULL WHERE id=?`
+        ).run(session.id);
+        session = db.prepare('SELECT * FROM sessions WHERE id = ?').get(session.id);
+        fresh = true;
+      } else if (session.status !== 'in_progress') {
+        continue; // completed/expired — already finished, skip
+      }
+
+      if (fresh) {
+        await wa.sendText(
+          student.phone,
+          `📢 ${exam.title} is ready.\n\nReply with your answer to each question. Your exam starts now.`
+        );
+      }
       await sendQuestionTo(session, student);
       report.sent++;
     } catch (err) {
       report.failed++;
       report.errors.push({ phone: student.phone, error: err.message });
-      db.prepare(`UPDATE sessions SET status = 'abandoned', ended_at = datetime('now') WHERE id = ?`).run(session.id);
+      if (session) {
+        db.prepare(`UPDATE sessions SET status = 'abandoned', ended_at = datetime('now') WHERE id = ?`).run(session.id);
+      }
     }
   }
   return report;
