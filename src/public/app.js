@@ -127,19 +127,20 @@ async function renderDashboard() {
     <div class="dash-grid">
       <div class="hero">
         <div class="hero-avatar">🎓</div>
-        <div>
+        <div class="hero-body">
+          <div class="hero-eyebrow">EXAMINATION SYSTEM</div>
           <h2>LAUNCH EXAMS<br><span class="yl">YOUR WAY</span></h2>
           <p>Set up AI-marked exams and deliver them to your students over WhatsApp — instantly.</p>
-          <div class="hero-stats">
-            <div class="hs"><b>${s.exams}</b><span>Exams</span></div>
-            <div class="hs"><b>${s.published}</b><span>Live</span></div>
-            <div class="hs"><b>${s.questions}</b><span>Questions</span></div>
-            <div class="hs"><b>${s.students}</b><span>Students</span></div>
-          </div>
           <div class="hero-actions">
             <button class="btn btn-yellow" onclick="location.hash='#/exams'">＋ New Exam</button>
             <button class="btn btn-ghost" onclick="location.hash='#/results'">View Results</button>
           </div>
+        </div>
+        <div class="hero-stats">
+          <div class="stat-chip"><b>${s.exams}</b><span>Exams</span></div>
+          <div class="stat-chip"><b>${s.published}</b><span>Live</span></div>
+          <div class="stat-chip"><b>${s.questions}</b><span>Questions</span></div>
+          <div class="stat-chip"><b>${s.students}</b><span>Students</span></div>
         </div>
       </div>
       <aside class="panel">
