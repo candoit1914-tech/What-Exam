@@ -35,54 +35,129 @@ app.get('/report/:sessionId', (req, res) => {
   res.status(r.status).send(r.html);
 });
 
-const API_ENDPOINTS = [
-  ['GET', '/api/stats', 'Dashboard summary counts'],
-  ['GET', '/api/exams', 'List exams'],
-  ['POST', '/api/exams', 'Create an exam'],
-  ['GET', '/api/exams/:id', 'Exam detail (questions, recipients, results)'],
-  ['PATCH', '/api/exams/:id', 'Update exam meta'],
-  ['POST', '/api/exams/:id/publish', 'Publish (make live)'],
-  ['POST', '/api/exams/:id/end', 'End a live exam'],
-  ['POST', '/api/exams/:id/archive', 'Archive an exam'],
-  ['DELETE', '/api/exams/:id', 'Delete an exam'],
-  ['POST', '/api/exams/:id/recipients', 'Add recipient phones'],
-  ['DELETE', '/api/exams/:id/recipients/:studentId', 'Remove a recipient'],
-  ['POST', '/api/exams/:id/send', 'Send exam to recipients via WhatsApp'],
-  ['POST', '/api/exams/:id/questions', 'Add a question'],
-  ['PUT', '/api/exams/:id/questions/:qid', 'Update a question'],
-  ['DELETE', '/api/exams/:id/questions/:qid', 'Delete a question'],
-  ['PUT', '/api/exams/:id/scheme/:qid', 'Edit a marking scheme (JSON)'],
-  ['POST', '/api/exams/:id/scheme/:qid/generate', 'Regenerate scheme with AI'],
-  ['POST', '/api/exams/:id/generate', 'AI-generate questions'],
-  ['POST', '/api/exams/:id/pdf', 'Extract questions from uploaded PDF'],
-  ['GET', '/api/results', 'Completed sessions'],
-  ['GET', '/api/results/:sessionId', 'Session detail + answers'],
-  ['PATCH', '/api/results/:sessionId/answers/:answerId', 'Adjust awarded marks'],
-  ['POST', '/api/results/:sessionId/resend', 'Resend result via WhatsApp'],
-  ['GET', '/api/students', 'List students'],
-  ['PATCH', '/api/students/:id', 'Rename a student'],
-  ['GET', '/report/:sessionId', 'Printable HTML report for a session'],
-  ['GET', '/webhook/whatsapp', 'WhatsApp webhook verification (GET)'],
-  ['POST', '/webhook/whatsapp', 'WhatsApp webhook events'],
-  ['GET', '/health', 'Health check'],
+const API_GROUPS = [
+  ['System', [
+    ['GET', '/health', 'Health check'],
+    ['GET', '/api/stats', 'Dashboard summary counts'],
+  ]],
+  ['Exams', [
+    ['GET', '/api/exams', 'List exams'],
+    ['POST', '/api/exams', 'Create an exam'],
+    ['GET', '/api/exams/:id', 'Exam detail (questions, recipients, results)'],
+    ['PATCH', '/api/exams/:id', 'Update exam meta'],
+    ['DELETE', '/api/exams/:id', 'Delete an exam'],
+    ['POST', '/api/exams/:id/publish', 'Publish (make live)'],
+    ['POST', '/api/exams/:id/end', 'End a live exam'],
+    ['POST', '/api/exams/:id/archive', 'Archive an exam'],
+  ]],
+  ['Recipients & Delivery', [
+    ['POST', '/api/exams/:id/recipients', 'Add recipient phones'],
+    ['DELETE', '/api/exams/:id/recipients/:studentId', 'Remove a recipient'],
+    ['POST', '/api/exams/:id/send', 'Send exam to recipients via WhatsApp'],
+  ]],
+  ['Questions & Schemes', [
+    ['POST', '/api/exams/:id/questions', 'Add a question'],
+    ['PUT', '/api/exams/:id/questions/:qid', 'Update a question'],
+    ['DELETE', '/api/exams/:id/questions/:qid', 'Delete a question'],
+    ['PUT', '/api/exams/:id/scheme/:qid', 'Edit a marking scheme (JSON)'],
+    ['POST', '/api/exams/:id/scheme/:qid/generate', 'Regenerate scheme with AI'],
+  ]],
+  ['AI & Files', [
+    ['POST', '/api/exams/:id/generate', 'AI-generate questions'],
+    ['POST', '/api/exams/:id/pdf', 'Extract questions from uploaded PDF'],
+  ]],
+  ['Results & Students', [
+    ['GET', '/api/results', 'Completed sessions'],
+    ['GET', '/api/results/:sessionId', 'Session detail + answers'],
+    ['PATCH', '/api/results/:sessionId/answers/:answerId', 'Adjust awarded marks'],
+    ['POST', '/api/results/:sessionId/resend', 'Resend result via WhatsApp'],
+    ['GET', '/api/students', 'List students'],
+    ['PATCH', '/api/students/:id', 'Rename a student'],
+  ]],
+  ['Reports & WhatsApp', [
+    ['GET', '/report/:sessionId', 'Printable HTML report for a session'],
+    ['GET', '/webhook/whatsapp', 'WhatsApp webhook verification (GET)'],
+    ['POST', '/webhook/whatsapp', 'WhatsApp webhook events'],
+  ]],
 ];
 
+function methodClass(m) {
+  return m === 'GET' ? 'get' : m === 'POST' ? 'post' : m === 'PUT' || m === 'PATCH' ? 'put' : 'del';
+}
+
+function endpointLink(m, p) {
+  if (m === 'GET' && !p.includes(':')) {
+    return `<a href="${p}" target="_blank" rel="noopener"><code>${p}</code></a>`;
+  }
+  return `<code>${p}</code>`;
+}
+
 app.get('/', (req, res) => {
+  const wa = config.whatsapp.accessToken ? 'on' : 'off';
+  const ai = config.ai.apiKey ? 'on' : 'off';
+  const rows = API_GROUPS.map(
+    ([group, eps]) => `
+      <h2 class="group">${group}</h2>
+      <table><tbody>
+        ${eps
+          .map(
+            ([m, p, d]) => `<tr>
+              <td class="m"><span class="method ${methodClass(m)}">${m}</span></td>
+              <td>${endpointLink(m, p)}</td>
+              <td class="m">${d}</td>
+            </tr>`
+          )
+          .join('')}
+      </tbody></table>`
+  ).join('');
   res.type('html').send(`<!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8"><title>La_Exam API</title>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>La_Exam API</title>
 <style>
-  body{font-family:system-ui,sans-serif;max-width:860px;margin:40px auto;padding:0 20px;color:#222}
-  h1{font-size:22px} h2{font-size:15px;color:#666;font-weight:500;margin:4px 0 24px}
-  code{background:#f1f3f5;padding:2px 6px;border-radius:4px;font-size:13px}
-  table{width:100%;border-collapse:collapse} th,td{text-align:left;padding:7px 10px;border-bottom:1px solid #e9ecef;font-size:13px}
-  th{color:#666;font-weight:600} .m{color:#666}
-  a{color:#0b57d0;text-decoration:none}
-</style></head><body>
-<h1>La_Exam API</h1>
-<h2>Backend server &mdash; JSON API, WhatsApp webhook, and reports. Admin dashboard: <a href="http://localhost:${config.frontendPort}">http://localhost:${config.frontendPort}</a></h2>
-<table><thead><tr><th>Method</th><th>Path</th><th>Purpose</th></tr></thead><tbody>
-${API_ENDPOINTS.map(([m, p, d]) => `<tr><td><code>${m}</code></td><td><code>${p}</code></td><td class="m">${d}</td></tr>`).join('')}
-</tbody></table></body></html>`);
+  :root{--bg:#0f172a;--card:#1e293b;--line:#334155;--fg:#e2e8f0;--muted:#94a3b8;--accent:#38bdf8}
+  *{box-sizing:border-box}
+  body{font-family:system-ui,sans-serif;background:var(--bg);color:var(--fg);margin:0;min-height:100vh}
+  .wrap{max-width:900px;margin:0 auto;padding:32px 20px 64px}
+  header{display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:16px;margin-bottom:8px}
+  h1{font-size:24px;margin:0}
+  .sub{color:var(--muted);margin:6px 0 0}
+  .badges{display:flex;gap:8px;flex-wrap:wrap}
+  .badge{padding:5px 12px;border-radius:999px;font-size:12px;font-weight:600;border:1px solid var(--line)}
+  .badge.on{background:#14532d;color:#86efac;border-color:#166534}
+  .badge.off{background:#7f1d1d;color:#fca5a5;border-color:#991b1b}
+  .group{font-size:13px;text-transform:uppercase;letter-spacing:.08em;color:var(--accent);margin:28px 0 8px}
+  table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+  td{padding:10px 14px;border-bottom:1px solid var(--line);font-size:13px;vertical-align:top}
+  tr:last-child td{border-bottom:none}
+  .m{color:var(--muted);white-space:nowrap}
+  code{background:#0b1220;padding:2px 7px;border-radius:6px;font-size:12px;color:#e2e8f0}
+  a{color:var(--accent);text-decoration:none}
+  a code{color:var(--accent)}
+  .method{display:inline-block;min-width:52px;text-align:center;padding:3px 8px;border-radius:6px;font-size:11px;font-weight:700}
+  .method.get{background:#0f3d2e;color:#4ade80}
+  .method.post{background:#1e3a8a;color:#93c5fd}
+  .method.put{background:#78350f;color:#fbbf24}
+  .method.del{background:#7f1d1d;color:#f87171}
+  footer{margin-top:32px;color:var(--muted);font-size:12px;display:flex;gap:16px;flex-wrap:wrap}
+  @media(max-width:640px){td{white-space:normal} .m{white-space:nowrap}}
+</style></head><body><div class="wrap">
+<header>
+  <div>
+    <h1>La_Exam API</h1>
+    <p class="sub">Backend server &mdash; JSON API, WhatsApp webhook, and reports</p>
+  </div>
+  <div class="badges">
+    <span class="badge ${wa}">WhatsApp ${wa === 'on' ? 'configured' : 'not configured'}</span>
+    <span class="badge ${ai}">AI ${ai === 'on' ? `configured (${config.ai.model})` : 'not configured'}</span>
+  </div>
+</header>
+<p class="sub">Admin dashboard: <a href="${config.frontendUrl}">${config.frontendUrl}</a> &middot; Webhook: <code>${config.appUrl}/webhook/whatsapp</code></p>
+${rows}
+<footer>
+  <span>La_Exam v1.0.0</span>
+  <a href="${config.frontendUrl}">Dashboard</a>
+  <a href="/health">Health</a>
+</footer>
+</div></body></html>`);
 });
 
 app.get('/.well-known/appspecific/com.chrome.devtools.json', (req, res) => res.json({ allowed_origins: [] }));
