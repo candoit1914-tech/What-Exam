@@ -7,6 +7,18 @@ const ai = require('./ai');
 
 // ── Students ───────────────────────────────────────────────────────────
 
+function normalizePhone(raw) {
+  let p = String(raw || '').replace(/[^\d]/g, '');
+  if (!p) return '';
+  if (p.startsWith('0')) {
+    p = p.slice(1);
+    if (p.length === 9) return '233' + p;  // Ghana local (0XX... 10 digits) -> +233
+    if (p.length === 10) return '234' + p; // Nigeria local (0XX... 11 digits) -> +234
+    return p;
+  }
+  return p; // already international (with country code, incl. 1, 233, 234, ...)
+}
+
 function getOrCreateStudent(phone) {
   let s = db.prepare('SELECT * FROM students WHERE phone = ?').get(phone);
   if (!s) {
@@ -260,6 +272,7 @@ async function sendExamToRecipients(examId) {
 }
 
 module.exports = {
+  normalizePhone,
   getOrCreateStudent,
   getActiveSession,
   createSession,

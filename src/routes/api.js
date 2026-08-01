@@ -175,9 +175,8 @@ router.post('/exams/:id/recipients', (req, res) => {
   const list = (Array.isArray(phones) ? phones : [phones]).filter(Boolean);
   const added = [];
   for (const raw of list) {
-    let phone = String(raw).trim().replace(/[^\d]/g, '');
+    const phone = examService.normalizePhone(raw);
     if (!phone) continue;
-    if (!phone.startsWith('1') && !phone.startsWith('234')) phone = '234' + phone.replace(/^0/, '');
     const student = examService.getOrCreateStudent(phone);
     db.prepare(
       `INSERT OR IGNORE INTO exam_recipients (exam_id, student_id) VALUES (?, ?)`
