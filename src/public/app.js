@@ -215,7 +215,17 @@ async function renderTab() {
   } else if (tab === 'recipients') {
     bodyEl.innerHTML = `
       <div class="card">
-        <label>Student phone numbers (comma or newline separated, any country format)</label>
+        <label>Add a student as a recipient</label>
+        <div class="row" style="margin-top:8px;gap:8px">
+          <input id="stu_name" placeholder="Student name (e.g. Amy Takyiwaa)" style="flex:1">
+          <input id="stu_phone" placeholder="WhatsApp number (any format, e.g. 0269200946)" style="flex:1">
+        </div>
+        <div class="row" style="margin-top:10px">
+          <button onclick="addStudent(${id})">+ Add Student</button>
+        </div>
+      </div>
+      <div class="card">
+        <label>Or add multiple phone numbers (comma or newline separated, any country format)</label>
         <textarea id="phones_input" placeholder="+233 24 123 4567&#10;0541234567&#10;+1 555 123 4567"></textarea>
         <div class="row" style="margin-top:10px">
           <button onclick="addRecipients(${id})">Add Recipients</button>
@@ -535,6 +545,18 @@ async function regenerateScheme(id, qid) {
 }
 
 // ── Recipients ─────────────────────────────────────────────────────────
+
+async function addStudent(id) {
+  const name = document.querySelector('#stu_name').value.trim();
+  const phone = document.querySelector('#stu_phone').value.trim();
+  if (!phone) return toast('Enter the student’s WhatsApp number.', true);
+  if (!name) return toast('Enter the student’s name.', true);
+  try {
+    const res = await api(`/api/exams/${id}/recipients`, { method: 'POST', body: { students: [{ name, phone }] } });
+    toast(`Added ${res.added[0]?.name || 'student'}.`);
+    renderExam(id);
+  } catch (e) { toast(e.message, true); }
+}
 
 async function addRecipients(id) {
   const phones = document.querySelector('#phones_input').value.split(/[\n,]+/).map((p) => p.trim()).filter(Boolean);

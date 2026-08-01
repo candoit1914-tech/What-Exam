@@ -171,17 +171,29 @@ router.delete('/exams/:id', (req, res) => {
 // ── Recipients ─────────────────────────────────────────────────────────
 
 router.post('/exams/:id/recipients', (req, res) => {
-  const { phones } = req.body;
-  const list = (Array.isArray(phones) ? phones : [phones]).filter(Boolean);
+  const { phones, students } = req.body || {};
+  const list = [];
+  if (Array.isArray(students)) {
+    for (const s of students) {
+      if (s && s.phone) list.push({ phone: s.phone, name: s.name || '' });
+    }
+  } else {
+    for (const p of (Array.isArray(phones) ? phones : [phones])) {
+      if (p) list.push({ phone: p, name: '' });
+    }
+  }
   const added = [];
-  for (const raw of list) {
-    const phone = examService.normalizePhone(raw);
+  for (const item of list) {
+    const phone = examService.normalizePhone(item.phone);
     if (!phone) continue;
     const student = examService.getOrCreateStudent(phone);
+    if (item.name) {
+      db.prepare('UPDATE students SET name = ? WHERE id = ?').run(String(item.name), student.id);
+    }
     db.prepare(
       `INSERT OR IGNORE INTO exam_recipients (exam_id, student_id) VALUES (?, ?)`
     ).run(req.params.id, student.id);
-    added.push({ id: student.id, phone, name: student.name });
+    added.push({ id: student.id, phone, name: item.name || student.name });
   }
   res.json({ added });
 });
