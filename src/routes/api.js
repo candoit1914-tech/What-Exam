@@ -467,6 +467,18 @@ router.post('/exams/:id/pdf', upload.single('file'), asyncWrap(async (req, res) 
   res.json({ ok: true, count: created, textLength: text.length });
 }));
 
+// ── Delivery status ────────────────────────────────────────────────────
+
+router.get('/messages', (req, res) => {
+  const { phone } = req.query;
+  const rows = phone
+    ? db.prepare(
+        `SELECT * FROM outbound_messages WHERE recipient = ? ORDER BY id DESC LIMIT 50`
+      ).all(phone)
+    : db.prepare(`SELECT * FROM outbound_messages ORDER BY id DESC LIMIT 50`).all();
+  res.json(rows);
+});
+
 // ── Results / review ───────────────────────────────────────────────────
 
 router.get('/results', (req, res) => {

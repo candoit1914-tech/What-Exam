@@ -1,6 +1,7 @@
 const express = require('express');
 const config = require('../config');
 const wa = require('../services/whatsapp');
+const db = require('../db');
 const examService = require('../services/exam');
 
 const router = express.Router();
@@ -20,6 +21,12 @@ router.post('/', express.json(), async (req, res) => {
 
   const events = wa.parseWebhook(req.body);
   for (const ev of events) {
+    if (ev.type === 'status') {
+      db.prepare(
+        `UPDATE outbound_messages SET status = ?, error = ?, updated_at = datetime('now') WHERE message_id = ?`
+      ).run(ev.status, ev.error || '', ev.messageId);
+      continue;
+    }
     if (ev.type !== 'message') continue;
     const body = (ev.body || '').trim();
     if (!body) continue;

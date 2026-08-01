@@ -96,6 +96,20 @@ CREATE TABLE IF NOT EXISTS answers (
   marked_at     TEXT
 );
 
+CREATE TABLE IF NOT EXISTS outbound_messages (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  recipient   TEXT NOT NULL,
+  message_id  TEXT,
+  type        TEXT DEFAULT 'text',                   -- text|interactive|template
+  status      TEXT DEFAULT 'sent',                   -- sent|delivered|read|failed
+  error       TEXT DEFAULT '',
+  created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at  TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_outbound_message_id ON outbound_messages(message_id);
+CREATE INDEX IF NOT EXISTS idx_outbound_recipient ON outbound_messages(recipient);
+
 CREATE INDEX IF NOT EXISTS idx_questions_exam ON questions(exam_id, q_order);
 CREATE INDEX IF NOT EXISTS idx_sessions_exam ON sessions(exam_id);
 CREATE INDEX IF NOT EXISTS idx_answers_session ON answers(session_id, q_order);

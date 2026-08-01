@@ -1,4 +1,5 @@
 const config = require('../config');
+const db = require('../db');
 
 const GRAPH = 'https://graph.facebook.com';
 
@@ -23,17 +24,25 @@ async function api(method, body) {
   return data;
 }
 
+function logOutbound(recipient, messageId, type) {
+  db.prepare(
+    'INSERT INTO outbound_messages (recipient, message_id, type, status) VALUES (?,?,?,?)'
+  ).run(recipient, messageId || '', type, 'sent');
+}
+
 async function sendText(to, text) {
-  return api('messages', {
+  const data = await api('messages', {
     messaging_product: 'whatsapp',
     to,
     type: 'text',
     text: { body: text },
   });
+  logOutbound(to, data?.messages?.[0]?.id, 'text');
+  return data;
 }
 
 async function sendInteractiveButtons(to, text, buttons) {
-  return api('messages', {
+  const data = await api('messages', {
     messaging_product: 'whatsapp',
     to,
     type: 'interactive',
@@ -43,6 +52,8 @@ async function sendInteractiveButtons(to, text, buttons) {
       action: { buttons },
     },
   });
+  logOutbound(to, data?.messages?.[0]?.id, 'interactive');
+  return data;
 }
 
 /**
@@ -51,7 +62,7 @@ async function sendInteractiveButtons(to, text, buttons) {
  * params must be [{type:'text', text:'...'}] in template order.
  */
 async function sendTemplate(to, templateName, languageCode, params) {
-  return api('messages', {
+  const data = await api('messages', {
     messaging_product: 'whatsapp',
     to,
     type: 'template',
@@ -63,6 +74,8 @@ async function sendTemplate(to, templateName, languageCode, params) {
         : [],
     },
   });
+  logOutbound(to, data?.messages?.[0]?.id, 'template');
+  return data;
 }
 
 function parseWebhook(body) {
@@ -81,6 +94,7 @@ function parseWebhook(body) {
     phone: s.recipient_id,
     messageId: s.id,
     status: s.status,
+    error: s.errors?.map((e) => `${e.code || ''} ${e.title || ''}`).join('; ') || '',
   }));
   return [...messages, ...statuses];
 }
