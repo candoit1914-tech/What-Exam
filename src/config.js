@@ -24,6 +24,12 @@ const config = {
     accessToken: valid(process.env.WHATSAPP_ACCESS_TOKEN) ? process.env.WHATSAPP_ACCESS_TOKEN : '',
     phoneNumberId: valid(process.env.WHATSAPP_PHONE_NUMBER_ID) ? process.env.WHATSAPP_PHONE_NUMBER_ID : '',
     verifyToken: process.env.WHATSAPP_VERIFY_TOKEN || 'la_exam_verify_token',
+    templateName: (process.env.WHATSAPP_TEMPLATE_NAME || '').trim(),
+    templateLanguage: process.env.WHATSAPP_TEMPLATE_LANGUAGE || 'en',
+    templateParams: (process.env.WHATSAPP_TEMPLATE_PARAMS || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean),
   },
 
   ai: {

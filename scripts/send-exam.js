@@ -19,8 +19,11 @@ async function main() {
   }
 
   for (const raw of phones) {
-    let phone = String(raw).replace(/[^\d]/g, '');
-    if (!phone.startsWith('1') && !phone.startsWith('234')) phone = '234' + phone.replace(/^0/, '');
+    const phone = examService.normalizePhone(raw);
+    if (!phone) {
+      console.log(`Skipping invalid phone: ${raw}`);
+      continue;
+    }
     const student = examService.getOrCreateStudent(phone);
     db.prepare(`INSERT OR IGNORE INTO exam_recipients (exam_id, student_id) VALUES (?, ?)`).run(examId, student.id);
   }

@@ -18,10 +18,12 @@ router.get('/', (req, res) => {
 
 router.post('/', express.json(), async (req, res) => {
   res.status(200).send('OK'); // acknowledge immediately
+  console.log('[webhook] POST', JSON.stringify(req.body).slice(0, 400));
 
   const events = wa.parseWebhook(req.body);
   for (const ev of events) {
     if (ev.type === 'status') {
+      console.log(`[webhook] status for ${ev.messageId}: ${ev.status}${ev.error ? ' (' + ev.error + ')' : ''}`);
       db.prepare(
         `UPDATE outbound_messages SET status = ?, error = ?, updated_at = datetime('now') WHERE message_id = ?`
       ).run(ev.status, ev.error || '', ev.messageId);
@@ -32,7 +34,7 @@ router.post('/', express.json(), async (req, res) => {
     if (!body) continue;
 
     try {
-      await examService.handleInbound(ev.phone, body);
+      await examService.handleInbound(ev.phone, body, ev);
     } catch (err) {
       console.error(`[webhook] failed handling from ${ev.phone}:`, err.message);
       try {

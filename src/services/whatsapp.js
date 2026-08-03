@@ -19,7 +19,11 @@ async function api(method, body) {
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    throw new Error(`WhatsApp API error ${res.status}: ${JSON.stringify(data).slice(0, 300)}`);
+    const err = new Error(`WhatsApp API error ${res.status}: ${JSON.stringify(data).slice(0, 300)}`);
+    err.status = res.status;
+    err.code = data?.error?.code;
+    err.metaCode = data?.error?.error_data?.details || '';
+    throw err;
   }
   return data;
 }
@@ -57,6 +61,29 @@ async function sendInteractiveButtons(to, text, buttons) {
 }
 
 /**
+ * Interactive list message — renders tappable rows (A–D) for choosing an
+ * answer. Each row: { id: 'A', title: 'Mitochondria' } (title max 24 chars).
+ */
+async function sendInteractiveList(to, title, body, buttonText, rows, footer) {
+  const data = await api('messages', {
+    messaging_product: 'whatsapp',
+    to,
+    type: 'interactive',
+    interactive: {
+      type: 'list',
+      body: { text: body },
+      footer: footer ? { text: footer } : undefined,
+      action: {
+        button: buttonText,
+        sections: [{ title, rows }],
+      },
+    },
+  });
+  logOutbound(to, data?.messages?.[0]?.id, 'interactive');
+  return data;
+}
+
+/**
  * Send an approved template as the initial touch (required by WhatsApp for
  * the first message to a user outside a 24h session window).
  * params must be [{type:'text', text:'...'}] in template order.
@@ -82,13 +109,22 @@ function parseWebhook(body) {
   const entry = body?.entry?.[0];
   const changes = entry?.changes?.[0]?.value;
   if (!changes) return [];
-  const messages = (changes.messages || []).map((m) => ({
-    type: 'message',
-    phone: m.from,
-    messageId: m.id,
-    timestamp: m.timestamp,
-    body: m.text?.body || (m.type === 'interactive' ? m.interactive?.button_reply?.text || m.interactive?.list_reply?.title : ''),
-  }));
+  const messages = (changes.messages || []).map((m) => {
+    const isInteractive = m.type === 'interactive';
+    return {
+      type: 'message',
+      phone: m.from,
+      messageId: m.id,
+      timestamp: m.timestamp,
+      interactiveType: isInteractive ? m.interactive?.type || '' : '',
+      replyId: isInteractive
+        ? m.interactive?.button_reply?.id || m.interactive?.list_reply?.id || ''
+        : '',
+      body:
+        m.text?.body ||
+        (isInteractive ? m.interactive?.button_reply?.text || m.interactive?.list_reply?.title : ''),
+    };
+  });
   const statuses = (changes.statuses || []).map((s) => ({
     type: 'status',
     phone: s.recipient_id,
@@ -103,6 +139,7 @@ module.exports = {
   waConfigured,
   sendText,
   sendInteractiveButtons,
+  sendInteractiveList,
   sendTemplate,
   parseWebhook,
 };
