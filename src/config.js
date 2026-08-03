@@ -41,7 +41,7 @@ const config = {
   exam: {
     passPercentage: parseFloat(process.env.PASS_PERCENTAGE || '50'),
     defaultDurationMinutes: parseInt(process.env.DEFAULT_DURATION_MINUTES || '30', 10),
-    sendAnswerKey: process.env.SEND_ANSWER_KEY === 'true',
+    sendAnswerKey: process.env.SEND_ANSWER_KEY !== 'false',
     allowResendResults: process.env.ALLOW_RESEND_RESULTS !== 'false',
   },
 };

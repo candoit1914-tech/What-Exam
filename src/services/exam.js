@@ -92,11 +92,11 @@ function formatQuestion(exam, question, qCount) {
 function formatExamIntro(exam, questionCount) {
   return (
     `✅ *You have a new exam!*\n\n` +
-    `📝 *${exam.title}*${exam.subject ? ` — ${exam.subject}` : ''}\n` +
+    `📝 *${exam.title}*${exam.subject ? `\n📚 *Subject: ${exam.subject}*` : ''}\n` +
     `⏱️ Duration: *${exam.duration_minutes} minute${exam.duration_minutes === 1 ? '' : 's'}*\n` +
     `✍️ Questions: *${questionCount}*\n` +
     `🎯 Pass mark: *${exam.pass_percentage}%*\n\n` +
-    `Answer each question as it arrives. Your timer starts now. Good luck! 🍀`
+    `Tap an option to answer each question as it arrives. Answers are locked once selected. Your timer starts now. Good luck! 🍀`
   );
 }
 
@@ -344,10 +344,8 @@ async function handleAnswer(exam, session, student, question, body, meta = {}) {
         result.isCorrect ? 1 : 0, result.marksAwarded, result.maxMarks, 'auto'
       );
 
-    const feedback = result.isCorrect
-      ? `✅ *Correct!* Well done.\n${question.explanation ? `💡 ${question.explanation}` : ''}`
-      : `❌ *Wrong.*\n${question.explanation ? `💡 ${question.explanation}` : 'The correct answer has been recorded.'}`;
-    await wa.sendText(student.phone, feedback);
+    // No per-question feedback — answers are only revealed with the grade
+    // after the final question (per product requirement).
   } else {
     // theory — AI marked
     const answerText = body;
@@ -409,7 +407,7 @@ async function sendExamToRecipients(examId) {
       `SELECT s.* FROM exam_recipients r JOIN students s ON s.id = r.student_id WHERE r.exam_id = ?`
     )
     .all(examId);
-  const report = { sent: 0, failed: 0, errors: [] };
+  const report = { sent: 0, failed: 0, skipped: 0, errors: [] };
   const questionCount = db.prepare('SELECT COUNT(*) c FROM questions WHERE exam_id = ?').get(examId).c;
   const template = config.whatsapp.templateName;
 
@@ -432,6 +430,11 @@ async function sendExamToRecipients(examId) {
         if (Date.now() > expiredAt) {
           session = restartSession(session);
           fresh = true;
+        } else {
+          // Already actively on a question — do NOT re-deliver the current
+          // question (that caused "Q1 keeps repeating" on re-sends).
+          report.skipped++;
+          continue;
         }
       } else {
         continue; // completed — already finished

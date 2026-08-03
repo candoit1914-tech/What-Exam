@@ -35,18 +35,25 @@ async function sendResultMessage(sessionId, phone, reason) {
     `📊 Percentage: *${r.percentage}%*\n` +
     `Result: ${r.passed ? '✅ *PASS*' : '❌ *FAIL*'} (pass mark ${passMark}%)\n`;
 
-  if (config.exam.sendAnswerKey) {
-    const key = db
-      .prepare(
-        `SELECT q.q_order, q.correct_answer, q.text FROM answers a
-         JOIN questions q ON q.id = a.question_id
-         WHERE a.session_id = ? AND q.type = 'objective'
-         ORDER BY q.q_order`
-      )
-      .all(sessionId);
-    if (key.length) {
-      msg += `\nCorrect answers:\n` + key.map((k) => `${k.q_order}. ${k.correct_answer}`).join('  ') + '\n';
-    }
+  const key = db
+    .prepare(
+      `SELECT a.q_order, a.answer_text, a.is_correct, q.correct_answer, q.text FROM answers a
+       JOIN questions q ON q.id = a.question_id
+       WHERE a.session_id = ? AND q.type = 'objective'
+       ORDER BY q.q_order`
+    )
+    .all(sessionId);
+  if (key.length) {
+    msg += `\n*Answer key* (yours → correct):\n` +
+      key
+        .map((k) => {
+          const yours = String(k.answer_text || '').toUpperCase();
+          const right = String(k.correct_answer || '').toUpperCase();
+          const mark = String(k.is_correct) === '1' || k.is_correct === 1 ? '✅' : '❌';
+          return `${k.q_order}. ${mark} ${yours} → ${right}`;
+        })
+        .join('\n') +
+      '\n';
   }
 
   const reviewCount = db
