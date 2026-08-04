@@ -10,12 +10,26 @@ const ai = require('./ai');
 function normalizePhone(raw) {
   let p = String(raw || '').replace(/[^\d]/g, '');
   if (!p) return '';
+  // International dialing prefix 00 is equivalent to +; drop it.
+  if (p.startsWith('00')) p = p.slice(2);
+  // Already international (has a country code). Keep it, but strip a stray
+  // national-prefix 0 right after the country code (e.g. 2330269200946).
+  if (p.startsWith('233') || p.startsWith('234') || p.startsWith('1')) {
+    const cc = p.startsWith('234') ? '234' : p.startsWith('233') ? '233' : '1';
+    const national = p.slice(cc.length);
+    if (/^0\d/.test(national)) return cc + national.slice(1);
+    return cc + national;
+  }
+  // Local number with a leading 0 (Ghana 0XX + 7 = 10 digits, Nigeria 0XX + 8 = 11 digits).
   if (p.startsWith('0')) {
     p = p.slice(1);
-    if (p.length === 9) return '233' + p;  // Ghana local (0XX... 10 digits) -> +233
-    if (p.length === 10) return '234' + p; // Nigeria local (0XX... 11 digits) -> +234
-    return p;
+    if (p.length === 9) return '233' + p; // Ghana local (0XX...) -> +233
+    if (p.length === 10) return '234' + p; // Nigeria local (0XX...) -> +234
+    return '233' + p; // conservative default: assume Ghana
   }
+  // National number already missing its leading 0.
+  if (p.length === 9) return '233' + p; // Ghana
+  if (p.length === 10) return '234' + p; // Nigeria
   return p; // already international (with country code, incl. 1, 233, 234, ...)
 }
 
@@ -114,8 +128,7 @@ function formatExamIntro(exam, questionCount) {
   ];
   const instructions = steps.map((s, i) => `${i + 1}. ${s}`).join('\n');
   return (
-    `*${exam.title}*\n` +
-    `━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+    `*${String(exam.title).toUpperCase()}*\n\n` +
     `Subject: *${exam.subject || 'General'}*\n` +
     `Exam type: *${type}*\n` +
     `Duration: *${exam.duration_minutes} minute${exam.duration_minutes === 1 ? '' : 's'}*\n` +
@@ -152,11 +165,15 @@ function restartSession(session) {
 /** Human-friendly summary of a WhatsApp send error. */
 function friendlyError(err) {
   const msg = (err && (err.message || String(err))) || 'Unknown error';
-  if (msg.includes('131026') || (err && err.code === 131026)) {
+  const code = err && err.code;
+  if (msg.includes('131026') || code === 131026) {
     return 'No open 24h session for this number. The student must message your WhatsApp number once first, or set WHATSAPP_TEMPLATE_NAME to an approved template for first-contact delivery.';
   }
-  if (msg.includes('131030') || msg.includes('131043') || msg.includes('132000')) {
-    return `Template issue (${err && err.code}: ${err && err.metaCode ? err.metaCode : msg}). Create/approve the template in the Meta dashboard, then set WHATSAPP_TEMPLATE_NAME.`;
+  if (msg.includes('131047') || msg.includes('131048') || code === 131047 || code === 131048) {
+    return 'WhatsApp re-engagement limit: this number has not messaged your bot recently. Ask the student to message your WhatsApp number once, or configure an approved template (WHATSAPP_TEMPLATE_NAME).';
+  }
+  if (msg.includes('132000') || msg.includes('131030') || msg.includes('131043') || code === 132000 || code === 131030 || code === 131043) {
+    return `Template issue (${code || 'unknown'}${err && err.metaCode ? ': ' + err.metaCode : ''}). Create/approve the template in the Meta dashboard, then set WHATSAPP_TEMPLATE_NAME.`;
   }
   return msg;
 }
@@ -436,7 +453,7 @@ async function endExam(examId) {
     .all(examId);
 
   const notice =
-    `*${exam.title}*\n━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+    `*${String(exam.title).toUpperCase()}*\n\n` +
     `This exam has been ended by your administrator. No more questions will be sent.`;
 
   for (const s of active) {

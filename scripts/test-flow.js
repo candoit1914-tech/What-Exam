@@ -80,6 +80,9 @@ async function main() {
   const need = ['Subject:', 'Exam type:', 'Duration:', 'Number of questions:', 'Pass mark:', 'INSTRUCTIONS'];
   const missing = need.filter((n) => !intro.includes(n));
   if (missing.length) throw new Error('Intro missing fields: ' + missing.join(', '));
+  if (!intro.startsWith('*TEST 10Q*\n')) throw new Error('Intro must start with the bold, uppercase title once');
+  if ((intro.match(/\*TEST 10Q\*/g) || []).length !== 1) throw new Error('Exam title must appear exactly once in the intro');
+  if (intro.includes('━━')) throw new Error('Intro must not contain the underline divider');
   if (!/^Question 1\n/.test(textMsgs[1].text)) throw new Error('Question message must be question + number only');
   if (!textMsgs[2].text.includes('A. Nucleus')) throw new Error('Options message must list options');
   const tm = textMsgs[2].text.match(/Time remaining: \*(\d{2}):(\d{2})\*/);
