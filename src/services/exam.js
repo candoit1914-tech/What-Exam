@@ -69,35 +69,59 @@ const START_WORDS = new Set([
 ]);
 
 function formatQuestion(exam, question, qCount) {
-  const subject = exam.subject ? `📚 Subject: *${exam.subject}*\n` : '';
-  const marks = question.marks === 1 ? '1 mark' : `${question.marks} marks`;
-  const header =
-    `🧠 *${exam.title.toUpperCase()}*\n` +
-    subject +
-    `✍️ *Question ${question.q_order} of ${qCount}* · ${marks}\n` +
-    `━━━━━━━━━━━━━━━━━━━━━━\n`;
+  return `Question ${question.q_order}\n${question.text}`;
+}
 
-  if (question.type === 'objective') {
-    const options = JSON.parse(question.options || '[]');
-    const letters = options.map((o) => o.key).join(', ');
-    const body = options.map((o) => `   ${o.key}. ${o.text}`).join('\n');
-    return (
-      `${header}${question.text}\n\n` +
-      `*Your options:*\n${body}\n\n` +
-      `Reply with the letter of your answer (${letters}).`
-    );
-  }
-  return `${header}${question.text}\n\n*Type your full answer as a single message.*`;
+/** mm:ss left on the clock, computed from the session start + exam duration. */
+function timeRemaining(session, exam) {
+  const ms = new Date(session.started_at).getTime() + exam.duration_minutes * 60000 - Date.now();
+  const total = Math.max(0, Math.round(ms / 1000));
+  const mm = String(Math.floor(total / 60)).padStart(2, '0');
+  const ss = String(total % 60).padStart(2, '0');
+  return `${mm}:${ss}`;
+}
+
+/** Answer-options message for objective questions (sent right after the question). */
+function formatOptions(exam, session, question) {
+  const options = JSON.parse(question.options || '[]');
+  const body = options.map((o) => `${o.key}. ${o.text}`).join('\n');
+  return (
+    `${body}\n\n` +
+    `Reply with the letter of your answer.\n\n` +
+    `Time remaining: *${timeRemaining(session, exam)}*`
+  );
+}
+
+function examTypeOf(examId) {
+  const types = db
+    .prepare('SELECT DISTINCT type AS t FROM questions WHERE exam_id = ?')
+    .all(examId)
+    .map((r) => r.t);
+  if (types.length === 0) return 'Exam';
+  if (types.length === 1) return types[0] === 'objective' ? 'Objective' : 'Theory';
+  return 'Mixed';
 }
 
 function formatExamIntro(exam, questionCount) {
+  const type = examTypeOf(exam.id);
+  const steps = [
+    'Questions arrive one at a time.',
+    type === 'Theory'
+      ? 'Type your full answer to each question as a single message.'
+      : 'After each question, its answer options are sent in a separate message; reply with the letter of your answer (e.g. *A*).',
+    'Answers are locked once you send them.',
+    'Your timer starts now. The exam ends automatically when time is up.',
+  ];
+  const instructions = steps.map((s, i) => `${i + 1}. ${s}`).join('\n');
   return (
-    `✅ *You have a new exam!*\n\n` +
-    `📝 *${exam.title}*${exam.subject ? `\n📚 *Subject: ${exam.subject}*` : ''}\n` +
-    `⏱️ Duration: *${exam.duration_minutes} minute${exam.duration_minutes === 1 ? '' : 's'}*\n` +
-    `✍️ Questions: *${questionCount}*\n` +
-    `🎯 Pass mark: *${exam.pass_percentage}%*\n\n` +
-    `Reply with the letter of your answer to each question as it arrives (e.g. *A*). Answers are locked once sent. Your timer starts now. Good luck! 🍀`
+    `*${exam.title}*\n` +
+    `━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+    `Subject: *${exam.subject || 'General'}*\n` +
+    `Exam type: *${type}*\n` +
+    `Duration: *${exam.duration_minutes} minute${exam.duration_minutes === 1 ? '' : 's'}*\n` +
+    `Number of questions: *${questionCount}*\n` +
+    `Pass mark: *${exam.pass_percentage}%*\n\n` +
+    `*INSTRUCTIONS*\n${instructions}`
   );
 }
 
@@ -140,6 +164,10 @@ function friendlyError(err) {
 async function sendQuestionTo(session, student) {
   session = db.prepare('SELECT * FROM sessions WHERE id = ?').get(session.id);
   const exam = db.prepare('SELECT * FROM exams WHERE id = ?').get(session.exam_id);
+  if (!exam || (exam.status !== 'published' && exam.status !== 'live')) {
+    await wa.sendText(student.phone, `The exam for this session is no longer active. No more questions will be sent.`);
+    return false;
+  }
   const count = db.prepare('SELECT COUNT(*) c FROM questions WHERE exam_id = ?').get(exam.id).c;
   const question = db
     .prepare('SELECT * FROM questions WHERE exam_id = ? AND q_order = ?')
@@ -148,8 +176,10 @@ async function sendQuestionTo(session, student) {
     await finalize(session, student);
     return false;
   }
-  const text = formatQuestion(exam, question, count);
-  await wa.sendText(student.phone, text);
+  await wa.sendText(student.phone, formatQuestion(exam, question, count));
+  if (question.type === 'objective') {
+    await wa.sendText(student.phone, formatOptions(exam, session, question));
+  }
   return true;
 }
 
@@ -187,6 +217,17 @@ async function maybeStartSession(student) {
     .all(student.id);
 
   if (candidates.length === 0) {
+    const ended = db
+      .prepare(
+        `SELECT e.title FROM sessions s JOIN exams e ON e.id = s.exam_id
+         WHERE s.student_id = ? AND s.status = 'ended'
+         ORDER BY s.ended_at DESC LIMIT 1`
+      )
+      .get(student.id);
+    if (ended) {
+      await wa.sendText(student.phone, `The exam *${ended.title}* has been ended. No more questions will be sent.`);
+      return { ok: false, reason: 'ended' };
+    }
     await wa.sendText(
       student.phone,
       `Hi! 👋 You have no pending exams right now. If an exam has been sent to you, reply to it to begin.`
@@ -226,6 +267,8 @@ async function maybeStartSession(student) {
     session = createSession(exam.id, student.id);
   }
 
+  const questionCount = db.prepare('SELECT COUNT(*) c FROM questions WHERE exam_id = ?').get(exam.id).c;
+  await wa.sendText(student.phone, formatExamIntro(exam, questionCount));
   const sent = await sendQuestionTo(session, student).catch(async (err) => {
     await wa.sendText(student.phone, `Could not start "${exam.title}" right now. Please try again shortly.`);
     return false;
@@ -374,6 +417,42 @@ async function finalize(session, student, reason = 'completed') {
   await results.sendResultMessage(session.id, student.phone, reason);
 }
 
+// ── Admin: end an exam ─────────────────────────────────────────────────
+
+/** End an exam from the app: closes the exam and stops every active session immediately. */
+async function endExam(examId) {
+  const exam = db.prepare('SELECT * FROM exams WHERE id = ?').get(examId);
+  if (!exam) throw new Error('Exam not found');
+  if (exam.status !== 'live' && exam.status !== 'published') {
+    throw new Error('Exam is not live.');
+  }
+  db.prepare(`UPDATE exams SET status='ended', ended_at = datetime('now') WHERE id = ?`).run(examId);
+
+  const active = db
+    .prepare(
+      `SELECT s.id, st.phone FROM sessions s JOIN students st ON st.id = s.student_id
+       WHERE s.exam_id = ? AND s.status = 'in_progress'`
+    )
+    .all(examId);
+
+  const notice =
+    `*${exam.title}*\n━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+    `This exam has been ended by your administrator. No more questions will be sent.`;
+
+  for (const s of active) {
+    const result = results.computeForSession(s.id);
+    db.prepare(
+      `UPDATE sessions SET status='ended', ended_at=datetime('now'), final_score=?, final_percentage=?, passed=? WHERE id=?`
+    ).run(result.score, result.percentage, result.passed ? 1 : 0, s.id);
+    try {
+      await wa.sendText(s.phone, notice);
+    } catch (err) {
+      // session is already closed regardless of delivery outcome
+    }
+  }
+  return { ended: active.length };
+}
+
 // ── Admin: send exam to recipients ─────────────────────────────────────
 
 async function sendExamToRecipients(examId) {
@@ -453,6 +532,7 @@ module.exports = {
   handleInbound,
   processAnswer,
   finalize,
+  endExam,
   sendExamToRecipients,
   sendQuestionTo,
   restartSession,

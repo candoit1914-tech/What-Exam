@@ -169,14 +169,16 @@ function initHeroScene() {
   chat.dataset.scene = 'on';
   if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
     chat.innerHTML = `
-      <div class="wapp-bubble out"><span class="b-label">QUESTION 1 · OBJECTIVE</span>What is the capital of Ghana?<div class="b-opts"><b>A.</b> Accra<br><b>B.</b> Kumasi<br><b>C.</b> Cape Coast<br><b>D.</b> Tamale</div><div class="b-hint">Reply with the letter of your answer.</div></div>
+      <div class="wapp-bubble out"><span class="b-label">QUESTION 1 · OBJECTIVE</span>What is the capital of Ghana?</div>
+      <div class="wapp-bubble out"><span class="b-label">ANSWER OPTIONS</span><div class="b-opts"><b>A.</b> Accra<br><b>B.</b> Kumasi<br><b>C.</b> Cape Coast<br><b>D.</b> Tamale</div><div class="b-hint">Time remaining: 09:45</div></div>
       <div class="wapp-bubble in">A<span class="wapp-ticks">✔✔</span></div>
       <div class="wapp-bubble out"><span class="b-label">AI MARKING</span>✓ Correct — <b>+1 mark</b></div>`;
     return;
   }
 
   const script = [
-    { type: 'bubble', cls: 'out', wait: 500, html: '<span class="b-label">QUESTION 1 · OBJECTIVE</span>What is the capital of Ghana?<div class="b-opts"><b>A.</b> Accra<br><b>B.</b> Kumasi<br><b>C.</b> Cape Coast<br><b>D.</b> Tamale</div><div class="b-hint">Reply with the letter of your answer.</div>' },
+    { type: 'bubble', cls: 'out', wait: 500, html: '<span class="b-label">QUESTION 1 · OBJECTIVE</span>What is the capital of Ghana?' },
+    { type: 'bubble', cls: 'out', wait: 700, html: '<span class="b-label">ANSWER OPTIONS</span><div class="b-opts"><b>A.</b> Accra<br><b>B.</b> Kumasi<br><b>C.</b> Cape Coast<br><b>D.</b> Tamale</div><div class="b-hint">Time remaining: 09:45</div>' },
     { type: 'typing', wait: 950 },
     { type: 'bubble', cls: 'in', wait: 750, html: 'A<span class="wapp-ticks">✔✔</span>' },
     { type: 'bubble', cls: 'out', wait: 1600, html: '<span class="b-label">AI MARKING</span>✓ Correct — <b>+1 mark</b>' },
@@ -596,7 +598,7 @@ async function renderTab() {
       <tbody>
         ${results.length === 0 ? `<tr><td colspan="8"><div class="empty-state">${I.empty}<p>No sessions yet. Send the exam to recipients to begin.</p></div></td></tr>` : ''}
         ${results.map((s) => {
-          const finished = ['completed', 'expired'].includes(s.status);
+          const finished = ['completed', 'expired', 'ended'].includes(s.status);
           const pct = finished ? (s.final_percentage != null ? s.final_percentage + '%' : '—') : '—';
           return `<tr>
             <td>${esc(s.student_name || '—')}</td>
@@ -962,7 +964,7 @@ async function publishExam(id) {
 }
 
 async function endExam(id) {
-  if (!confirm('End this exam? Active sessions will be stopped for new answers.')) return;
+  if (!confirm('End this exam? All active sessions will be stopped and no more questions will be sent to students.')) return;
   await api(`/api/exams/${id}/end`, { method: 'POST' });
   invalidateCache('/api/exams');
   invalidateCache(`/api/exams/${id}`);
@@ -1013,12 +1015,12 @@ async function renderResults() {
   }
 
   $view.innerHTML = `
-    ${pageHead('chart', 'RESU<span class="gr">LTS</span>', 'Completed and expired sessions')}
+      ${pageHead('chart', 'RESU<span class="gr">LTS</span>', 'Completed, expired and ended sessions')}
     <div class="card table-card"><div class="skeleton skeleton-row" style="margin:10px"></div></div>`;
 
   const results = await api('/api/results');
   $view.innerHTML = `
-    ${pageHead('chart', 'RESU<span class="gr">LTS</span>', 'Completed and expired sessions')}
+      ${pageHead('chart', 'RESU<span class="gr">LTS</span>', 'Completed, expired and ended sessions')}
     <div class="card table-card reveal">
       <table>
         <thead><tr><th>Student</th><th>Exam</th><th>Score</th><th>%</th><th>Result</th><th>Pass Mark</th><th>Ended</th><th></th></tr></thead>

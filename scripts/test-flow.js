@@ -71,9 +71,20 @@ async function main() {
 
   const textMsgs = sent.filter((s) => s.kind === 'text');
   console.log(`\n--- first wave: ${sent.length} msgs (all text)`);
-  console.log('--- INTRO ---\n' + textMsgs[0].text);
-  console.log('\n--- Q1 CARD ---\n' + textMsgs[1].text);
+  const intro = textMsgs[0].text;
+  console.log('--- INTRO ---\n' + intro);
+  console.log('\n--- Q1 QUESTION ---\n' + textMsgs[1].text);
+  console.log('\n--- Q1 OPTIONS ---\n' + textMsgs[2].text);
   console.log(`\n${sent.length - textMsgs.length === 0 ? 'OK' : 'FAIL'}: no interactive messages sent (text-only flow)`);
+
+  const need = ['Subject:', 'Exam type:', 'Duration:', 'Number of questions:', 'Pass mark:', 'INSTRUCTIONS'];
+  const missing = need.filter((n) => !intro.includes(n));
+  if (missing.length) throw new Error('Intro missing fields: ' + missing.join(', '));
+  if (!/^Question 1\n/.test(textMsgs[1].text)) throw new Error('Question message must be question + number only');
+  if (!textMsgs[2].text.includes('A. Nucleus')) throw new Error('Options message must list options');
+  const tm = textMsgs[2].text.match(/Time remaining: \*(\d{2}):(\d{2})\*/);
+  if (!tm) throw new Error('Options message must include the timer');
+  console.log(`timer at first send: ${tm[1]}:${tm[2]}`);
 
   // 2. Greeting must NOT be counted as an answer
   sent.length = 0;

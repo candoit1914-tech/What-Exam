@@ -30,7 +30,7 @@ async function sendResultMessage(sessionId, phone, reason) {
   let msg =
     `🏁 *Exam complete*\n\n` +
     `📝 ${r.exam.title}${r.exam.subject ? ` — ${r.exam.subject}` : ''}\n` +
-    `⏱️ ${reason === 'expired' ? 'Time expired' : 'All questions answered'}\n\n` +
+    `⏱️ ${reason === 'expired' ? 'Time expired' : reason === 'ended' ? 'Ended by administrator' : 'All questions answered'}\n\n` +
     `🎯 Score: *${r.score} / ${r.totalMarks}*\n` +
     `📊 Percentage: *${r.percentage}%*\n` +
     `Result: ${r.passed ? '✅ *PASS*' : '❌ *FAIL*'} (pass mark ${passMark}%)\n`;

@@ -39,7 +39,7 @@ function examSummary(row) {
       `SELECT
          COUNT(*) total,
          COALESCE(SUM(CASE WHEN status='in_progress' THEN 1 ELSE 0 END),0) active,
-         COALESCE(SUM(CASE WHEN status IN ('completed','expired') THEN 1 ELSE 0 END),0) finished
+         COALESCE(SUM(CASE WHEN status IN ('completed','expired','ended') THEN 1 ELSE 0 END),0) finished
        FROM sessions WHERE exam_id = ?`
     )
     .get(row.id);
@@ -163,10 +163,10 @@ router.post('/exams/:id/publish', (req, res) => {
   res.json({ ok: true });
 });
 
-router.post('/exams/:id/end', (req, res) => {
-  db.prepare(`UPDATE exams SET status='ended', ended_at = datetime('now') WHERE id = ?`).run(req.params.id);
-  res.json({ ok: true });
-});
+router.post('/exams/:id/end', asyncWrap(async (req, res) => {
+  const report = await examService.endExam(req.params.id);
+  res.json(report);
+}));
 
 router.post('/exams/:id/archive', (req, res) => {
   db.prepare(`UPDATE exams SET status='archived' WHERE id = ?`).run(req.params.id);
@@ -214,6 +214,11 @@ router.delete('/exams/:id/recipients/:studentId', (req, res) => {
 });
 
 router.post('/exams/:id/send', asyncWrap(async (req, res) => {
+  const exam = db.prepare('SELECT * FROM exams WHERE id = ?').get(req.params.id);
+  if (!exam) return res.status(404).json({ error: 'Exam not found' });
+  if (exam.status !== 'live') {
+    return res.status(400).json({ error: 'Publish the exam first. Only live exams can be sent to recipients.' });
+  }
   const report = await examService.sendExamToRecipients(req.params.id);
   res.json(report);
 }));
@@ -498,7 +503,7 @@ router.get('/results', (req, res) => {
        FROM sessions s
        JOIN exams e ON e.id = s.exam_id
        JOIN students st ON st.id = s.student_id
-       WHERE s.status IN ('completed','expired')
+       WHERE s.status IN ('completed','expired','ended')
        ORDER BY s.ended_at DESC`
     )
     .all();
