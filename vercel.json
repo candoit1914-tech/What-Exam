@@ -2,5 +2,5 @@
   "buildCommand": "node scripts/vercel-build.js",
   "outputDirectory": "dist",
   "framework": null,
-  "installCommand": "npm install --omit=dev"
+  "installCommand": "echo skip-install"
 }
