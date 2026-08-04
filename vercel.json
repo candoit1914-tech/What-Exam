@@ -1,6 +1,6 @@
 {
-  "buildCommand": "node scripts/vercel-build.js",
-  "outputDirectory": "dist",
   "framework": null,
-  "installCommand": "echo skip-install"
+  "outputDirectory": "src/public",
+  "installCommand": "",
+  "buildCommand": ""
 }
