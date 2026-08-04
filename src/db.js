@@ -96,6 +96,13 @@ CREATE TABLE IF NOT EXISTS answers (
   marked_at     TEXT
 );
 
+CREATE TABLE IF NOT EXISTS webhook_events (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  source      TEXT NOT NULL DEFAULT 'inbound',
+  payload     TEXT NOT NULL,
+  received_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS outbound_messages (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
   recipient   TEXT NOT NULL,

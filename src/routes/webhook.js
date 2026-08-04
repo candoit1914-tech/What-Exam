@@ -17,6 +17,10 @@ router.get('/', (req, res) => {
 });
 
 router.post('/', express.json(), async (req, res) => {
+  // Log every inbound POST for diagnostics (helps us see if Meta is delivering).
+  try {
+    db.prepare('INSERT INTO webhook_events (source, payload) VALUES (?,?)').run('inbound', JSON.stringify(req.body).slice(0, 2000));
+  } catch (e) { /* non-fatal */ }
   res.status(200).send('OK'); // acknowledge immediately
   console.log('[webhook] POST', JSON.stringify(req.body).slice(0, 400));
 

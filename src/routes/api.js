@@ -81,6 +81,16 @@ router.get('/stats', (req, res) => {
   });
 });
 
+// ── Webhook diagnostics ───────────────────────────────────────────────
+router.get('/webhook-events', (req, res) => {
+  const rows = db.prepare('SELECT id, source, payload, received_at FROM webhook_events ORDER BY id DESC LIMIT 30').all();
+  res.json(rows);
+});
+router.delete('/webhook-events', (req, res) => {
+  db.prepare('DELETE FROM webhook_events').run();
+  res.json({ ok: true, message: 'webhook_events cleared' });
+});
+
 // ── Exams ──────────────────────────────────────────────────────────────
 
 router.get('/exams', (req, res) => {
