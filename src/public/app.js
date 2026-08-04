@@ -840,7 +840,8 @@ async function sendExam(id) {
     const res = await api(`/api/exams/${id}/send`, { method: 'POST' });
     invalidateCache(`/api/exams/${id}`);
     const errList = (res.errors || []).map((e) => `${e.phone}: ${e.error}`).join(' | ');
-    toast(errList ? `Sent ${res.sent}, failed ${res.failed}. ${errList}` : `Sent to ${res.sent}, failed ${res.failed}.`);
+    const parts = [`Sent ${res.sent}`, `resumed ${res.resumed || 0}`, `failed ${res.failed}`];
+    toast(errList ? `${parts.join(', ')}. ${errList}` : parts.join(', ') + '.');
     renderExam(id);
   } catch (e) { toast(e.message, true); btn.disabled = false; btn.textContent = 'Send Exam to Recipients'; }
 }
@@ -1047,8 +1048,20 @@ async function renderMessages() {
     <div class="card table-card"><div class="skeleton skeleton-row" style="margin:10px"></div></div>`;
 
   const msgs = await api('/api/messages');
+  const events = await api('/api/webhook-events');
+  const webhookHealth = events.length
+    ? `<div class="webhook-ok" style="background:#052e16;border:1px solid #166534;border-radius:12px;padding:12px 16px;margin:0 0 14px;font-size:13px">
+        <strong>Webhook connected ✓</strong> — ${events.length} event(s) received${events[0]?.received_at ? `, last ${esc(events[0].received_at)}` : ''}. Student replies are reaching this server.
+      </div>`
+    : `<div class="webhook-warn" style="background:#3a1d0a;border:1px solid #92400e;border-radius:12px;padding:12px 16px;margin:0 0 14px;font-size:13px">
+        <strong>⚠️ No webhook events received.</strong> Meta has never delivered a message to this server, so student
+        replies cannot be processed and exams appear stuck. Verify the webhook URL in the Meta dashboard is
+        <code style="background:#0b1220;padding:2px 6px;border-radius:6px">${esc((window.API_BASE || window.location.origin))}/webhook/whatsapp</code>,
+        with the verify token from your <code style="background:#0b1220;padding:2px 6px;border-radius:6px">.env</code>, then send a test message to the bot.
+      </div>`;
   $view.innerHTML = `
     ${pageHead('envelope', 'DELI<span class="gr">VERY</span>', 'WhatsApp delivery status for outbound messages')}
+    ${webhookHealth}
     <div class="spread" style="margin-bottom:14px">
       <p class="sub" style="margin:0">${msgs.length} message(s) logged</p>
       ${msgs.length ? `<button class="btn btn-ghost" onclick="clearMessages()">Clear log</button>` : ''}

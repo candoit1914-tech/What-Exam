@@ -480,7 +480,7 @@ async function sendExamToRecipients(examId) {
       `SELECT s.* FROM exam_recipients r JOIN students s ON s.id = r.student_id WHERE r.exam_id = ?`
     )
     .all(examId);
-  const report = { sent: 0, failed: 0, skipped: 0, errors: [] };
+  const report = { sent: 0, failed: 0, skipped: 0, resumed: 0, errors: [] };
   const questionCount = db.prepare('SELECT COUNT(*) c FROM questions WHERE exam_id = ?').get(examId).c;
   const template = config.whatsapp.templateName;
 
@@ -504,9 +504,17 @@ async function sendExamToRecipients(examId) {
           session = restartSession(session);
           fresh = true;
         } else {
-          // Already actively on a question — do NOT re-deliver the current
-          // question (that caused "Q1 keeps repeating" on re-sends).
-          report.skipped++;
+          // Session is still running — the student is mid-exam. Do NOT restart
+          // or re-send the intro (that caused "Q1 keeps repeating"). Instead
+          // re-deliver the CURRENT question as a nudge so the student can
+          // continue; a silent skip made re-sends look like they "did nothing".
+          try {
+            await sendQuestionTo(session, student);
+            report.resumed++;
+          } catch (err) {
+            report.failed++;
+            report.errors.push({ phone: student.phone, error: friendlyError(err) });
+          }
           continue;
         }
       } else {

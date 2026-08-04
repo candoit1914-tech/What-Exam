@@ -25,6 +25,8 @@ async function chatJSON(messages, { temperature = 0.4, maxRetries = 2 } = {}) {
 
   let lastErr;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 60000);
     try {
       const res = await fetch(`${config.ai.baseUrl}/chat/completions`, {
         method: 'POST',
@@ -33,7 +35,9 @@ async function chatJSON(messages, { temperature = 0.4, maxRetries = 2 } = {}) {
           Authorization: `Bearer ${config.ai.apiKey}`,
         },
         body: JSON.stringify(body),
+        signal: controller.signal,
       });
+      clearTimeout(timer);
 
       if (!res.ok) {
         const text = await res.text().catch(() => '');
@@ -46,7 +50,11 @@ async function chatJSON(messages, { temperature = 0.4, maxRetries = 2 } = {}) {
 
       return parseJSON(content);
     } catch (err) {
+      clearTimeout(timer);
       lastErr = err;
+      // A hard timeout must surface (never retry) so an exam question never
+      // hangs the flow indefinitely waiting on an unresponsive AI endpoint.
+      if (err && err.name === 'AbortError') throw new AIError('AI request timed out after 60s.');
       if (err instanceof AIError && attempt < maxRetries) continue;
       throw err;
     }
