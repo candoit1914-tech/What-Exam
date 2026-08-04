@@ -494,6 +494,11 @@ router.get('/messages', (req, res) => {
   res.json(rows);
 });
 
+router.delete('/messages', (req, res) => {
+  db.prepare('DELETE FROM outbound_messages').run();
+  res.json({ ok: true, message: 'delivery log cleared' });
+});
+
 // ── Results / review ───────────────────────────────────────────────────
 
 router.get('/results', (req, res) => {
@@ -560,6 +565,12 @@ router.patch('/students/:id', (req, res) => {
   if (req.body.name !== undefined) {
     db.prepare('UPDATE students SET name = ? WHERE id = ?').run(String(req.body.name), req.params.id);
   }
+  res.json({ ok: true });
+});
+
+router.delete('/students/:id', (req, res) => {
+  const info = db.prepare('DELETE FROM students WHERE id = ?').run(req.params.id);
+  if (info.changes === 0) return res.status(404).json({ error: 'Student not found' });
   res.json({ ok: true });
 });
 

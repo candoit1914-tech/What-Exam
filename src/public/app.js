@@ -59,17 +59,6 @@ function badge(status) {
   return `<span class="badge ${esc(status)}">${esc(status)}</span>`;
 }
 
-function initials(name, phone) {
-  const n = String(name || '').trim();
-  if (n) return n.split(/\s+/).slice(0, 2).map((w) => w[0].toUpperCase()).join('');
-  return String(phone || '?').slice(-2).toUpperCase();
-}
-
-function stars(n) {
-  const c = Math.max(1, Math.min(5, n || 0));
-  return '★'.repeat(c) + '☆'.repeat(5 - c);
-}
-
 function setActiveNav() {
   const hash = (location.hash || '#/').replace(/^#/, '');
   const base = '/' + hash.split('/').filter(Boolean)[0];
@@ -280,22 +269,6 @@ function router() {
 
 window.addEventListener('hashchange', router);
 
-// ── Feature data ─────────────────────────────────────────────────
-const FEATURES = [
-  { icon: 'pen', title: 'Create Exams 3 Ways', text: 'Type questions by hand, extract them from a PDF, or let AI write the whole paper in seconds.', tag: 'Manual · PDF · AI' },
-  { icon: 'shield', title: 'Auto Marking Schemes', text: 'Every question ships with a model answer, key points, scoring rubric, and marks — editable before you publish.', tag: 'Editable before publish' },
-  { icon: 'wa', title: 'WhatsApp Delivery', text: 'Exams arrive in chat. Students answer in line, one question at a time, against a live timer.', tag: 'Official WhatsApp Cloud API' },
-  { icon: 'spark', title: 'AI Theory Marking', text: 'Open-ended answers scored on correctness, completeness, accuracy, relevance, keywords, and explanation.', tag: 'Never blocks the exam' },
-  { icon: 'chart', title: 'Instant Results', text: 'Score, percentage, pass or fail, plus a printable web report for every session — saved to the dashboard.', tag: 'Printable web report' },
-  { icon: 'radar', title: 'Live Monitoring', text: 'Track message deliveries, active sessions, and flagged answers from one command center.', tag: 'Real-time status' },
-];
-
-const STEPS = [
-  { num: '01', title: 'Create the paper', text: 'Build it manually, from a PDF, or with AI — the marking scheme is generated as you go.' },
-  { num: '02', title: 'Send to WhatsApp', text: 'Add recipients and launch. The first question lands in their chat instantly.' },
-  { num: '03', title: 'Watch it mark itself', text: 'AI scores every reply in seconds. Results and reports roll into your dashboard live.' },
-];
-
 // ── Overview / Landing ───────────────────────────────────────────
 async function renderDashboard() {
   $view.innerHTML = `
@@ -330,63 +303,9 @@ async function renderDashboard() {
         </div>
       </section>
 
-      <section class="section">
-        <div class="section-head reveal">
-          <h2>Everything an exam needs, <span class="grad">automated</span></h2>
-          <p>From paper to result — the bot does the heavy lifting, you stay in control.</p>
-        </div>
-        <div class="features-grid">
-          ${FEATURES.map((f, i) => `
-            <div class="feature-card reveal" style="--d:${i * 80}ms">
-              <div class="f-icon">${I[f.icon]}</div>
-              <h3>${f.title}</h3>
-              <p>${f.text}</p>
-              <span class="f-tag">${f.tag}</span>
-            </div>`).join('')}
-        </div>
+      <section class="section overview-simple reveal">
+        <p>Create exams by hand, from a PDF, or with AI — every question ships with an editable marking scheme. Exams land in WhatsApp and students answer one question at a time against a live timer, while AI scores objective and theory answers the moment they arrive. Results, printable reports, and live delivery activity roll into your dashboard in real time.</p>
       </section>
-
-      <section class="section">
-        <div class="section-head reveal">
-          <h2>From paper to results in <span class="grad">three steps</span></h2>
-        </div>
-        <div class="steps-grid">
-          ${STEPS.map((s, i) => `
-            <div class="step reveal" style="--d:${i * 90}ms">
-              <div class="step-num">${s.num}</div>
-              <h3>${s.title}</h3>
-              <p>${s.text}</p>
-            </div>`).join('')}
-        </div>
-      </section>
-
-      <div class="command-row">
-        <div class="panel reveal" style="--d:0ms">
-          <h3>TOP <span class="gr">STUDENTS</span></h3>
-          <div class="person"><div class="pava">—</div><div class="pinfo"><b>Loading…</b></div></div>
-          <div class="person"><div class="pava">—</div><div class="pinfo"><b>Loading…</b></div></div>
-        </div>
-        <div class="mini black reveal" style="--d:80ms">
-          <h3>LIVE <span class="gr">ACTIVITY</span></h3>
-          <div class="ring" style="--p:0%"><div class="ring-inner">0<span class="ring-label">active</span></div></div>
-          <p class="dim" style="text-align:center">…</p>
-        </div>
-      </div>
-      <div class="command-row" style="margin-top:16px">
-        <div class="browse reveal" style="--d:0ms">
-          <h3>BROWSE <span class="gr">BY SUBJECT</span></h3>
-          <p>See all exams, students, and delivery logs from the dashboard.</p>
-          <div class="avatars"></div>
-        </div>
-        <div class="panel reveal" style="--d:80ms">
-          <h3>QUICK <span class="gr">START</span></h3>
-          <div class="row" style="gap:10px">
-            <button class="btn btn-primary" onclick="createExam()">＋ New Exam</button>
-            <button class="btn btn-ghost" onclick="location.hash='#/students'">Students</button>
-            <button class="btn btn-ghost" onclick="location.hash='#/messages'">Delivery</button>
-          </div>
-        </div>
-      </div>
 
       <footer class="footer reveal">
         <div class="footer-brand"><img src="/icon.svg" alt=""> WHAT EXAM</div>
@@ -399,35 +318,10 @@ async function renderDashboard() {
       </footer>
     </div>`;
 
-  const [s, students] = await Promise.all([api('/api/stats'), api('/api/students')]);
-  const pct = s.sessions > 0 ? Math.round((s.active / s.sessions) * 100) : 0;
-  const top = [...students].sort((a, b) => (b.attempts || 0) - (a.attempts || 0)).slice(0, 3);
-  const topRows = top.length
-    ? top.map((p) => `
-        <div class="person">
-          <div class="pava">${esc(initials(p.name, p.phone))}</div>
-          <div class="pinfo"><b>${esc(p.name || p.phone)}</b><span>${esc(p.phone)} · ${p.attempts} attempt(s)</span></div>
-          <div class="stars">${stars(p.attempts)}</div>
-        </div>`).join('')
-    : '<p class="dim" style="padding:8px">No students yet. Send an exam to get started.</p>';
-  const avs = students.slice(0, 5).map((p) => `<span>${esc(initials(p.name, p.phone))}</span>`).join('') || '<span>LA</span><span>EX</span><span>AM</span>';
-
-  const panel = document.querySelector('.command-row .panel');
-  if (panel) panel.innerHTML = `<h3>TOP <span class="gr">STUDENTS</span></h3>${topRows}`;
-
-  const ring = document.querySelector('.ring');
-  if (ring) {
-    ring.style.setProperty('--p', pct + '%');
-    ring.querySelector('.ring-inner').innerHTML = `${s.active}<span class="ring-label">active</span>`;
-  }
-  const dim = document.querySelector('.mini.black .dim');
-  if (dim) dim.textContent = `${pct}% of attempts in progress`;
-
-  const avatarsEl = document.querySelector('.browse .avatars');
-  if (avatarsEl) avatarsEl.innerHTML = avs;
+  const s = await api('/api/stats');
 
   document.querySelectorAll('.stat-chip b[data-count]').forEach((el) => {
-    const val = { exams: s.exams, published: s.published, questions: s.questions, students: s.students }[el.parentElement.querySelector('span').textContent.toLowerCase()] ?? 0;
+    const val = { exams: s.exams, live: s.published, questions: s.questions, students: s.students }[el.parentElement.querySelector('span').textContent.toLowerCase()] ?? 0;
     el.dataset.count = val;
     animateCountUp(el, val);
   });
@@ -1120,7 +1014,7 @@ async function renderStudents() {
             <td>${s.exams}</td>
             <td>${s.attempts}</td>
             <td class="muted">${s.created_at}</td>
-            <td><button class="small ghost" onclick="renameStudent(${s.id})">Rename</button></td>
+            <td><button class="small ghost" onclick="renameStudent(${s.id})">Rename</button> <button class="small ghost danger" onclick="deleteStudent(${s.id}, this)">Delete</button></td>
           </tr>`).join('')}
         </tbody>
       </table>
@@ -1136,6 +1030,15 @@ async function renameStudent(id) {
   renderStudents();
 }
 
+async function deleteStudent(id, btn) {
+  const name = btn.closest('tr').children[0].textContent.trim();
+  if (!confirm(`Delete ${name || 'this student'}? This permanently removes their exam sessions and answers.`)) return;
+  await api(`/api/students/${id}`, { method: 'DELETE' });
+  invalidateCache('/api/students');
+  toast('Student deleted');
+  renderStudents();
+}
+
 // ── Messages (WhatsApp delivery log) ─────────────────────────────
 
 async function renderMessages() {
@@ -1146,6 +1049,10 @@ async function renderMessages() {
   const msgs = await api('/api/messages');
   $view.innerHTML = `
     ${pageHead('envelope', 'DELI<span class="gr">VERY</span>', 'WhatsApp delivery status for outbound messages')}
+    <div class="spread" style="margin-bottom:14px">
+      <p class="sub" style="margin:0">${msgs.length} message(s) logged</p>
+      ${msgs.length ? `<button class="btn btn-ghost" onclick="clearMessages()">Clear log</button>` : ''}
+    </div>
     <div class="card table-card reveal">
       <table>
         <thead><tr><th>Recipient</th><th>Type</th><th>Status</th><th>Message ID</th><th>Sent</th><th>Updated</th></tr></thead>
@@ -1163,6 +1070,13 @@ async function renderMessages() {
       </table>
     </div>`;
   observeReveals();
+}
+
+async function clearMessages() {
+  if (!confirm('Clear the delivery log?')) return;
+  await api('/api/messages', { method: 'DELETE' });
+  toast('Delivery log cleared');
+  renderMessages();
 }
 
 // ── Micro-interactions ───────────────────────────────────────────

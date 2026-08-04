@@ -726,6 +726,14 @@ button.danger, .btn.danger { color: var(--red); }
 
 /* ── Sections ────────────────────────────────────────────── */
 .section { margin-top: 64px; }
+.overview-simple p {
+  color: var(--text-secondary);
+  font-size: 16px;
+  line-height: 1.75;
+  max-width: 720px;
+  margin: 0 auto;
+  text-align: center;
+}
 .section-head { text-align: center; margin-bottom: 36px; }
 .section-head h2 {
   font-family: var(--display);
