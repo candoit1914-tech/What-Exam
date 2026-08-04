@@ -82,7 +82,7 @@ const DEMO_EXAM = {
       },
     },
   ],
-  recipient_phones: ['233269200946'],
+  recipient_phones: ['233558126390'],
 };
 
 function seedIfEmpty(db) {

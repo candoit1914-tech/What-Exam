@@ -216,13 +216,15 @@ if (require.main === module) {
   const run = async () => {
     const db = require('./db');
     const { seedIfEmpty } = require('../scripts/seed-exam');
-    try {
-      const s = seedIfEmpty(db);
-      if (s.seeded) {
-        console.log(`[seed] DB was empty — seeded exam "${s.title}" (id ${s.examId}, status ${s.status})`);
+    if (config.seedOnBoot) {
+      try {
+        const s = seedIfEmpty(db);
+        if (s.seeded) {
+          console.log(`[seed] DB was empty — seeded exam "${s.title}" (id ${s.examId}, status ${s.status})`);
+        }
+      } catch (e) {
+        console.error('[seed] failed:', e.message);
       }
-    } catch (e) {
-      console.error('[seed] failed:', e.message);
     }
     if (process.argv.includes('--init')) {
       console.log('Database initialised at', config.dbPath);

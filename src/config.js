@@ -44,6 +44,8 @@ const config = {
     sendAnswerKey: process.env.SEND_ANSWER_KEY !== 'false',
     allowResendResults: process.env.ALLOW_RESEND_RESULTS !== 'false',
   },
+
+  seedOnBoot: process.env.SEED_ON_BOOT !== 'false',
 };
 
 module.exports = config;
