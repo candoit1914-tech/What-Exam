@@ -1,0 +1,14 @@
+{
+  "version": 2,
+  "builds": [
+    {
+      "src": "src/public/**",
+      "use": "@vercel/static"
+    }
+  ],
+  "outputDirectory": "src/public",
+  "routes": [
+    { "src": "/config\\.js", "dest": "/config.js" },
+    { "src": "/(.*)", "dest": "/$1" }
+  ]
+}
