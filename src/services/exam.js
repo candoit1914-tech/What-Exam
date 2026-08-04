@@ -68,22 +68,34 @@ const START_WORDS = new Set([
   'test',
 ]);
 
+/** Render the A–D options as a decorated, button-like bubble card. */
+function formatOptionsBox(options) {
+  const inner = options
+    .map((o) => `┃  ${o.key} · ${o.text}`)
+    .join('\n');
+  return (
+    `╭──────────────────────────────╮\n` +
+    inner + '\n' +
+    `╰──────────────────────────────╯`
+  );
+}
+
 function formatQuestion(exam, question, qCount) {
   const subject = exam.subject ? `📚 Subject: *${exam.subject}*\n` : '';
   const marks = question.marks === 1 ? '1 mark' : `${question.marks} marks`;
   const header =
     `🧠 *${exam.title.toUpperCase()}*\n` +
     subject +
-    `✍️ Question ${question.q_order} of ${qCount}  |  *${marks}*\n` +
+    `✍️ *Question ${question.q_order} of ${qCount}* · ${marks}\n` +
     `━━━━━━━━━━━━━━━━━━━━━━\n`;
 
   if (question.type === 'objective') {
     const options = JSON.parse(question.options || '[]');
-    const body = options.map((o) => `🟢 ${o.key}. ${o.text}`).join('\n');
+    const letters = options.map((o) => o.key).join(', ');
     return (
       `${header}${question.text}\n\n` +
-      `*Your options:*\n${body}\n\n` +
-      `*Tap* ⬇️ *"Choose answer"* below, or type the letter (${options.map((o) => o.key).join(', ')}).`
+      formatOptionsBox(options) + '\n\n' +
+      `Tap the *answer bubble* ⬇️ below, or type a letter (${letters}).`
     );
   }
   return `${header}${question.text}\n\n*Type your full answer as a single message.*`;
@@ -153,24 +165,28 @@ async function sendQuestionTo(session, student) {
   if (question.type === 'objective') {
     const options = (JSON.parse(question.options || '[]') || []).slice(0, 10);
     try {
-      const rows = options.map((o) => ({
-        id: String(o.key),
-        title: String(o.text).slice(0, 24) || o.key,
-      }));
-      await wa.sendInteractiveList(
-        student.phone,
-        `Question ${question.q_order}`,
-        `${exam.title} — Q${question.q_order} (${question.marks} mark${question.marks === 1 ? '' : 's'})\nTap an option to submit your answer.`,
-        'Choose answer',
-        rows
-      );
+      await wa.sendAnswerButtons(student.phone, `Question ${question.q_order}`, options);
     } catch (err) {
-      // Interactive pickers are optional — the text card above already lists
-      // the options, so fall back to typed letters rather than losing the question.
+      // Bubble buttons are the primary picker. Fall back to an interactive
+      // list, then to typed letters, so the question is never lost.
       console.error(`[exam] interactive picker failed for Q${question.q_order}:`, err.message);
-      await wa
-        .sendText(student.phone, `Reply with the letter of your answer (${options.map((o) => o.key).join(', ')}).`)
-        .catch(() => {});
+      try {
+        const rows = options.map((o) => ({
+          id: String(o.key),
+          title: String(o.text).slice(0, 24) || o.key,
+        }));
+        await wa.sendInteractiveList(
+          student.phone,
+          `Question ${question.q_order}`,
+          `${exam.title} — Q${question.q_order} (${question.marks} mark${question.marks === 1 ? '' : 's'})\nTap an option to submit your answer.`,
+          'Choose answer',
+          rows
+        );
+      } catch (err2) {
+        await wa
+          .sendText(student.phone, `Reply with the letter of your answer (${options.map((o) => o.key).join(', ')}).`)
+          .catch(() => {});
+      }
     }
   }
   return true;

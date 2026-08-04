@@ -23,6 +23,10 @@ wa.sendInteractiveList = async (to, title, body, buttonText, rows) => {
   sent.push({ to, kind: 'list', rows });
   return { messages: [{ id: 'stub' }] };
 };
+wa.sendAnswerButtons = async (to, header, options) => {
+  sent.push({ to, kind: 'button', options });
+  return { messages: [{ id: 'stub' }] };
+};
 wa.sendTemplate = async () => {
   sent.push({ to: 'template', kind: 'template' });
   return { messages: [{ id: 'stub' }] };
@@ -70,12 +74,14 @@ async function main() {
   console.log('send report:', JSON.stringify(report));
 
   const textMsgs = sent.filter((s) => s.kind === 'text');
-  console.log(`\n--- first wave: ${sent.length} msgs (${textMsgs.length} text, ${sent.length - textMsgs.length} list)`);
+  console.log(`\n--- first wave: ${sent.length} msgs (${textMsgs.length} text, ${sent.length - textMsgs.length} button)`);
   console.log('--- INTRO ---\n' + textMsgs[0].text);
   console.log('\n--- Q1 CARD ---\n' + textMsgs[1].text);
-  const list = sent.find((s) => s.kind === 'list');
-  console.log('\n--- Q1 PICKER rows ---');
-  console.log(list.rows.map((r) => `  ${r.id}: ${r.title}`).join('\n'));
+  const buttonMsgs = sent.filter((s) => s.kind === 'button');
+  console.log(`\n--- Q1 PICKER (${buttonMsgs.length} button bubble(s)) ---`);
+  buttonMsgs.forEach((m, i) =>
+    console.log(`  bubble ${i + 1}: ${m.options.map((r) => `${r.key} · ${r.text}`).join(' | ')}`)
+  );
 
   // 2. Greeting must NOT be counted as an answer
   sent.length = 0;
@@ -104,7 +110,7 @@ async function main() {
     const body = p.input.body || '';
     const meta = p.input.replyId ? { replyId: p.input.replyId } : {};
     const r = await examService.handleInbound(phone, body, meta);
-    const kinds = sent.map((m) => (m.kind === 'text' ? 'text' : `list[${m.rows.map((x) => x.id).join(',')}]`));
+    const kinds = sent.map((m) => (m.kind === 'text' ? 'text' : `button[${m.options.map((x) => x.key).join(',')}]`));
     const lastText = sent.filter((s) => s.kind === 'text').map((s) => s.text.replace(/\n/g, ' | ')).join(' /// ');
     const q = db.prepare('SELECT current_q_order FROM sessions WHERE id = ?').get(sessionId).current_q_order;
     console.log(`Q${i + 1} ${p.note.padEnd(20)} -> ${r.reason.padEnd(8)} now on Q${q}  [${kinds.join(', ')}]  ${lastText.slice(0, 90)}`);
@@ -126,7 +132,7 @@ async function main() {
   sent.length = 0;
   const after = await examService.handleInbound(phone, 'hello', {});
   console.log('\n--- message after completion ->', after.reason);
-  console.log('sent:', sent.map((s) => (s.kind === 'text' ? s.text.replace(/\n/g, ' | ').slice(0, 80) : 'list')).join(' /// '));
+  console.log('sent:', sent.map((s) => (s.kind === 'text' ? s.text.replace(/\n/g, ' | ').slice(0, 80) : s.kind)).join(' /// '));
 
   // 5. Admin re-send after expiry should restart
   db.prepare(`UPDATE sessions SET status='expired', ended_at=datetime('now'), current_q_order=1 WHERE id=?`).run(sessionId);
