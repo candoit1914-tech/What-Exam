@@ -169,14 +169,14 @@ function initHeroScene() {
   chat.dataset.scene = 'on';
   if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
     chat.innerHTML = `
-      <div class="wapp-bubble out"><span class="b-label">QUESTION 1 · OBJECTIVE</span>What is the capital of Ghana?<span class="b-opt hi" data-key="A">Accra</span><span class="b-opt" data-key="B">Kumasi</span><span class="b-opt" data-key="C">Cape Coast</span><span class="b-opt" data-key="D">Tamale</span><span class="b-picker">Choose answer ▾</span></div>
+      <div class="wapp-bubble out"><span class="b-label">QUESTION 1 · OBJECTIVE</span>What is the capital of Ghana?<div class="b-opts"><b>A.</b> Accra<br><b>B.</b> Kumasi<br><b>C.</b> Cape Coast<br><b>D.</b> Tamale</div><div class="b-hint">Reply with the letter of your answer.</div></div>
       <div class="wapp-bubble in">A<span class="wapp-ticks">✔✔</span></div>
       <div class="wapp-bubble out"><span class="b-label">AI MARKING</span>✓ Correct — <b>+1 mark</b></div>`;
     return;
   }
 
   const script = [
-    { type: 'bubble', cls: 'out', wait: 500, html: '<span class="b-label">QUESTION 1 · OBJECTIVE</span>What is the capital of Ghana?<span class="b-opt hi" data-key="A">Accra</span><span class="b-opt" data-key="B">Kumasi</span><span class="b-opt" data-key="C">Cape Coast</span><span class="b-opt" data-key="D">Tamale</span><span class="b-tap">Tap an answer bubble</span><span class="b-picker">Choose answer ▾</span>' },
+    { type: 'bubble', cls: 'out', wait: 500, html: '<span class="b-label">QUESTION 1 · OBJECTIVE</span>What is the capital of Ghana?<div class="b-opts"><b>A.</b> Accra<br><b>B.</b> Kumasi<br><b>C.</b> Cape Coast<br><b>D.</b> Tamale</div><div class="b-hint">Reply with the letter of your answer.</div>' },
     { type: 'typing', wait: 950 },
     { type: 'bubble', cls: 'in', wait: 750, html: 'A<span class="wapp-ticks">✔✔</span>' },
     { type: 'bubble', cls: 'out', wait: 1600, html: '<span class="b-label">AI MARKING</span>✓ Correct — <b>+1 mark</b>' },

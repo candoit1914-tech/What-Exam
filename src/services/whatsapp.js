@@ -60,49 +60,6 @@ async function sendInteractiveButtons(to, text, buttons) {
   return data;
 }
 
-// WhatsApp allows at most 3 reply buttons per interactive message, so a
-// 4-option MCQ is split into two balanced bubbles (A·B, then C·D).
-function chunkButtons(options) {
-  if (options.length === 4) return [options.slice(0, 2), options.slice(2)];
-  const chunks = [];
-  for (let i = 0; i < options.length; i += 3) chunks.push(options.slice(i, i + 3));
-  return chunks;
-}
-
-/**
- * Present an objective question's options as real WhatsApp bubble buttons.
- * Each option renders as a rounded, tappable reply chip inside the chat —
- * the native WhatsApp look for a pressable multiple-choice answer.
- * options: [{ key: 'A', text: 'Accra' }]. Button ids are the option keys so
- * the webhook resolves a tap straight to a letter (A, B, C, D).
- */
-async function sendAnswerButtons(to, header, options) {
-  const chunks = chunkButtons(options);
-  let last;
-  for (const chunk of chunks) {
-    const buttons = chunk.map((o) => ({
-      type: 'reply',
-      reply: {
-        id: String(o.key),
-        title: (o.text ? `${o.key} · ${o.text}` : String(o.key)).slice(0, 20),
-      },
-    }));
-    last = await api('messages', {
-      messaging_product: 'whatsapp',
-      to,
-      type: 'interactive',
-      interactive: {
-        type: 'button',
-        header: header ? { type: 'text', text: String(header).slice(0, 60) } : undefined,
-        body: { text: 'Tap your answer. ✓' },
-        action: { buttons },
-      },
-    });
-    logOutbound(to, last?.messages?.[0]?.id, 'interactive');
-  }
-  return last;
-}
-
 /**
  * Interactive list message — renders tappable rows (A–D) for choosing an
  * answer. Each row: { id: 'A', title: 'Mitochondria' } (title max 24 chars).
@@ -183,7 +140,6 @@ module.exports = {
   sendText,
   sendInteractiveButtons,
   sendInteractiveList,
-  sendAnswerButtons,
   sendTemplate,
   parseWebhook,
 };

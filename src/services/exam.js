@@ -68,18 +68,6 @@ const START_WORDS = new Set([
   'test',
 ]);
 
-/** Render the A–D options as a decorated, button-like bubble card. */
-function formatOptionsBox(options) {
-  const inner = options
-    .map((o) => `┃  ${o.key} · ${o.text}`)
-    .join('\n');
-  return (
-    `╭──────────────────────────────╮\n` +
-    inner + '\n' +
-    `╰──────────────────────────────╯`
-  );
-}
-
 function formatQuestion(exam, question, qCount) {
   const subject = exam.subject ? `📚 Subject: *${exam.subject}*\n` : '';
   const marks = question.marks === 1 ? '1 mark' : `${question.marks} marks`;
@@ -92,10 +80,11 @@ function formatQuestion(exam, question, qCount) {
   if (question.type === 'objective') {
     const options = JSON.parse(question.options || '[]');
     const letters = options.map((o) => o.key).join(', ');
+    const body = options.map((o) => `   ${o.key}. ${o.text}`).join('\n');
     return (
       `${header}${question.text}\n\n` +
-      formatOptionsBox(options) + '\n\n' +
-      `Tap the *answer bubble* ⬇️ below, or type a letter (${letters}).`
+      `*Your options:*\n${body}\n\n` +
+      `Reply with the letter of your answer (${letters}).`
     );
   }
   return `${header}${question.text}\n\n*Type your full answer as a single message.*`;
@@ -108,7 +97,7 @@ function formatExamIntro(exam, questionCount) {
     `⏱️ Duration: *${exam.duration_minutes} minute${exam.duration_minutes === 1 ? '' : 's'}*\n` +
     `✍️ Questions: *${questionCount}*\n` +
     `🎯 Pass mark: *${exam.pass_percentage}%*\n\n` +
-    `Tap an option to answer each question as it arrives. Answers are locked once selected. Your timer starts now. Good luck! 🍀`
+    `Reply with the letter of your answer to each question as it arrives (e.g. *A*). Answers are locked once sent. Your timer starts now. Good luck! 🍀`
   );
 }
 
@@ -161,34 +150,6 @@ async function sendQuestionTo(session, student) {
   }
   const text = formatQuestion(exam, question, count);
   await wa.sendText(student.phone, text);
-
-  if (question.type === 'objective') {
-    const options = (JSON.parse(question.options || '[]') || []).slice(0, 10);
-    try {
-      await wa.sendAnswerButtons(student.phone, `Question ${question.q_order}`, options);
-    } catch (err) {
-      // Bubble buttons are the primary picker. Fall back to an interactive
-      // list, then to typed letters, so the question is never lost.
-      console.error(`[exam] interactive picker failed for Q${question.q_order}:`, err.message);
-      try {
-        const rows = options.map((o) => ({
-          id: String(o.key),
-          title: String(o.text).slice(0, 24) || o.key,
-        }));
-        await wa.sendInteractiveList(
-          student.phone,
-          `Question ${question.q_order}`,
-          `${exam.title} — Q${question.q_order} (${question.marks} mark${question.marks === 1 ? '' : 's'})\nTap an option to submit your answer.`,
-          'Choose answer',
-          rows
-        );
-      } catch (err2) {
-        await wa
-          .sendText(student.phone, `Reply with the letter of your answer (${options.map((o) => o.key).join(', ')}).`)
-          .catch(() => {});
-      }
-    }
-  }
   return true;
 }
 
@@ -292,7 +253,7 @@ async function processAnswer(session, student, body, meta = {}) {
     if (!resolveObjectiveLetter(question, body, meta) && START_WORDS.has(trimmed)) {
       await wa.sendText(
         student.phone,
-        '🚀 Let\u2019s go! Read the question and tap an option below, or type the letter (A, B, C or D).'
+        '🚀 Let\u2019s go! Read the question and type the letter of your answer (A, B, C or D).'
       );
       await sendQuestionTo(session, student);
       return;
@@ -345,7 +306,7 @@ async function handleAnswer(exam, session, student, question, body, meta = {}) {
     if (!letter) {
       await wa.sendText(
         student.phone,
-        '⚠️ That doesn\u2019t look like an answer.\n\nTap ⬇️ *"Choose answer"* and pick an option, or type the letter of your answer (e.g. *A*).'
+        '⚠️ That doesn\u2019t look like an answer.\n\nType the letter of your answer (e.g. *A*).'
       );
       return false;
     }
