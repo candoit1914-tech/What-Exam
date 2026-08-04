@@ -444,7 +444,12 @@ async function sendExamToRecipients(examId) {
         if (template) {
           const params = config.whatsapp.templateParams.length
             ? config.whatsapp.templateParams.map((p) => ({ type: 'text', text: p }))
-            : [{ type: 'text', text: exam.title }];
+            : [
+                { type: 'text', text: exam.title },
+                { type: 'text', text: exam.subject || 'General' },
+                { type: 'text', text: String(exam.duration_minutes) },
+                { type: 'text', text: String(questionCount) },
+              ];
           await wa.sendTemplate(student.phone, template, config.whatsapp.templateLanguage, params);
         } else {
           await wa.sendText(student.phone, formatExamIntro(exam, questionCount));
