@@ -1,14 +1,6 @@
 {
-  "version": 2,
-  "builds": [
-    {
-      "src": "src/public/**",
-      "use": "@vercel/static"
-    }
-  ],
-  "outputDirectory": "src/public",
-  "routes": [
-    { "src": "/config\\.js", "dest": "/config.js" },
-    { "src": "/(.*)", "dest": "/$1" }
-  ]
+  "buildCommand": "node scripts/vercel-build.js",
+  "outputDirectory": "dist",
+  "framework": null,
+  "installCommand": "npm install --omit=dev"
 }
