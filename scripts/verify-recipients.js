@@ -17,6 +17,7 @@ const config = require('../src/config');
 const examService = require('../src/services/exam');
 const marking = require('../src/services/marking');
 const wa = require('../src/services/whatsapp');
+const certificate = require('../src/services/certificate');
 const sharp = require('sharp');
 
 const sent = [];
@@ -117,6 +118,7 @@ async function main() {
     const msgs = msgsTo(p);
     check(msgs.length >= 3, `${p} received intro + Q1 + options (${msgs.length} msgs)`);
     check(msgs[0].includes('*END OF TERM INTEGRATED SCIENCE*'), `${p} intro has bold uppercase title`);
+    check(msgs[0].includes('START'), `${p} intro has first-touch START hint`);
     check(msgs[1].startsWith('Question 1\n'), `${p} got Question 1`);
     check(msgs[2].includes('A. Kumasi'), `${p} got Q1 options`);
   }
@@ -138,6 +140,8 @@ async function main() {
   check(ans1 === 3, `student1 has all 3 answers recorded (${ans1})`);
   check(finalMsgs.includes('%'), `student1 got a result message`);
   await checkCertificate(phones[0], 'student1 (PASS)');
+  const certSvg = certificate.buildCertificateSvg({ studentName: 'Kofi', examTitle: 'T', score: 5, totalMarks: 10, percentage: 50, passed: true });
+  check(certSvg.includes('id="signature"'), `certificate SVG includes auto-generated signature`);
 
   // ── Scenario C: AI failure/timing-out on theory must NOT freeze ────────
   marking.markTheoryAnswer = async () => {

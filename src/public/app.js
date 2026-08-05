@@ -303,8 +303,32 @@ async function renderDashboard() {
         </div>
       </section>
 
-      <section class="section overview-simple reveal">
-        <p>Create exams by hand, from a PDF, or with AI — every question ships with an editable marking scheme. Exams land in WhatsApp and students answer one question at a time against a live timer, while AI scores objective and theory answers the moment they arrive. Results, printable reports, and live delivery activity roll into your dashboard in real time.</p>
+      <section class="section reveal">
+        <div class="section-head">
+          <div class="eyebrow"><span class="dot"></span>How it works</div>
+          <h2>PAPER IN. <span class="grad">GRADED</span> OUT.</h2>
+          <p>Results, printable reports, and live delivery activity roll into your dashboard in real time.</p>
+        </div>
+        <div class="features-grid">
+          <div class="feature-card reveal" style="--d:0ms">
+            <div class="f-icon">${I.pen}</div>
+            <h3>Create it your way</h3>
+            <p>Draft by hand, import a PDF, or let AI build the paper — every question ships with an editable marking scheme.</p>
+            <span class="f-tag">Hand · PDF · AI</span>
+          </div>
+          <div class="feature-card reveal" style="--d:100ms">
+            <div class="f-icon">${I.wa}</div>
+            <h3>Delivered in WhatsApp</h3>
+            <p>Exams land in the class chat and flow one question at a time against a live timer. Answers lock the moment they send.</p>
+            <span class="f-tag">One question · one answer</span>
+          </div>
+          <div class="feature-card reveal" style="--d:200ms">
+            <div class="f-icon">${I.spark}</div>
+            <h3>Marked as it lands</h3>
+            <p>AI scores objective and theory answers the moment they arrive — no waiting, no piles of scripts.</p>
+            <span class="f-tag">Instant AI marking</span>
+          </div>
+        </div>
       </section>
 
       <footer class="footer reveal">

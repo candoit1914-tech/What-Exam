@@ -135,6 +135,7 @@ function formatExamIntro(exam, questionCount) {
     `Duration: *${exam.duration_minutes} minute${exam.duration_minutes === 1 ? '' : 's'}*\n` +
     `Number of questions: *${questionCount}*\n` +
     `Pass mark: *${exam.pass_percentage}%*\n\n` +
+    `👋 *New to the bot?* Reply *START* to this chat to open it — your exam begins instantly.\n\n` +
     `*INSTRUCTIONS*\n${instructions}`
   );
 }
