@@ -1227,6 +1227,8 @@ async function renderMessages() {
 async function clearMessages() {
   if (!confirm('Clear the delivery log?')) return;
   await api('/api/messages', { method: 'DELETE' });
+  invalidateCache('/api/messages');
+  invalidateCache('/api/webhook-events');
   toast('Delivery log cleared');
   renderMessages();
 }

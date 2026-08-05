@@ -108,7 +108,7 @@ async function mapLimit(items, limit, fn) {
  * the round trip to the AI endpoint, so parallelizing collapses the wall-clock
  * time from "sum of all batches" to "one slowest batch × few rounds".
  */
-async function generateQuestions({ subject, topics, count, types, difficulty, instructions, poolSize }) {
+async function generateQuestions({ subject, topics, count, types, difficulty, instructions, poolSize, avoid = [] }) {
   const typeList = Array.isArray(types) && types.length ? types : ['objective', 'theory'];
   const hasTheory = typeList.includes('theory');
   const objectiveCount = Math.max(1, Math.round(count / typeList.length));
@@ -123,6 +123,28 @@ async function generateQuestions({ subject, topics, count, types, difficulty, in
   const ratio = count > 0 ? batchSize / count : 1;
   const perBatchObjective = hasTheory ? Math.max(1, Math.round(objectiveCount * ratio)) : batchSize;
   const perBatchTheory = hasTheory ? Math.max(0, batchSize - perBatchObjective) : 0;
+
+  const NOVELTY_RULE =
+    'NOVELTY (non-negotiable): every question must be ORIGINAL and UNPREDICTABLE.\n' +
+    '- A student who reads only the subject and topic list must NOT be able to guess these questions.\n' +
+    '- Do NOT use classic textbook questions, well-known past-exam questions, or anything a student could have seen in another AI-generated exam.\n' +
+    '- Approach every topic from a fresh angle: invent a believable context, scenario, dataset, or situation, then ask a question about it.\n' +
+    '- Never reuse the same facts, figures, names, examples, or scenarios across questions or across batches.\n' +
+    '- Vary stems and framing so no two questions feel alike.';
+
+  const SPINS = [
+    'Frame every question as a concrete real-world situation (a farmer, shopkeeper, school science club, health worker, community, market, lab) with a specific detail the student must reason about. No abstract, definition-style, or fill-in-the-blank stems.',
+    'Make every question an application or analysis task: present a short scenario, measurement, or data snippet and ask the student to apply the concept. Never ask for a memorised definition, list, or label.',
+    'Use fresh, believable but uncommon contexts and numbers. Rotate the setting so no two questions share a setting, and avoid familiar examples and standard figures.',
+    'Ask from a decision or problem-solving angle: each question presents a mini-case and asks what happens, why, or what should be done, with exam-appropriate clarity for a JHS candidate.',
+  ];
+  const spin = SPINS[Math.floor(Math.random() * SPINS.length)];
+
+  const avoidBlock =
+    avoid && avoid.length
+      ? 'ABSOLUTELY DO NOT generate, reuse, or closely paraphrase any of these existing questions:\n' +
+        avoid.map((t, i) => `${i + 1}. ${String(t).slice(0, 140)}`).join('\n')
+      : '';
 
   const system = (objN, theoN, variety) => SYSTEM_BASE + `
 Return an object: {"questions": [...]}. Every question is a JSON object.
@@ -160,7 +182,10 @@ Rules:
 - Theory rubric points must sum to (marks - presentation_marks - grammar_marks) or less; total scoring adds up to exactly marks where sensible.
 - Difficulty overall: ${difficulty || 'mixed'}.
 - Style: write like the Ghana Basic Education Certificate Examination (BECE) for a Junior High School (JHS) candidate. Use clear, age-appropriate English and concise stems. Each objective question has exactly four options (A-D) with ONE clearly correct answer and three plausible distractors. No trick wording, no ambiguity, no questions that depend on a textbook not available to the student. Theory questions may use sub-parts (a), (b), (c) where natural.
-${variety || ''}`;
+${NOVELTY_RULE}
+${spin}
+${variety || ''}
+${avoidBlock}`;
 
   const user = (batchTotal) =>
     [
@@ -180,10 +205,13 @@ ${variety || ''}`;
   // Build lazy tasks so mapLimit actually throttles them; eager promises would
   // fire every call at once and defeat the concurrency cap.
   const tasks = Array.from({ length: maxCalls }, () => () =>
-    chatJSON([
-      { role: 'system', content: system(perBatchObjective, perBatchTheory, variety) },
-      { role: 'user', content: user(batchSize) },
-    ])
+    chatJSON(
+      [
+        { role: 'system', content: system(perBatchObjective, perBatchTheory, variety) },
+        { role: 'user', content: user(batchSize) },
+      ],
+      { temperature: 0.9 }
+    )
   );
   const settled = await mapLimit(tasks, 4, (run) => run());
 
@@ -199,7 +227,30 @@ ${variety || ''}`;
       }
     }
   }
-  return all.slice(0, target);
+
+  // The first `count` questions form the main set; every extra pool question
+  // must be genuinely distinct from them (and from its siblings), so an
+  // attempt can never show a question that paraphrases one already in the exam.
+  // Threshold is deliberately high (0.8) so only clear paraphrases are dropped —
+  // two different questions on the same topic still share vocabulary.
+  const active = all.slice(0, count);
+  const rest = [];
+  for (const q of all.slice(count)) {
+    const dupActive = active.some((a) => textSimilarity(a.text, q.text) > 0.8);
+    const dupRest = rest.some((p) => textSimilarity(p.text, q.text) > 0.8);
+    if (!dupActive && !dupRest) rest.push(q);
+  }
+  return active.concat(rest).slice(0, target);
+}
+
+/** Jaccard similarity over significant tokens; used to drop near-duplicate stems. */
+function textSimilarity(a, b) {
+  const ta = new Set(String(a).toLowerCase().split(/[^a-z0-9]+/).filter((t) => t.length > 2));
+  const tb = new Set(String(b).toLowerCase().split(/[^a-z0-9]+/).filter((t) => t.length > 2));
+  if (!ta.size || !tb.size) return 0;
+  let inter = 0;
+  for (const t of ta) if (tb.has(t)) inter++;
+  return inter / (ta.size + tb.size - inter);
 }
 
 /**

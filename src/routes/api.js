@@ -380,6 +380,10 @@ router.post('/exams/:id/generate', asyncWrap(async (req, res) => {
   const { subject, topics, count, types, difficulty, instructions, pool, poolMultiplier } = req.body;
   const n = Math.min(Math.max(parseInt(count) || 10, 1), 50);
   const multiplier = pool ? Math.min(Math.max(parseInt(poolMultiplier) || 3, 2), 7) : 1;
+  const existing = db
+    .prepare('SELECT text FROM questions WHERE exam_id = ? ORDER BY q_order LIMIT 20')
+    .all(exam.id)
+    .map((r) => r.text);
   const generated = await ai.generateQuestions({
     subject: subject || exam.subject || exam.title,
     topics,
@@ -388,6 +392,7 @@ router.post('/exams/:id/generate', asyncWrap(async (req, res) => {
     types: Array.isArray(types) ? types : ['objective', 'theory'],
     difficulty,
     instructions,
+    avoid: existing,
   });
 
   const active = generated.slice(0, n);
