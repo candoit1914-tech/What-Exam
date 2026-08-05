@@ -160,6 +160,8 @@ const I = {
   layers: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l10 5-10 5L2 7l10-5z"/><path d="M2 12l10 5 10-5"/></svg>',
   shield: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l8 3v6c0 5-3.5 9-8 11-4.5-2-8-6-8-11V5l8-3z"/><path d="M9 12l2 2 4-4"/></svg>',
   menu: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="5" cy="12" r="1.6" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none"/><circle cx="19" cy="12" r="1.6" fill="currentColor" stroke="none"/></svg>',
+  back: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 5l-7 7 7 7"/></svg>',
+  search: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>',
 };
 
 // ── Loading skeletons ────────────────────────────────────────────
@@ -232,6 +234,7 @@ function initHeroScene() {
   chat.dataset.scene = 'on';
   if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
     chat.innerHTML = `
+      <div class="wapp-date">TODAY</div>
       <div class="wapp-bubble out"><span class="b-label">QUESTION 1 · OBJECTIVE</span>What is the capital of Ghana?<span class="b-time">09:42</span></div>
       <div class="wapp-bubble out"><span class="b-label">ANSWER OPTIONS</span><div class="b-opts"><b>A.</b> Accra<br><b>B.</b> Kumasi<br><b>C.</b> Cape Coast<br><b>D.</b> Tamale</div><div class="b-hint">Time remaining: 09:45</div></div>
       <div class="wapp-bubble in">A<span class="b-time">09:43<span class="wapp-ticks">✔✔</span></span></div>
@@ -240,7 +243,8 @@ function initHeroScene() {
   }
 
   const script = [
-    { type: 'bubble', cls: 'out', wait: 500, html: '<span class="b-label">QUESTION 1 · OBJECTIVE</span>What is the capital of Ghana?<span class="b-time">09:42</span>' },
+    { type: 'date', wait: 400, html: 'TODAY' },
+    { type: 'bubble', cls: 'out', wait: 600, html: '<span class="b-label">QUESTION 1 · OBJECTIVE</span>What is the capital of Ghana?<span class="b-time">09:42</span>' },
     { type: 'bubble', cls: 'out', wait: 700, html: '<span class="b-label">ANSWER OPTIONS</span><div class="b-opts"><b>A.</b> Accra<br><b>B.</b> Kumasi<br><b>C.</b> Cape Coast<br><b>D.</b> Tamale</div><div class="b-hint">Time remaining: 09:45</div><span class="b-time">09:42</span>' },
     { type: 'typing', wait: 950 },
     { type: 'bubble', cls: 'in', wait: 750, html: 'A<span class="b-time">09:43<span class="wapp-ticks">✔✔</span></span>' },
@@ -275,6 +279,13 @@ function initHeroScene() {
     chat.appendChild(el);
     chat.scrollTop = chat.scrollHeight;
   }
+  function date(html) {
+    const el = document.createElement('div');
+    el.className = 'wapp-date';
+    el.innerHTML = html;
+    chat.appendChild(el);
+    chat.scrollTop = chat.scrollHeight;
+  }
 
   function run(i) {
     if (!chat.isConnected) return;
@@ -286,6 +297,7 @@ function initHeroScene() {
     if (m.type === 'bubble') bubble(m.cls, m.html);
     else if (m.type === 'typing') typing();
     else if (m.type === 'score') score(m.html);
+    else if (m.type === 'date') date(m.html);
     else if (m.type === 'clear') { chat.innerHTML = ''; }
     setTimeout(() => run(i + 1), m.wait);
   }
@@ -368,9 +380,11 @@ async function renderDashboard() {
           <div class="hero-visual reveal" style="--d:150ms">
             <div class="wapp">
               <div class="wapp-head">
+                <button class="wa-icon" aria-label="Back">${I.back}</button>
                 <div class="wapp-ava">WE</div>
-                <div class="wapp-id"><b>Exam Bot</b><span>online · AI marking active</span></div>
-                <div class="wa-btn">${I.menu}</div>
+                <div class="wapp-id"><b>Exam Bot</b><span>online</span></div>
+                <button class="wa-icon" aria-label="Search">${I.search}</button>
+                <button class="wa-icon" aria-label="Menu">${I.menu}</button>
               </div>
               <div class="wapp-chat"></div>
             </div>
