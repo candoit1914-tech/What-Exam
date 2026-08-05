@@ -45,6 +45,7 @@ const config = {
     baseUrl: (process.env.AI_BASE_URL || 'https://api.openai.com/v1').replace(/\/$/, ''),
     apiKey: valid(process.env.AI_API_KEY) ? process.env.AI_API_KEY : '',
     model: process.env.AI_MODEL || 'gpt-4o-mini',
+    timeoutMs: parseInt(process.env.AI_TIMEOUT_MS || '120000', 10),
   },
 
   exam: {

@@ -11,7 +11,7 @@ function aiConfigured() {
   return !!(config.ai.apiKey || config.ai.baseUrl);
 }
 
-async function chatJSON(messages, { temperature = 0.4, maxRetries = 2 } = {}) {
+async function chatJSON(messages, { temperature = 0.4, maxRetries = 2, timeoutMs = config.ai.timeoutMs } = {}) {
   if (!aiConfigured()) {
     throw new AIError('AI is not configured. Set AI_API_KEY and AI_BASE_URL in .env');
   }
@@ -26,7 +26,7 @@ async function chatJSON(messages, { temperature = 0.4, maxRetries = 2 } = {}) {
   let lastErr;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 60000);
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
       const res = await fetch(`${config.ai.baseUrl}/chat/completions`, {
         method: 'POST',
@@ -54,7 +54,7 @@ async function chatJSON(messages, { temperature = 0.4, maxRetries = 2 } = {}) {
       lastErr = err;
       // A hard timeout must surface (never retry) so an exam question never
       // hangs the flow indefinitely waiting on an unresponsive AI endpoint.
-      if (err && err.name === 'AbortError') throw new AIError('AI request timed out after 60s.');
+      if (err && err.name === 'AbortError') throw new AIError(`AI request timed out after ${Math.round(timeoutMs / 1000)}s.`);
       if (err instanceof AIError && attempt < maxRetries) continue;
       throw err;
     }
@@ -83,6 +83,12 @@ function parseJSON(content) {
 const SYSTEM_BASE =
   'You are an expert examination setter and examiner. Always answer with valid JSON only. ' +
   'Never include markdown, code fences, or commentary.';
+
+// Slow/commercial AI endpoints (e.g. huge 100B+ models) can take well over a
+// minute to structure a full exam paper. Bulk admin operations (PDF upload /
+// question extraction) get a generous window; the default timeout applies to
+// everything else.
+const BULK_TIMEOUT_MS = 5 * 60 * 1000;
 
 /** Run fn over items with at most `limit` promises in flight (like a semaphore). */
 async function mapLimit(items, limit, fn) {
@@ -297,10 +303,13 @@ Rules:
 - Do NOT invent answer keys that are not in the document. Leave correct_answer/explanation empty when unknown.
 `;
 
-  const result = await chatJSON([
-    { role: 'system', content: system },
-    { role: 'user', content: `Examination document:\n\n${rawText.slice(0, 120000)}` },
-  ]);
+  const result = await chatJSON(
+    [
+      { role: 'system', content: system },
+      { role: 'user', content: `Examination document:\n\n${rawText.slice(0, 120000)}` },
+    ],
+    { timeoutMs: BULK_TIMEOUT_MS }
+  );
 
   return Array.isArray(result) ? result : result.questions;
 }
@@ -356,10 +365,13 @@ Rules:
     )
     .join('\n\n');
 
-  const result = await chatJSON([
-    { role: 'system', content: system },
-    { role: 'user', content: user },
-  ]);
+  const result = await chatJSON(
+    [
+      { role: 'system', content: system },
+      { role: 'user', content: user },
+    ],
+    { timeoutMs: BULK_TIMEOUT_MS }
+  );
 
   const byIndex = {};
   for (const a of result.answers || result) byIndex[a.index] = a;
