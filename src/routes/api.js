@@ -364,7 +364,7 @@ router.post('/exams/:id/generate', asyncWrap(async (req, res) => {
   }
   const { subject, topics, count, types, difficulty, instructions, pool, poolMultiplier } = req.body;
   const n = Math.min(Math.max(parseInt(count) || 10, 1), 50);
-  const multiplier = pool ? Math.min(Math.max(parseInt(poolMultiplier) || 3, 2), 4) : 1;
+  const multiplier = pool ? Math.min(Math.max(parseInt(poolMultiplier) || 3, 2), 7) : 1;
   const generated = await ai.generateQuestions({
     subject: subject || exam.subject || exam.title,
     topics,

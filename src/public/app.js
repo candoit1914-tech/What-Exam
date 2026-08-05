@@ -815,6 +815,9 @@ async function aiGenerateForm(id) {
         <option value="2">2 variants per question</option>
         <option value="3" selected>3 variants per question</option>
         <option value="4">4 variants per question</option>
+        <option value="5">5 variants per question</option>
+        <option value="6">6 variants per question</option>
+        <option value="7">7 variants per question</option>
       </select>
     </div>
     <div class="modal-actions" style="margin-top:18px"><button id="ag_run" class="btn btn-primary">Generate</button></div>

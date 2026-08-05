@@ -5,6 +5,28 @@ const sharp = require('sharp');
 const LOGO_SVG = fs.readFileSync(path.resolve(__dirname, '../public/icon.svg'), 'utf8');
 const LOGO_INNER = LOGO_SVG.replace(/<\?xml[^>]*\?>/, '').replace(/<svg[^>]*>/, '').replace(/<\/svg>\s*$/, '');
 
+const OKTEK_LOGO_PATH =
+  process.env.CERT_LOGO_PATH || path.resolve(__dirname, '../public/oktek-logo.png');
+let oktekPromise = null;
+function oktekLogoB64() {
+  if (!oktekPromise) {
+    oktekPromise = (async () => {
+      try {
+        const png = fs.readFileSync(OKTEK_LOGO_PATH);
+        const small = await sharp(png)
+          .resize({ width: 180, height: 180, fit: 'contain', background: { r: 255, g: 253, b: 246, alpha: 1 } })
+          .png()
+          .toBuffer();
+        return small.toString('base64');
+      } catch (e) {
+        console.warn('[certificate] oktek logo missing, skipping:', e.message);
+        return null;
+      }
+    })();
+  }
+  return oktekPromise;
+}
+
 const WIDTH = 1600;
 const HEIGHT = 1131;
 
@@ -31,6 +53,7 @@ function buildCertificateSvg({
   totalMarks,
   percentage,
   passed,
+  logoB64 = null,
 }) {
   const name = esc(studentName || 'Student');
   const title = esc(examTitle || 'Examination');
@@ -79,11 +102,14 @@ function buildCertificateSvg({
     </g>
     <text x="1230" y="1048" text-anchor="middle" font-size="20" fill="#6b7280">Authorized Signature</text>
   </g>
+
+  ${logoB64 ? `<g transform="translate(286 900)"><image href="data:image/png;base64,${logoB64}" width="168" height="168" preserveAspectRatio="xMidYMid meet"/></g>` : ''}
 </svg>`;
 }
 
 async function renderCertificatePng(opts) {
-  const svg = buildCertificateSvg(opts);
+  const logoB64 = await oktekLogoB64();
+  const svg = buildCertificateSvg({ ...opts, logoB64 });
   return sharp(Buffer.from(svg)).png().toBuffer();
 }
 
