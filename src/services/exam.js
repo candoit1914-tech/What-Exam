@@ -3,6 +3,7 @@ const config = require('../config');
 const wa = require('./whatsapp');
 const marking = require('./marking');
 const results = require('./results');
+const certificate = require('./certificate');
 const ai = require('./ai');
 
 // ── Students ───────────────────────────────────────────────────────────
@@ -432,6 +433,25 @@ async function finalize(session, student, reason = 'completed') {
   ).run(reason, result.score, result.percentage, result.passed ? 1 : 0, session.id);
 
   await results.sendResultMessage(session.id, student.phone, reason);
+
+  if (config.exam.sendCertificates) {
+    try {
+      const png = await certificate.renderCertificatePng({
+        studentName: student.name || student.phone,
+        examTitle: result.exam.title,
+        subject: result.exam.subject,
+        date: new Date(),
+        score: result.score,
+        totalMarks: result.totalMarks,
+        percentage: result.percentage,
+        passed: result.passed,
+      });
+      await wa.sendImage(student.phone, png);
+    } catch (err) {
+      // certificate is a bonus — never break the finalize flow
+      console.error(`Certificate send failed for ${student.phone}:`, err.message);
+    }
+  }
 }
 
 // ── Admin: end an exam ─────────────────────────────────────────────────
@@ -472,6 +492,87 @@ async function endExam(examId) {
 
 // ── Admin: send exam to recipients ─────────────────────────────────────
 
+/** Run fn over items with at most `limit` promises in flight. */
+async function mapLimit(items, limit, fn) {
+  const results = new Array(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const idx = next++;
+      results[idx] = await fn(items[idx]);
+    }
+  };
+  const n = Math.max(1, Math.min(limit, items.length));
+  await Promise.all(Array.from({ length: n }, worker));
+  return results;
+}
+
+/** Deliver (or nudge) the exam to one recipient, mutating `report`. */
+async function sendExamToStudent(exam, student, questionCount, template, report) {
+  const phone = student.phone;
+  let session = db.prepare('SELECT * FROM sessions WHERE exam_id = ? AND student_id = ?').get(exam.id, student.id);
+  let fresh = false;
+
+  try {
+    if (!session) {
+      session = createSession(exam.id, student.id);
+      fresh = true;
+    } else if (session.status === 'abandoned' || session.status === 'expired') {
+      session = restartSession(session);
+      fresh = true;
+    } else if (session.status === 'in_progress') {
+      // A session whose timer already lapsed must restart, or the next
+      // answer would be rejected by the deadline check.
+      const expiredAt =
+        new Date(new Date(session.started_at).getTime() + exam.duration_minutes * 60000).getTime();
+      if (Date.now() > expiredAt) {
+        session = restartSession(session);
+        fresh = true;
+      } else {
+        // Session is still running — the student is mid-exam. Do NOT restart
+        // or re-send the intro (that caused "Q1 keeps repeating"). Instead
+        // re-deliver the CURRENT question as a nudge so the student can
+        // continue; a silent skip made re-sends look like they "did nothing".
+        try {
+          await sendQuestionTo(session, student);
+          report.resumed++;
+        } catch (err) {
+          report.failed++;
+          report.errors.push({ phone, error: friendlyError(err) });
+        }
+        return;
+      }
+    } else {
+      report.skipped++;
+      return; // completed — already finished
+    }
+
+    if (fresh) {
+      if (template) {
+        const params = config.whatsapp.templateParams.length
+          ? config.whatsapp.templateParams.map((p) => ({ type: 'text', text: p }))
+          : [
+              { type: 'text', text: exam.title },
+              { type: 'text', text: exam.subject || 'General' },
+              { type: 'text', text: String(exam.duration_minutes) },
+              { type: 'text', text: String(questionCount) },
+            ];
+        await wa.sendTemplate(phone, template, config.whatsapp.templateLanguage, params);
+      } else {
+        await wa.sendText(phone, formatExamIntro(exam, questionCount));
+      }
+    }
+    await sendQuestionTo(session, student);
+    report.sent++;
+  } catch (err) {
+    report.failed++;
+    report.errors.push({ phone, error: friendlyError(err) });
+    if (session) {
+      db.prepare(`UPDATE sessions SET status = 'abandoned', ended_at = datetime('now') WHERE id = ?`).run(session.id);
+    }
+  }
+}
+
 async function sendExamToRecipients(examId) {
   const exam = db.prepare('SELECT * FROM exams WHERE id = ?').get(examId);
   if (!exam) throw new Error('Exam not found');
@@ -483,69 +584,11 @@ async function sendExamToRecipients(examId) {
   const report = { sent: 0, failed: 0, skipped: 0, resumed: 0, errors: [] };
   const questionCount = db.prepare('SELECT COUNT(*) c FROM questions WHERE exam_id = ?').get(examId).c;
   const template = config.whatsapp.templateName;
+  const limit = config.exam.sendConcurrency;
 
-  for (const student of recipients) {
-    let session = db.prepare('SELECT * FROM sessions WHERE exam_id = ? AND student_id = ?').get(examId, student.id);
-    let fresh = false;
-
-    try {
-      if (!session) {
-        session = createSession(examId, student.id);
-        fresh = true;
-      } else if (session.status === 'abandoned' || session.status === 'expired') {
-        session = restartSession(session);
-        fresh = true;
-      } else if (session.status === 'in_progress') {
-        // A session whose timer already lapsed must restart, or the next
-        // answer would be rejected by the deadline check.
-        const expiredAt =
-          new Date(new Date(session.started_at).getTime() + exam.duration_minutes * 60000).getTime();
-        if (Date.now() > expiredAt) {
-          session = restartSession(session);
-          fresh = true;
-        } else {
-          // Session is still running — the student is mid-exam. Do NOT restart
-          // or re-send the intro (that caused "Q1 keeps repeating"). Instead
-          // re-deliver the CURRENT question as a nudge so the student can
-          // continue; a silent skip made re-sends look like they "did nothing".
-          try {
-            await sendQuestionTo(session, student);
-            report.resumed++;
-          } catch (err) {
-            report.failed++;
-            report.errors.push({ phone: student.phone, error: friendlyError(err) });
-          }
-          continue;
-        }
-      } else {
-        continue; // completed — already finished
-      }
-
-      if (fresh) {
-        if (template) {
-          const params = config.whatsapp.templateParams.length
-            ? config.whatsapp.templateParams.map((p) => ({ type: 'text', text: p }))
-            : [
-                { type: 'text', text: exam.title },
-                { type: 'text', text: exam.subject || 'General' },
-                { type: 'text', text: String(exam.duration_minutes) },
-                { type: 'text', text: String(questionCount) },
-              ];
-          await wa.sendTemplate(student.phone, template, config.whatsapp.templateLanguage, params);
-        } else {
-          await wa.sendText(student.phone, formatExamIntro(exam, questionCount));
-        }
-      }
-      await sendQuestionTo(session, student);
-      report.sent++;
-    } catch (err) {
-      report.failed++;
-      report.errors.push({ phone: student.phone, error: friendlyError(err) });
-      if (session) {
-        db.prepare(`UPDATE sessions SET status = 'abandoned', ended_at = datetime('now') WHERE id = ?`).run(session.id);
-      }
-    }
-  }
+  await mapLimit(recipients, limit, (student) =>
+    sendExamToStudent(exam, student, questionCount, template, report)
+  );
   return report;
 }
 

@@ -2,30 +2,84 @@ const config = require('../config');
 const db = require('../db');
 
 const GRAPH = 'https://graph.facebook.com';
+const REQUEST_TIMEOUT_MS = 15000;
+const MAX_ATTEMPTS = 3;
 
 function waConfigured() {
   return !!(config.whatsapp.accessToken && config.whatsapp.phoneNumberId);
 }
 
-async function api(method, body) {
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+function backoff(attempt) {
+  return Math.pow(2, attempt - 1) * 500; // 500ms, 1s, 2s
+}
+
+/**
+ * Low-level POST to the Meta Graph API with a hard timeout, retry on
+ * definitive failures (429 rate limit / 5xx), and exponential backoff.
+ * Timeouts are NOT retried — the request may have been delivered server-side
+ * and retrying could double-send a message.
+ */
+async function request(url, { body, headers = {}, timeoutMs = REQUEST_TIMEOUT_MS, attempts = MAX_ATTEMPTS } = {}) {
   if (!waConfigured()) throw new Error('WhatsApp is not configured. Set WHATSAPP_* vars in .env');
-  const res = await fetch(`${GRAPH}/v21.0/${config.whatsapp.phoneNumberId}/messages`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${config.whatsapp.accessToken}`,
-    },
-    body: JSON.stringify(body),
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    const err = new Error(`WhatsApp API error ${res.status}: ${JSON.stringify(data).slice(0, 300)}`);
-    err.status = res.status;
-    err.code = data?.error?.code;
+  const authHeaders = { Authorization: `Bearer ${config.whatsapp.accessToken}` };
+  let lastErr = null;
+
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    let res;
+    try {
+      res = await fetch(url, {
+        method: 'POST',
+        headers: { ...authHeaders, ...headers },
+        body,
+        signal: ctrl.signal,
+      });
+    } catch (err) {
+      clearTimeout(timer);
+      if (err.name === 'AbortError') throw new Error('WhatsApp API request timed out.');
+      lastErr = err;
+      if (attempt < attempts) {
+        await sleep(backoff(attempt));
+        continue;
+      }
+      throw new Error(`WhatsApp network error: ${err.message}`);
+    }
+    clearTimeout(timer);
+
+    if (res.ok) return await res.json().catch(() => ({}));
+
+    const data = await res.json().catch(() => ({}));
+    const status = res.status;
+    const code = data?.error?.code;
+    const rateLimited = status === 429 || code === 130429 || code === 131029;
+    const retriable = status >= 500 || rateLimited;
+
+    if (retriable && attempt < attempts) {
+      const retryAfter = parseInt(res.headers.get('retry-after'), 10);
+      const waitMs = rateLimited && retryAfter ? retryAfter * 1000 : backoff(attempt);
+      await sleep(Math.min(waitMs, 10000));
+      continue;
+    }
+
+    const err = new Error(`WhatsApp API error ${status}: ${JSON.stringify(data).slice(0, 300)}`);
+    err.status = status;
+    err.code = code;
     err.metaCode = data?.error?.error_data?.details || '';
     throw err;
   }
-  return data;
+  throw lastErr || new Error('WhatsApp API request failed');
+}
+
+async function api(method, body) {
+  return request(`${GRAPH}/v21.0/${config.whatsapp.phoneNumberId}/messages`, {
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
 }
 
 function logOutbound(recipient, messageId, type) {
@@ -42,6 +96,28 @@ async function sendText(to, text) {
     text: { body: text },
   });
   logOutbound(to, data?.messages?.[0]?.id, 'text');
+  return data;
+}
+
+/** Upload a PNG buffer to the Media API, then send it as an image message. */
+async function sendImage(to, imageBuffer) {
+  const form = new FormData();
+  form.append('messaging_product', 'whatsapp');
+  form.append('type', 'image/png');
+  form.append('file', new Blob([imageBuffer], { type: 'image/png' }), 'certificate.png');
+  const uploaded = await request(`${GRAPH}/v21.0/${config.whatsapp.phoneNumberId}/media`, {
+    body: form,
+    timeoutMs: 30000,
+  });
+  const mediaId = uploaded?.id;
+  if (!mediaId) throw new Error(`WhatsApp media upload failed: ${JSON.stringify(uploaded).slice(0, 200)}`);
+  const data = await api('messages', {
+    messaging_product: 'whatsapp',
+    to,
+    type: 'image',
+    image: { id: mediaId },
+  });
+  logOutbound(to, data?.messages?.[0]?.id, 'image');
   return data;
 }
 
@@ -138,6 +214,7 @@ function parseWebhook(body) {
 module.exports = {
   waConfigured,
   sendText,
+  sendImage,
   sendInteractiveButtons,
   sendInteractiveList,
   sendTemplate,

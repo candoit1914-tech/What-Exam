@@ -43,6 +43,8 @@ const config = {
     defaultDurationMinutes: parseInt(process.env.DEFAULT_DURATION_MINUTES || '30', 10),
     sendAnswerKey: process.env.SEND_ANSWER_KEY !== 'false',
     allowResendResults: process.env.ALLOW_RESEND_RESULTS !== 'false',
+    sendConcurrency: parseInt(process.env.SEND_CONCURRENCY || '5', 10),
+    sendCertificates: process.env.SEND_CERTIFICATES !== 'false',
   },
 
   seedOnBoot: process.env.SEED_ON_BOOT !== 'false',

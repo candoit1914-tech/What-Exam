@@ -13,11 +13,14 @@ for (const f of fs.readdirSync(path.dirname(dbFile)).filter((n) => n.startsWith(
 process.env.DB_PATH = dbFile;
 
 const db = require('../src/db');
+const config = require('../src/config');
 const examService = require('../src/services/exam');
 const marking = require('../src/services/marking');
 const wa = require('../src/services/whatsapp');
+const sharp = require('sharp');
 
 const sent = [];
+const images = [];
 wa.sendText = async (to, text) => {
   sent.push({ to, kind: 'text', text });
   return { messages: [{ id: 'stub' }] };
@@ -29,6 +32,11 @@ wa.sendInteractiveList = async (to, title, body, buttonText, rows) => {
 wa.sendInteractiveButtons = async () => ({ messages: [{ id: 'stub' }] });
 wa.sendTemplate = async () => {
   sent.push({ to: 'template', kind: 'template' });
+  return { messages: [{ id: 'stub' }] };
+};
+wa.sendImage = async (to, buffer) => {
+  sent.push({ to, kind: 'image' });
+  images.push({ to, buffer });
   return { messages: [{ id: 'stub' }] };
 };
 
@@ -76,6 +84,23 @@ function check(cond, label) {
   if (!cond) failures++;
 }
 
+function isPng(buffer) {
+  return (
+    Buffer.isBuffer(buffer) &&
+    buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4e && buffer[3] === 0x47
+  );
+}
+
+async function checkCertificate(phone, label) {
+  const img = images.find((i) => i.to === phone);
+  check(!!img, `${label}: certificate image sent to ${phone}`);
+  if (!img) return;
+  check(isPng(img.buffer), `${label}: certificate is a PNG`);
+  const meta = await sharp(img.buffer).metadata();
+  check(meta.format === 'png' && meta.width === 1600 && meta.height === 1131, `${label}: certificate PNG is 1600x1131 (got ${meta.width}x${meta.height})`);
+  check(img.buffer.length > 50000, `${label}: certificate PNG has real content (${img.buffer.length} bytes)`);
+}
+
 async function main() {
   const examId = seedRealExam();
   const phones = ['233555000001', '233269200946']; // two different numbers
@@ -102,6 +127,7 @@ async function main() {
   });
   const s1 = examService.getOrCreateStudent(phones[0]);
   sent.length = 0;
+  images.length = 0;
   const r1 = await examService.handleInbound(phones[0], 'B', {});
   const r2 = await examService.handleInbound(phones[0], 'C', {});
   const r3 = await examService.handleInbound(phones[0], 'rain, wind, farming on slopes; plant trees.', {});
@@ -111,6 +137,7 @@ async function main() {
   check(sess1.status === 'completed', `student1 completed (${sess1.status}) — not stuck`);
   check(ans1 === 3, `student1 has all 3 answers recorded (${ans1})`);
   check(finalMsgs.includes('%'), `student1 got a result message`);
+  await checkCertificate(phones[0], 'student1 (PASS)');
 
   // ── Scenario C: AI failure/timing-out on theory must NOT freeze ────────
   marking.markTheoryAnswer = async () => {
@@ -118,6 +145,7 @@ async function main() {
   };
   const s2 = examService.getOrCreateStudent(phones[1]);
   sent.length = 0;
+  images.length = 0;
   await examService.handleInbound(phones[1], 'B', {});
   await examService.handleInbound(phones[1], 'C', {});
   await examService.handleInbound(phones[1], 'some theory answer', {});
@@ -125,6 +153,7 @@ async function main() {
   const th = db.prepare('SELECT * FROM answers WHERE session_id = ? AND q_order = 3').get(sess2.id);
   check(sess2.status === 'completed', `student2 completed despite AI failure (${sess2.status})`);
   check(th && th.needs_review === 1, `theory answer flagged needs_review=1, not frozen`);
+  await checkCertificate(phones[1], 'student2 (FAIL)');
 
   // ── Scenario D: re-send reaches an in-progress student (the fix) ───────
   const s3 = examService.getOrCreateStudent('233400000002');
@@ -140,6 +169,44 @@ async function main() {
   check(re.resumed === 1, `re-send reports resumed=1 (got ${re.resumed}, skipped=${re.skipped})`);
   check(s3msgs.length >= 2 && s3msgs.some((m) => m.startsWith('Question 2\n')), `in-progress student received Q2 again (${s3msgs.length} msgs)`);
   check(sess3.status === 'in_progress' && sess3.current_q_order === 2, `session still in_progress at Q2, not restarted`);
+
+  // ── Scenario E: 80-student concurrent bulk send ───────────────────────
+  const examId2 = seedRealExam();
+  const bulkStudents = [];
+  for (let i = 0; i < 80; i++) {
+    const phone = `2337000${String(i).padStart(4, '0')}`;
+    const s = examService.getOrCreateStudent(phone);
+    bulkStudents.push(s);
+    db.prepare('INSERT OR IGNORE INTO exam_recipients (exam_id, student_id) VALUES (?,?)').run(examId2, s.id);
+  }
+
+  sent.length = 0;
+  images.length = 0;
+  let inFlight = 0;
+  let maxInFlight = 0;
+  const origSendText = wa.sendText;
+  wa.sendText = async (to, text) => {
+    inFlight++;
+    if (inFlight > maxInFlight) maxInFlight = inFlight;
+    sent.push({ to, kind: 'text', text });
+    await new Promise((r) => setTimeout(r, 5));
+    inFlight--;
+    return { messages: [{ id: 'stub' }] };
+  };
+  const rep = await examService.sendExamToRecipients(examId2);
+  wa.sendText = origSendText;
+
+  check(rep.sent === 80, `bulk send delivered to all 80 (sent=${rep.sent}, failed=${rep.failed}, skipped=${rep.skipped}, resumed=${rep.resumed})`);
+  check(rep.failed === 0 && rep.errors.length === 0, `no delivery failures in bulk send (errors=${rep.errors.length})`);
+  check(maxInFlight > 1, `sends ran concurrently (max ${maxInFlight} in flight)`);
+  check(maxInFlight <= config.exam.sendConcurrency, `concurrency capped at ${config.exam.sendConcurrency} (max ${maxInFlight} in flight)`);
+  const delivered = new Set(sent.filter((m) => m.kind === 'text').map((m) => m.to));
+  const missing = bulkStudents.filter((s) => !delivered.has(s.phone));
+  check(missing.length === 0, `every one of the 80 phones received a message (${missing.length} missing)`);
+  const pFirst = bulkStudents[0].phone;
+  check(msgsTo(pFirst).length >= 3, `${pFirst} got intro + Q1 + options (${msgsTo(pFirst).length} msgs)`);
+  const allSessions = db.prepare('SELECT COUNT(*) c FROM sessions WHERE exam_id = ?').get(examId2).c;
+  check(allSessions === 80, `one session created per student (${allSessions})`);
 
   console.log(failures ? `\n${failures} FAILURE(S)` : '\nALL CHECKS PASSED');
   process.exit(failures ? 1 : 0);
