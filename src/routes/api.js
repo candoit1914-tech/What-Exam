@@ -12,6 +12,21 @@ const auth = require('../auth');
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
 
+/** Run fn over items with at most `limit` promises in flight. */
+async function mapLimit(items, limit, fn) {
+  const out = new Array(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const idx = next++;
+      out[idx] = await fn(items[idx]);
+    }
+  };
+  const n = Math.max(1, Math.min(limit, items.length));
+  await Promise.all(Array.from({ length: n }, worker));
+  return out;
+}
+
 // ── Admin auth ─────────────────────────────────────────────────────────
 router.post('/auth/login', (req, res) => {
   const password = (req.body && req.body.password) || '';
@@ -530,7 +545,10 @@ router.post('/exams/:id/pdf', upload.single('file'), asyncWrap(async (req, res) 
     created++;
   }
 
-  // theory questions: generate schemes in sequence
+  // theory questions: insert all first, then generate any missing schemes in
+  // parallel so a PDF with many theory questions does not wait on a long
+  // sequential chain of AI calls.
+  const theoryToScheme = [];
   for (const g of parsed) {
     if (g.type !== 'theory') continue;
     const info = insert.run(
@@ -551,11 +569,12 @@ router.post('/exams/:id/pdf', upload.single('file'), asyncWrap(async (req, res) 
         grammar_marks: g.grammar_marks || 0,
       }));
     } else {
-      await marking.buildMarkingScheme(q);
+      theoryToScheme.push(q);
     }
     nextOrder++;
     created++;
   }
+  await mapLimit(theoryToScheme, 3, (q) => marking.buildMarkingScheme(q));
 
   marking.recomputeExamTotal(exam.id);
   res.json({ ok: true, count: created, textLength: text.length });

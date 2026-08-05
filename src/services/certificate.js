@@ -103,7 +103,7 @@ function buildCertificateSvg({
     <text x="1230" y="1048" text-anchor="middle" font-size="20" fill="#6b7280">Authorized Signature</text>
   </g>
 
-  ${logoB64 ? `<g transform="translate(286 900)"><image href="data:image/png;base64,${logoB64}" width="168" height="168" preserveAspectRatio="xMidYMid meet"/></g>` : ''}
+  ${logoB64 ? `<g transform="translate(230 920)"><image href="data:image/png;base64,${logoB64}" width="168" height="168" preserveAspectRatio="xMidYMid meet"/></g>` : ''}
 </svg>`;
 }
 

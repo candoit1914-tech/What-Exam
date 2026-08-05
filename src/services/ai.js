@@ -84,17 +84,47 @@ const SYSTEM_BASE =
   'You are an expert examination setter and examiner. Always answer with valid JSON only. ' +
   'Never include markdown, code fences, or commentary.';
 
+/** Run fn over items with at most `limit` promises in flight (like a semaphore). */
+async function mapLimit(items, limit, fn) {
+  const out = new Array(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const idx = next++;
+      out[idx] = await fn(items[idx]);
+    }
+  };
+  const n = Math.max(1, Math.min(limit, items.length));
+  await Promise.all(Array.from({ length: n }, worker));
+  return out;
+}
+
 /**
  * Generate a full exam question set with automatic marking scheme.
  * When poolSize is greater than count, produces up to poolSize DISTINCT
  * questions over several calls so each attempt can draw a fresh set.
+ *
+ * The batch calls run CONCURRENTLY (concurrency-capped). The dominant cost is
+ * the round trip to the AI endpoint, so parallelizing collapses the wall-clock
+ * time from "sum of all batches" to "one slowest batch × few rounds".
  */
 async function generateQuestions({ subject, topics, count, types, difficulty, instructions, poolSize }) {
   const typeList = Array.isArray(types) && types.length ? types : ['objective', 'theory'];
+  const hasTheory = typeList.includes('theory');
   const objectiveCount = Math.max(1, Math.round(count / typeList.length));
-  const theoryCount = typeList.includes('theory') ? Math.max(0, count - objectiveCount) : 0;
+  const theoryCount = hasTheory ? Math.max(0, count - objectiveCount) : 0;
 
-  const system = (variety) => SYSTEM_BASE + `
+  const target = Math.min(Math.max(parseInt(poolSize) || count, count), 150);
+  const batchSize = Math.max(1, Math.min(target, 10));
+  const maxCalls = Math.min(Math.ceil(target / batchSize), 16);
+
+  // Keep the same objective/theory split within each smaller batch so the
+  // per-batch counts stay consistent with the overall request.
+  const ratio = count > 0 ? batchSize / count : 1;
+  const perBatchObjective = hasTheory ? Math.max(1, Math.round(objectiveCount * ratio)) : batchSize;
+  const perBatchTheory = hasTheory ? Math.max(0, batchSize - perBatchObjective) : 0;
+
+  const system = (objN, theoN, variety) => SYSTEM_BASE + `
 Return an object: {"questions": [...]}. Every question is a JSON object.
 
 Objective question schema:
@@ -124,7 +154,7 @@ Theory question schema:
 }
 
 Rules:
-- The number of objective questions MUST be ${objectiveCount} and theory questions MUST be ${theoryCount}.
+- The number of objective questions MUST be ${objN} and theory questions MUST be ${theoN}.
 - Options must have exactly one correct answer; distractors must be plausible.
 - correct_index is the 0-based index of the correct option.
 - Theory rubric points must sum to (marks - presentation_marks - grammar_marks) or less; total scoring adds up to exactly marks where sensible.
@@ -137,26 +167,29 @@ ${variety || ''}`;
       `Subject: ${subject || 'General'}`,
       topics ? `Topics: ${topics}` : 'Topics: general',
       instructions ? `Additional instructions: ${instructions}` : '',
-      `Please generate ${batchTotal} questions total (${objectiveCount} objective, ${theoryCount} theory).`,
+      `Please generate ${batchTotal} questions total (${perBatchObjective} objective, ${perBatchTheory} theory).`,
     ]
       .filter(Boolean)
       .join('\n');
 
-  const target = Math.min(Math.max(parseInt(poolSize) || count, count), 150);
-  const batchSize = Math.max(1, Math.min(count, 25));
-  const maxCalls = Math.min(Math.ceil(target / batchSize), 8);
+  const variety =
+    maxCalls > 1
+      ? `- These questions are one batch of ${maxCalls} batches that together form ONE large pool on this exact subject and topic list. Every question in the WHOLE pool must be distinct: no repeats, no close paraphrases, and no reused facts, figures, or examples across batches.`
+      : '- Produce a diverse set; avoid reusing the same facts, figures, or classic textbook examples across questions.';
+
+  // Build lazy tasks so mapLimit actually throttles them; eager promises would
+  // fire every call at once and defeat the concurrency cap.
+  const tasks = Array.from({ length: maxCalls }, () => () =>
+    chatJSON([
+      { role: 'system', content: system(perBatchObjective, perBatchTheory, variety) },
+      { role: 'user', content: user(batchSize) },
+    ])
+  );
+  const settled = await mapLimit(tasks, 4, (run) => run());
 
   const seen = new Set();
   const all = [];
-  for (let call = 0; call < maxCalls && all.length < target; call++) {
-    const variety =
-      all.length > 0
-        ? '- Do NOT repeat or closely paraphrase any question from a previous batch. Each new question must test a DIFFERENT fact or skill, with different phrasing and examples.'
-        : '- Produce a diverse set; avoid reusing the same facts, figures, or classic textbook examples across questions.';
-    const result = await chatJSON([
-      { role: 'system', content: system(variety) },
-      { role: 'user', content: user(batchSize) },
-    ]);
+  for (const result of settled) {
     const batch = Array.isArray(result) ? result : result.questions;
     for (const q of batch || []) {
       const t = String(q && q.text || '').toLowerCase().replace(/[^a-z0-9]/g, '');
