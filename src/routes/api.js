@@ -362,23 +362,33 @@ router.post('/exams/:id/generate', asyncWrap(async (req, res) => {
   if (exam.status === 'live' || exam.status === 'ended') {
     return res.status(400).json({ error: 'Exam is already live/ended.' });
   }
-  const { subject, topics, count, types, difficulty, instructions } = req.body;
+  const { subject, topics, count, types, difficulty, instructions, pool, poolMultiplier } = req.body;
+  const n = Math.min(Math.max(parseInt(count) || 10, 1), 50);
+  const multiplier = pool ? Math.min(Math.max(parseInt(poolMultiplier) || 3, 2), 4) : 1;
   const generated = await ai.generateQuestions({
     subject: subject || exam.subject || exam.title,
     topics,
-    count: Math.min(Math.max(parseInt(count) || 10, 1), 50),
+    count: n,
+    poolSize: pool ? n * multiplier : n,
     types: Array.isArray(types) ? types : ['objective', 'theory'],
     difficulty,
     instructions,
   });
+
+  const active = generated.slice(0, n);
+  const variants = pool ? generated.slice(n) : [];
 
   let nextOrder = (db.prepare('SELECT MAX(q_order) m FROM questions WHERE exam_id = ?').get(exam.id).m || 0) + 1;
   const insert = db.prepare(
     `INSERT INTO questions (exam_id, q_order, type, text, options, correct_answer, marks, difficulty, learning_objective, explanation, source)
      VALUES (?,?,?,?,?,?,?,?,?,?,?)`
   );
+  const insertPool = db.prepare(
+    `INSERT INTO question_pool (exam_id, type, text, options, correct_answer, marks, difficulty, learning_objective, explanation, scheme_json, source)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?)`
+  );
   const created = [];
-  for (const g of generated) {
+  for (const g of active) {
     if (g.type === 'objective') {
       const opts = (g.options || []).map((t, i) => ({ key: String.fromCharCode(65 + i), text: t }));
       const correct = g.correct_index != null ? opts[g.correct_index]?.key : g.correct_answer;
@@ -419,8 +429,34 @@ router.post('/exams/:id/generate', asyncWrap(async (req, res) => {
     }
     nextOrder++;
   }
+  for (const g of variants) {
+    if (g.type === 'objective') {
+      const opts = (g.options || []).map((t, i) => ({ key: String.fromCharCode(65 + i), text: t }));
+      const correct = g.correct_index != null ? opts[g.correct_index]?.key : g.correct_answer;
+      insertPool.run(
+        exam.id, 'objective', g.text, JSON.stringify(opts), correct || null,
+        parseFloat(g.marks) || 1, g.difficulty || 'medium', g.learning_objective || '', g.explanation || '',
+        JSON.stringify({ type: 'objective', correct_answer: correct || null, marks: parseFloat(g.marks) || 1, explanation: g.explanation || '' }),
+        'ai'
+      );
+    } else {
+      insertPool.run(
+        exam.id, 'theory', g.text, null, null,
+        parseFloat(g.marks) || 5, g.difficulty || 'medium', g.learning_objective || '', '',
+        JSON.stringify({
+          type: 'theory',
+          model_answer: g.model_answer || '',
+          key_points: g.key_points || [],
+          rubric: g.rubric || [],
+          presentation_marks: g.presentation_marks || 0,
+          grammar_marks: g.grammar_marks || 0,
+        }),
+        'ai'
+      );
+    }
+  }
   marking.recomputeExamTotal(exam.id);
-  res.json({ ok: true, count: created.length, questions: created });
+  res.json({ ok: true, count: created.length, poolCount: variants.length, questions: created });
 }));
 
 // ── PDF upload ─────────────────────────────────────────────────────────

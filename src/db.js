@@ -82,7 +82,9 @@ CREATE TABLE IF NOT EXISTS sessions (
 CREATE TABLE IF NOT EXISTS answers (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
   session_id    INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-  question_id   INTEGER NOT NULL REFERENCES questions(id) ON DELETE CASCADE,
+  -- question_id points at questions() for template questions OR question_pool()
+  -- for pool-variant questions, so it deliberately has no FK constraint.
+  question_id   INTEGER NOT NULL,
   q_order       INTEGER NOT NULL,
   answer_text   TEXT NOT NULL,
   is_correct    INTEGER,
@@ -101,6 +103,35 @@ CREATE TABLE IF NOT EXISTS webhook_events (
   source      TEXT NOT NULL DEFAULT 'inbound',
   payload     TEXT NOT NULL,
   received_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- AI-generated variant questions. Exams that use "fresh questions per
+-- attempt" draw each session's question set from here instead of reusing
+-- the same template questions over and over.
+CREATE TABLE IF NOT EXISTS question_pool (
+  id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+  exam_id            INTEGER NOT NULL REFERENCES exams(id) ON DELETE CASCADE,
+  type               TEXT NOT NULL,                      -- objective|theory
+  text               TEXT NOT NULL,
+  options            TEXT,                               -- JSON [{key,text}]
+  correct_answer     TEXT,
+  marks              REAL NOT NULL DEFAULT 1,
+  difficulty         TEXT NOT NULL DEFAULT 'medium',
+  learning_objective TEXT DEFAULT '',
+  explanation        TEXT DEFAULT '',
+  scheme_json        TEXT DEFAULT '',                     -- full marking scheme JSON
+  source             TEXT NOT NULL DEFAULT 'ai',
+  created_at         TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Which question a session actually received at each step (q_order is the
+-- per-attempt order, not the template order).
+CREATE TABLE IF NOT EXISTS session_questions (
+  session_id  INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  question_id INTEGER NOT NULL REFERENCES question_pool(id) ON DELETE CASCADE,
+  q_order     INTEGER NOT NULL,
+  PRIMARY KEY (session_id, q_order),
+  UNIQUE (session_id, question_id)
 );
 
 CREATE TABLE IF NOT EXISTS outbound_messages (
@@ -124,5 +155,46 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_schemes_question ON marking_schemes(questi
 `;
 
 db.exec(SCHEMA);
+
+// Migration: answers.question_id used to be FK-constrained to questions().
+// Attempts may now answer pool-variant questions, so the constraint must go.
+// Rebuild the table when the old definition is present.
+const answersDdl = db
+  .prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='answers'")
+  .get();
+if (answersDdl && /REFERENCES\s+questions/i.test(answersDdl.sql)) {
+  db.exec('PRAGMA foreign_keys = OFF');
+  db.exec(`
+    BEGIN;
+    ALTER TABLE answers RENAME TO answers_legacy;
+    CREATE TABLE answers (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id    INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+      question_id   INTEGER NOT NULL,
+      q_order       INTEGER NOT NULL,
+      answer_text   TEXT NOT NULL,
+      is_correct    INTEGER,
+      marks_awarded REAL DEFAULT 0,
+      max_marks     REAL DEFAULT 0,
+      marked_by     TEXT DEFAULT 'auto',
+      ai_feedback   TEXT DEFAULT '',
+      needs_review  INTEGER NOT NULL DEFAULT 0,
+      reviewed      INTEGER NOT NULL DEFAULT 0,
+      received_at   TEXT NOT NULL DEFAULT (datetime('now')),
+      marked_at     TEXT
+    );
+    INSERT INTO answers
+      (id, session_id, question_id, q_order, answer_text, is_correct, marks_awarded,
+       max_marks, marked_by, ai_feedback, needs_review, reviewed, received_at, marked_at)
+    SELECT
+      id, session_id, question_id, q_order, answer_text, is_correct, marks_awarded,
+      max_marks, marked_by, ai_feedback, needs_review, reviewed, received_at, marked_at
+    FROM answers_legacy;
+    DROP TABLE answers_legacy;
+    COMMIT;
+  `);
+  db.exec('PRAGMA foreign_keys = ON');
+  console.log('Migrated answers table (removed question FK for pool variants).');
+}
 
 module.exports = db;

@@ -86,15 +86,15 @@ const SYSTEM_BASE =
 
 /**
  * Generate a full exam question set with automatic marking scheme.
+ * When poolSize is greater than count, produces up to poolSize DISTINCT
+ * questions over several calls so each attempt can draw a fresh set.
  */
-async function generateQuestions({ subject, topics, count, types, difficulty, instructions }) {
-  const counts = { objective: 0, theory: 0 };
-  const typeList = (types || ['objective', 'theory']);
-  typeList.forEach((t) => (counts[t] = t === 'objective' ? Math.round(count / typeList.length) : 0));
-  const objectiveCount = Math.max(1, counts.objective);
+async function generateQuestions({ subject, topics, count, types, difficulty, instructions, poolSize }) {
+  const typeList = Array.isArray(types) && types.length ? types : ['objective', 'theory'];
+  const objectiveCount = Math.max(1, Math.round(count / typeList.length));
   const theoryCount = typeList.includes('theory') ? Math.max(0, count - objectiveCount) : 0;
 
-  const system = SYSTEM_BASE + `
+  const system = (variety) => SYSTEM_BASE + `
 Return an object: {"questions": [...]}. Every question is a JSON object.
 
 Objective question schema:
@@ -129,23 +129,44 @@ Rules:
 - correct_index is the 0-based index of the correct option.
 - Theory rubric points must sum to (marks - presentation_marks - grammar_marks) or less; total scoring adds up to exactly marks where sensible.
 - Difficulty overall: ${difficulty || 'mixed'}.
-`;
+- Style: write like the Ghana Basic Education Certificate Examination (BECE) for a Junior High School (JHS) candidate. Use clear, age-appropriate English and concise stems. Each objective question has exactly four options (A-D) with ONE clearly correct answer and three plausible distractors. No trick wording, no ambiguity, no questions that depend on a textbook not available to the student. Theory questions may use sub-parts (a), (b), (c) where natural.
+${variety || ''}`;
 
-  const user = [
-    `Subject: ${subject || 'General'}`,
-    topics ? `Topics: ${topics}` : 'Topics: general',
-    instructions ? `Additional instructions: ${instructions}` : '',
-    `Please generate ${count} questions total (${objectiveCount} objective, ${theoryCount} theory).`,
-  ]
-    .filter(Boolean)
-    .join('\n');
+  const user = (batchTotal) =>
+    [
+      `Subject: ${subject || 'General'}`,
+      topics ? `Topics: ${topics}` : 'Topics: general',
+      instructions ? `Additional instructions: ${instructions}` : '',
+      `Please generate ${batchTotal} questions total (${objectiveCount} objective, ${theoryCount} theory).`,
+    ]
+      .filter(Boolean)
+      .join('\n');
 
-  const result = await chatJSON([
-    { role: 'system', content: system },
-    { role: 'user', content: user },
-  ]);
+  const target = Math.min(Math.max(parseInt(poolSize) || count, count), 150);
+  const batchSize = Math.max(1, Math.min(count, 25));
+  const maxCalls = Math.min(Math.ceil(target / batchSize), 8);
 
-  return Array.isArray(result) ? result : result.questions;
+  const seen = new Set();
+  const all = [];
+  for (let call = 0; call < maxCalls && all.length < target; call++) {
+    const variety =
+      all.length > 0
+        ? '- Do NOT repeat or closely paraphrase any question from a previous batch. Each new question must test a DIFFERENT fact or skill, with different phrasing and examples.'
+        : '- Produce a diverse set; avoid reusing the same facts, figures, or classic textbook examples across questions.';
+    const result = await chatJSON([
+      { role: 'system', content: system(variety) },
+      { role: 'user', content: user(batchSize) },
+    ]);
+    const batch = Array.isArray(result) ? result : result.questions;
+    for (const q of batch || []) {
+      const t = String(q && q.text || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+      if (t && !seen.has(t)) {
+        seen.add(t);
+        all.push(q);
+      }
+    }
+  }
+  return all.slice(0, target);
 }
 
 /**

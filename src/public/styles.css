@@ -617,50 +617,68 @@ button.danger, .btn.danger { color: var(--red); }
   background-size: 18px 18px;
 }
 .wapp-bubble {
+  position: relative;
   max-width: 84%;
-  padding: 10px 14px;
-  border-radius: 16px;
+  padding: 8px 12px 6px;
+  border-radius: 12px;
   font-size: 13px;
   line-height: 1.5;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.3);
-  transform: translateY(14px);
+  box-shadow: 0 1px 1px rgba(0, 0, 0, 0.4);
+  transform: translateY(14px) scale(0.94);
   opacity: 0;
-  animation: bubbleIn 0.5s var(--ease-out) forwards;
+  animation: bubbleIn 0.45s var(--ease-out) forwards;
 }
 @keyframes bubbleIn {
-  to { transform: translateY(0); opacity: 1; }
+  to { transform: translateY(0) scale(1); opacity: 1; }
 }
 .wapp-bubble.in {
   align-self: flex-start;
-  background: #123A26;
-  border: 1px solid rgba(110, 231, 183, 0.16);
-  border-bottom-left-radius: 5px;
+  background: #1F2C34;
+  color: #E9EDEF;
+  border-top-left-radius: 4px;
+}
+.wapp-bubble.in::before {
+  content: '';
+  position: absolute;
+  top: 0; left: -7px;
+  width: 13px; height: 13px;
+  background: #1F2C34;
+  border-bottom-right-radius: 100%;
 }
 .wapp-bubble.out {
   align-self: flex-end;
-  background: linear-gradient(145deg, #0E7A3E, #0A5C30);
-  border-bottom-right-radius: 5px;
+  background: #005C4B;
+  color: #FFFFFF;
+  border-top-right-radius: 4px;
+}
+.wapp-bubble.out::before {
+  content: '';
+  position: absolute;
+  top: 0; right: -7px;
+  width: 13px; height: 13px;
+  background: #005C4B;
+  border-bottom-left-radius: 100%;
 }
 .wapp-bubble .b-label {
   display: block;
   font-size: 10px;
   font-weight: 700;
-  letter-spacing: 0.1em;
-  color: var(--green-light);
+  letter-spacing: 0.08em;
+  color: #74D9A0;
   margin-bottom: 3px;
 }
-.wapp-bubble.out .b-label { color: #9BE8BC; }
+.wapp-bubble.out .b-label { color: #A5E8C5; }
 .wapp-bubble .b-opts {
   margin-top: 6px;
   padding: 8px 11px;
-  border-left: 2px solid rgba(255, 255, 255, 0.22);
-  background: rgba(255, 255, 255, 0.05);
+  border-left: 2px solid rgba(255, 255, 255, 0.25);
+  background: rgba(255, 255, 255, 0.07);
   border-radius: 8px;
   font-size: 12.5px;
   line-height: 1.7;
 }
 .wapp-bubble .b-opts b {
-  color: var(--green-light);
+  color: #74D9A0;
   font-weight: 800;
 }
 .wapp-bubble .b-hint {
@@ -669,15 +687,26 @@ button.danger, .btn.danger { color: var(--red); }
   font-weight: 600;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: var(--green-light);
+  color: #74D9A0;
   opacity: 0.8;
 }
+.wapp-bubble .b-time {
+  float: right;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin: 5px -4px -3px 10px;
+  font-size: 10px;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.55);
+}
+.wapp-bubble.in .b-time { color: rgba(233, 237, 239, 0.45); }
 .wapp-ticks {
   display: inline-flex;
   align-items: center;
   gap: 2px;
-  margin-left: 6px;
-  color: var(--green-bright);
+  font-size: 11px;
+  color: #53BDEB;
 }
 .wapp-score {
   align-self: center;
@@ -703,18 +732,27 @@ button.danger, .btn.danger { color: var(--red); }
 .wapp-score b { font-family: var(--display); font-size: 15px; }
 
 .wapp-typing {
+  position: relative;
   align-self: flex-start;
   display: inline-flex;
   gap: 4px;
   padding: 11px 15px;
-  background: #123A26;
-  border-radius: 16px;
-  border-bottom-left-radius: 5px;
+  background: #1F2C34;
+  border-radius: 12px;
+  border-top-left-radius: 4px;
+}
+.wapp-typing::before {
+  content: '';
+  position: absolute;
+  top: 0; left: -7px;
+  width: 13px; height: 13px;
+  background: #1F2C34;
+  border-bottom-right-radius: 100%;
 }
 .wapp-typing i {
   width: 7px; height: 7px;
   border-radius: 50%;
-  background: var(--green-light);
+  background: #A8B8B2;
   animation: typingDot 1.2s ease-in-out infinite;
 }
 .wapp-typing i:nth-child(2) { animation-delay: 0.15s; }

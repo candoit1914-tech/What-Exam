@@ -232,24 +232,24 @@ function initHeroScene() {
   chat.dataset.scene = 'on';
   if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
     chat.innerHTML = `
-      <div class="wapp-bubble out"><span class="b-label">QUESTION 1 · OBJECTIVE</span>What is the capital of Ghana?</div>
+      <div class="wapp-bubble out"><span class="b-label">QUESTION 1 · OBJECTIVE</span>What is the capital of Ghana?<span class="b-time">09:42</span></div>
       <div class="wapp-bubble out"><span class="b-label">ANSWER OPTIONS</span><div class="b-opts"><b>A.</b> Accra<br><b>B.</b> Kumasi<br><b>C.</b> Cape Coast<br><b>D.</b> Tamale</div><div class="b-hint">Time remaining: 09:45</div></div>
-      <div class="wapp-bubble in">A<span class="wapp-ticks">✔✔</span></div>
-      <div class="wapp-bubble out"><span class="b-label">AI MARKING</span>✓ Correct — <b>+1 mark</b></div>`;
+      <div class="wapp-bubble in">A<span class="b-time">09:43<span class="wapp-ticks">✔✔</span></span></div>
+      <div class="wapp-bubble out"><span class="b-label">AI MARKING</span>✓ Correct — <b>+1 mark</b><span class="b-time">09:43</span></div>`;
     return;
   }
 
   const script = [
-    { type: 'bubble', cls: 'out', wait: 500, html: '<span class="b-label">QUESTION 1 · OBJECTIVE</span>What is the capital of Ghana?' },
-    { type: 'bubble', cls: 'out', wait: 700, html: '<span class="b-label">ANSWER OPTIONS</span><div class="b-opts"><b>A.</b> Accra<br><b>B.</b> Kumasi<br><b>C.</b> Cape Coast<br><b>D.</b> Tamale</div><div class="b-hint">Time remaining: 09:45</div>' },
+    { type: 'bubble', cls: 'out', wait: 500, html: '<span class="b-label">QUESTION 1 · OBJECTIVE</span>What is the capital of Ghana?<span class="b-time">09:42</span>' },
+    { type: 'bubble', cls: 'out', wait: 700, html: '<span class="b-label">ANSWER OPTIONS</span><div class="b-opts"><b>A.</b> Accra<br><b>B.</b> Kumasi<br><b>C.</b> Cape Coast<br><b>D.</b> Tamale</div><div class="b-hint">Time remaining: 09:45</div><span class="b-time">09:42</span>' },
     { type: 'typing', wait: 950 },
-    { type: 'bubble', cls: 'in', wait: 750, html: 'A<span class="wapp-ticks">✔✔</span>' },
-    { type: 'bubble', cls: 'out', wait: 1600, html: '<span class="b-label">AI MARKING</span>✓ Correct — <b>+1 mark</b>' },
-    { type: 'bubble', cls: 'out', wait: 1300, html: '<span class="b-label">QUESTION 2 · THEORY</span>State two causes of soil erosion.' },
+    { type: 'bubble', cls: 'in', wait: 750, html: 'A<span class="b-time">09:43<span class="wapp-ticks">✔✔</span></span>' },
+    { type: 'bubble', cls: 'out', wait: 1600, html: '<span class="b-label">AI MARKING</span>✓ Correct — <b>+1 mark</b><span class="b-time">09:43</span>' },
+    { type: 'bubble', cls: 'out', wait: 1300, html: '<span class="b-label">QUESTION 2 · THEORY</span>State two causes of soil erosion.<span class="b-time">09:44</span>' },
     { type: 'typing', wait: 1100 },
-    { type: 'bubble', cls: 'in', wait: 850, html: 'Rainwater washes away topsoil and wind blows dry soil away.<span class="wapp-ticks">✔✔</span>' },
+    { type: 'bubble', cls: 'in', wait: 850, html: 'Rainwater washes away topsoil and wind blows dry soil away.<span class="b-time">09:45<span class="wapp-ticks">✔✔</span></span>' },
     { type: 'typing', wait: 950 },
-    { type: 'bubble', cls: 'out', wait: 1500, html: '<span class="b-label">AI THEORY MARKING</span>✓ Marked — <b>4 / 5</b><br><span style="opacity:.8;font-size:11.5px">Correctness · Completeness · Relevance</span>' },
+    { type: 'bubble', cls: 'out', wait: 1500, html: '<span class="b-label">AI THEORY MARKING</span>✓ Marked — <b>4 / 5</b><br><span style="opacity:.8;font-size:11.5px">Correctness · Completeness · Relevance</span><span class="b-time">09:45</span>' },
     { type: 'score', wait: 2600, html: 'Exam complete — <b>9 / 10</b> · Pass' },
     { type: 'clear', wait: 3600 },
   ];
@@ -808,6 +808,15 @@ async function aiGenerateForm(id) {
     <div class="field"><label>Difficulty</label>
       <select id="ag_diff"><option>easy</option><option selected>medium</option><option>hard</option><option>mixed</option></select></div>
     <div class="field"><label>Extra instructions (optional)</label><textarea id="ag_inst" placeholder="e.g. focus on causes and effects, 12 marks each"></textarea></div>
+    <div class="field">
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer"><input type="checkbox" id="ag_pool" checked> Fresh questions per attempt</label>
+      <p class="muted" style="margin:4px 0 8px">Generates extra variant questions from the same topic so every student's attempt (and retake) draws a different, unseen set.</p>
+      <select id="ag_variants">
+        <option value="2">2 variants per question</option>
+        <option value="3" selected>3 variants per question</option>
+        <option value="4">4 variants per question</option>
+      </select>
+    </div>
     <div class="modal-actions" style="margin-top:18px"><button id="ag_run" class="btn btn-primary">Generate</button></div>
   `);
   if (!div) return;
@@ -825,11 +834,13 @@ async function aiGenerateForm(id) {
         types,
         difficulty: document.querySelector('#ag_diff').value,
         instructions: document.querySelector('#ag_inst').value,
+        pool: document.querySelector('#ag_pool').checked,
+        poolMultiplier: parseInt(document.querySelector('#ag_variants').value) || 3,
       };
       const res = await api(`/api/exams/${id}/generate`, { method: 'POST', body });
       invalidateCache(`/api/exams/${id}`);
       div.remove();
-      toast(`Generated ${res.count} questions with full marking schemes.`);
+      toast(`Generated ${res.count} questions${res.poolCount ? ` + ${res.poolCount} variants for fresh attempts` : ''} with full marking schemes.`);
       renderExam(id);
     } catch (e) {
       run.disabled = false;

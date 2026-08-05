@@ -9,7 +9,9 @@ function computeForSession(sessionId) {
   const totalMarks = db.prepare('SELECT COALESCE(SUM(max_marks),0) t FROM answers WHERE session_id = ?').get(sessionId).t;
   const awarded = db.prepare('SELECT COALESCE(SUM(marks_awarded),0) s FROM answers WHERE session_id = ?').get(sessionId).s;
   const answered = db.prepare('SELECT COUNT(*) c FROM answers WHERE session_id = ?').get(sessionId).c;
-  const questionCount = db.prepare('SELECT COUNT(*) c FROM questions WHERE exam_id = ?').get(exam.id).c;
+  const drawn = db.prepare('SELECT COUNT(*) c FROM session_questions WHERE session_id = ?').get(sessionId).c;
+  const questionCount =
+    drawn > 0 ? drawn : db.prepare('SELECT COUNT(*) c FROM questions WHERE exam_id = ?').get(exam.id).c;
 
   const percentage = totalMarks > 0 ? Math.round((awarded / totalMarks) * 1000) / 10 : 0;
   return {
@@ -46,10 +48,14 @@ async function sendResultMessage(sessionId, phone, reason) {
 
   const key = db
     .prepare(
-      `SELECT a.q_order, a.answer_text, a.is_correct, q.correct_answer, q.text FROM answers a
-       JOIN questions q ON q.id = a.question_id
-       WHERE a.session_id = ? AND q.type = 'objective'
-       ORDER BY q.q_order`
+      `SELECT a.q_order, a.answer_text, a.is_correct,
+              COALESCE(q.correct_answer, p.correct_answer) AS correct_answer,
+              COALESCE(q.text, p.text) AS text
+       FROM answers a
+       LEFT JOIN questions q ON q.id = a.question_id
+       LEFT JOIN question_pool p ON p.id = a.question_id
+       WHERE a.session_id = ? AND COALESCE(q.type, p.type) = 'objective'
+       ORDER BY a.q_order`
     )
     .all(sessionId);
   if (config.exam.sendAnswerKey && key.length) {
@@ -83,16 +89,24 @@ function reportHTML(sessionId) {
   const r = computeForSession(sessionId);
   const answers = db
     .prepare(
-      `SELECT a.*, q.type, q.text, q.options, q.correct_answer, q.marks AS q_marks, q.explanation,
-              m.scheme AS scheme
+      `SELECT a.*,
+              COALESCE(q.type, p.type) AS type,
+              COALESCE(q.text, p.text) AS text,
+              COALESCE(q.options, p.options) AS options,
+              COALESCE(q.correct_answer, p.correct_answer) AS correct_answer,
+              COALESCE(q.explanation, p.explanation) AS explanation,
+              COALESCE(m.scheme, p.scheme_json) AS scheme
        FROM answers a
-       JOIN questions q ON q.id = a.question_id
+       LEFT JOIN questions q ON q.id = a.question_id
+       LEFT JOIN question_pool p ON p.id = a.question_id
        LEFT JOIN marking_schemes m ON m.question_id = q.id
        WHERE a.session_id = ?
-       ORDER BY q.q_order`
+       ORDER BY a.q_order`
     )
     .all(sessionId);
-  const allQuestions = db.prepare('SELECT COUNT(*) c FROM questions WHERE exam_id = ?').get(exam.id).c;
+  const drawn = db.prepare('SELECT COUNT(*) c FROM session_questions WHERE session_id = ?').get(sessionId).c;
+  const allQuestions =
+    drawn > 0 ? drawn : db.prepare('SELECT COUNT(*) c FROM questions WHERE exam_id = ?').get(exam.id).c;
 
   const rows = answers
     .map((a) => {

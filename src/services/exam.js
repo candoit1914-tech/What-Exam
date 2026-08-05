@@ -59,7 +59,64 @@ function createSession(examId, studentId) {
   const info = db
     .prepare('INSERT INTO sessions (exam_id, student_id) VALUES (?, ?)')
     .run(examId, studentId);
-  return db.prepare('SELECT * FROM sessions WHERE id = ?').get(info.lastInsertRowid);
+  const session = db.prepare('SELECT * FROM sessions WHERE id = ?').get(info.lastInsertRowid);
+  drawSessionQuestions(session.id, examId);
+  return session;
+}
+
+function shuffle(arr) {
+  const a = arr.slice();
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+/**
+ * Assign a fresh random question set for an attempt. When the exam has a
+ * question pool, each session draws its own subset in a random order, so
+ * different students (and retakes) see different questions.
+ */
+function drawSessionQuestions(sessionId, examId) {
+  const n = db.prepare('SELECT COUNT(*) c FROM questions WHERE exam_id = ?').get(examId).c;
+  if (!n) return 0;
+  const pool = db.prepare('SELECT id FROM question_pool WHERE exam_id = ?').all(examId);
+  if (!pool.length) return 0;
+  const chosen = shuffle(pool).slice(0, n);
+  const ins = db.prepare(
+    'INSERT INTO session_questions (session_id, question_id, q_order) VALUES (?,?,?)'
+  );
+  chosen.forEach((p, i) => ins.run(sessionId, p.id, i + 1));
+  return chosen.length;
+}
+
+/**
+ * Resolve the question a session is on. Sessions with a drawn set read from
+ * question_pool via session_questions; all other sessions use the exam's
+ * template questions (original behavior).
+ */
+function getSessionQuestion(sessionId, qOrder) {
+  const mapped = db
+    .prepare('SELECT question_id FROM session_questions WHERE session_id = ? AND q_order = ?')
+    .get(sessionId, qOrder);
+  if (mapped) {
+    const row = db.prepare('SELECT * FROM question_pool WHERE id = ?').get(mapped.question_id);
+    if (row) {
+      row._pool = true;
+      row.q_order = qOrder;
+      return row;
+    }
+  }
+  const s = db.prepare('SELECT exam_id FROM sessions WHERE id = ?').get(sessionId);
+  return s
+    ? db.prepare('SELECT * FROM questions WHERE exam_id = ? AND q_order = ?').get(s.exam_id, qOrder)
+    : null;
+}
+
+/** Number of questions drawn for this attempt (0 = template questions used). */
+function getSessionQuestionCount(sessionId) {
+  return db.prepare('SELECT COUNT(*) c FROM session_questions WHERE session_id = ?').get(sessionId).c;
 }
 
 function deadline(session) {
@@ -156,12 +213,15 @@ function resolveObjectiveLetter(question, body, meta = {}) {
 /** Reset a session to a fresh attempt (wipes previous answers + result). */
 function restartSession(session) {
   db.prepare('DELETE FROM answers WHERE session_id = ?').run(session.id);
+  db.prepare('DELETE FROM session_questions WHERE session_id = ?').run(session.id);
   db.prepare(
     `UPDATE sessions SET status='in_progress', current_q_order=1, started_at=datetime('now'),
        last_active_at=datetime('now'), ended_at=NULL, final_score=0, final_percentage=0, passed=0
      WHERE id = ?`
   ).run(session.id);
-  return db.prepare('SELECT * FROM sessions WHERE id = ?').get(session.id);
+  const fresh = db.prepare('SELECT * FROM sessions WHERE id = ?').get(session.id);
+  drawSessionQuestions(fresh.id, fresh.exam_id);
+  return fresh;
 }
 
 /** Human-friendly summary of a WhatsApp send error. */
@@ -188,9 +248,7 @@ async function sendQuestionTo(session, student) {
     return false;
   }
   const count = db.prepare('SELECT COUNT(*) c FROM questions WHERE exam_id = ?').get(exam.id).c;
-  const question = db
-    .prepare('SELECT * FROM questions WHERE exam_id = ? AND q_order = ?')
-    .get(exam.id, session.current_q_order);
+  const question = getSessionQuestion(session.id, session.current_q_order);
   if (!question) {
     await finalize(session, student);
     return false;
@@ -286,7 +344,9 @@ async function maybeStartSession(student) {
     session = createSession(exam.id, student.id);
   }
 
-  const questionCount = db.prepare('SELECT COUNT(*) c FROM questions WHERE exam_id = ?').get(exam.id).c;
+  const questionCount =
+    getSessionQuestionCount(session.id) ||
+    db.prepare('SELECT COUNT(*) c FROM questions WHERE exam_id = ?').get(exam.id).c;
   await wa.sendText(student.phone, formatExamIntro(exam, questionCount));
   const sent = await sendQuestionTo(session, student).catch(async (err) => {
     await wa.sendText(student.phone, `Could not start "${exam.title}" right now. Please try again shortly.`);
@@ -304,9 +364,7 @@ async function maybeStartSession(student) {
 
 async function processAnswer(session, student, body, meta = {}) {
   const exam = db.prepare('SELECT * FROM exams WHERE id = ?').get(session.exam_id);
-  const question = db
-    .prepare('SELECT * FROM questions WHERE exam_id = ? AND q_order = ?')
-    .get(exam.id, session.current_q_order);
+  const question = getSessionQuestion(session.id, session.current_q_order);
   if (!question) return;
 
   // A casual greeting is not an answer — resend the question instead of marking it wrong.
@@ -327,13 +385,13 @@ async function processAnswer(session, student, body, meta = {}) {
     .get(session.id, question.id);
   if (already) {
     let qo = question.q_order + 1;
-    let nq = db.prepare('SELECT * FROM questions WHERE exam_id = ? AND q_order = ?').get(exam.id, qo);
+    let nq = getSessionQuestion(session.id, qo);
     while (
       nq &&
       db.prepare('SELECT id FROM answers WHERE session_id = ? AND question_id = ?').get(session.id, nq.id)
     ) {
       qo += 1;
-      nq = db.prepare('SELECT * FROM questions WHERE exam_id = ? AND q_order = ?').get(exam.id, qo);
+      nq = getSessionQuestion(session.id, qo);
     }
     if (nq) {
       db.prepare('UPDATE sessions SET current_q_order = ? WHERE id = ?').run(nq.q_order, session.id);
@@ -348,9 +406,7 @@ async function processAnswer(session, student, body, meta = {}) {
   if (next === false) return; // invalid input, question re-sent
 
   // advance
-  const nextQ = db
-    .prepare('SELECT * FROM questions WHERE exam_id = ? AND q_order = ?')
-    .get(exam.id, question.q_order + 1);
+  const nextQ = getSessionQuestion(session.id, question.q_order + 1);
   if (nextQ) {
     db.prepare(
       `UPDATE sessions SET current_q_order = ?, last_active_at = datetime('now') WHERE id = ?`
@@ -391,7 +447,15 @@ async function handleAnswer(exam, session, student, question, body, meta = {}) {
     let marked = null;
     let err = null;
     try {
-      marked = await marking.markTheoryAnswer(question, answerText, null);
+      let scheme = null;
+      if (question._pool) {
+        try {
+          scheme = JSON.parse(question.scheme_json || '{}');
+        } catch {
+          scheme = null;
+        }
+      }
+      marked = await marking.markTheoryAnswer(question, answerText, scheme);
     } catch (e) {
       err = e;
     }
@@ -549,6 +613,7 @@ async function sendExamToStudent(exam, student, questionCount, template, report)
     }
 
     if (fresh) {
+      const attemptCount = getSessionQuestionCount(session.id) || questionCount;
       if (template) {
         const params = config.whatsapp.templateParams.length
           ? config.whatsapp.templateParams.map((p) => ({ type: 'text', text: p }))
@@ -556,11 +621,11 @@ async function sendExamToStudent(exam, student, questionCount, template, report)
               { type: 'text', text: exam.title },
               { type: 'text', text: exam.subject || 'General' },
               { type: 'text', text: String(exam.duration_minutes) },
-              { type: 'text', text: String(questionCount) },
+              { type: 'text', text: String(attemptCount) },
             ];
         await wa.sendTemplate(phone, template, config.whatsapp.templateLanguage, params);
       } else {
-        await wa.sendText(phone, formatExamIntro(exam, questionCount));
+        await wa.sendText(phone, formatExamIntro(exam, attemptCount));
       }
     }
     await sendQuestionTo(session, student);
@@ -605,5 +670,8 @@ module.exports = {
   sendExamToRecipients,
   sendQuestionTo,
   restartSession,
+  getSessionQuestion,
+  getSessionQuestionCount,
+  drawSessionQuestions,
   deadline,
 };
