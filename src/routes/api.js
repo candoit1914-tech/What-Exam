@@ -7,9 +7,28 @@ const pdf = require('../services/pdf');
 const examService = require('../services/exam');
 const results = require('../services/results');
 const config = require('../config');
+const auth = require('../auth');
 
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
+
+// ── Admin auth ─────────────────────────────────────────────────────────
+router.post('/auth/login', (req, res) => {
+  const password = (req.body && req.body.password) || '';
+  if (!auth.verifyPassword(password)) {
+    return res.status(401).json({ error: 'Invalid password' });
+  }
+  res.json({ token: auth.adminToken() });
+});
+
+router.use((req, res, next) => {
+  const header = req.headers.authorization || '';
+  const token = header.startsWith('Bearer ') ? header.slice(7) : '';
+  if (!auth.verifyAdmin(token)) {
+    return res.status(401).json({ error: 'Unauthorized — please sign in.' });
+  }
+  next();
+});
 
 function qWithScheme(row) {
   const scheme = marking.getScheme(row.id);
@@ -145,8 +164,12 @@ router.patch('/exams/:id', (req, res) => {
   if (b.title !== undefined) { fields.push('title=?'); vals.push(String(b.title)); }
   if (b.subject !== undefined) { fields.push('subject=?'); vals.push(String(b.subject)); }
   if (b.description !== undefined) { fields.push('description=?'); vals.push(String(b.description)); }
-  if (b.duration_minutes !== undefined) { fields.push('duration_minutes=?'); vals.push(parseInt(b.duration_minutes)); }
-  if (b.pass_percentage !== undefined) { fields.push('pass_percentage=?'); vals.push(parseFloat(b.pass_percentage)); }
+  if (b.duration_minutes !== undefined) { fields.push('duration_minutes=?'); vals.push(Math.max(parseInt(b.duration_minutes) || config.exam.defaultDurationMinutes, 1)); }
+  if (b.pass_percentage !== undefined) {
+    const p = parseFloat(b.pass_percentage);
+    fields.push('pass_percentage=?');
+    vals.push(Number.isFinite(p) ? Math.min(Math.max(p, 0), 100) : config.exam.passPercentage);
+  }
   if (!fields.length) return res.json({ ok: true });
   vals.push(exam.id);
   db.prepare(`UPDATE exams SET ${fields.join(', ')} WHERE id = ?`).run(...vals);
@@ -255,6 +278,11 @@ router.post('/exams/:id/questions', asyncWrap(async (req, res) => {
 }));
 
 router.put('/exams/:id/questions/:qid', (req, res) => {
+  const exam = db.prepare('SELECT * FROM exams WHERE id = ?').get(req.params.id);
+  if (!exam) return res.status(404).json({ error: 'Exam not found' });
+  if (exam.status === 'live' || exam.status === 'ended') {
+    return res.status(400).json({ error: 'Exam is already live/ended. Questions can no longer be edited.' });
+  }
   const q = db.prepare('SELECT * FROM questions WHERE id = ? AND exam_id = ?').get(req.params.qid, req.params.id);
   if (!q) return res.status(404).json({ error: 'Question not found' });
   const b = req.body;
@@ -282,6 +310,11 @@ router.put('/exams/:id/questions/:qid', (req, res) => {
 });
 
 router.delete('/exams/:id/questions/:qid', (req, res) => {
+  const exam = db.prepare('SELECT * FROM exams WHERE id = ?').get(req.params.id);
+  if (!exam) return res.status(404).json({ error: 'Exam not found' });
+  if (exam.status === 'live' || exam.status === 'ended') {
+    return res.status(400).json({ error: 'Exam is already live/ended. Questions can no longer be edited.' });
+  }
   db.prepare('DELETE FROM questions WHERE id = ? AND exam_id = ?').run(req.params.qid, req.params.id);
   db.prepare(
     `WITH ranked AS (
@@ -298,6 +331,11 @@ router.delete('/exams/:id/questions/:qid', (req, res) => {
 // ── Marking schemes ────────────────────────────────────────────────────
 
 router.put('/exams/:id/scheme/:qid', (req, res) => {
+  const exam = db.prepare('SELECT * FROM exams WHERE id = ?').get(req.params.id);
+  if (!exam) return res.status(404).json({ error: 'Exam not found' });
+  if (exam.status === 'live' || exam.status === 'ended') {
+    return res.status(400).json({ error: 'Exam is already live/ended. Schemes can no longer be edited.' });
+  }
   const q = db.prepare('SELECT * FROM questions WHERE id = ? AND exam_id = ?').get(req.params.qid, req.params.id);
   if (!q) return res.status(404).json({ error: 'Question not found' });
   const scheme = req.body.scheme || req.body;
@@ -328,7 +366,7 @@ router.post('/exams/:id/generate', asyncWrap(async (req, res) => {
   const generated = await ai.generateQuestions({
     subject: subject || exam.subject || exam.title,
     topics,
-    count: parseInt(count) || 10,
+    count: Math.min(Math.max(parseInt(count) || 10, 1), 50),
     types: Array.isArray(types) ? types : ['objective', 'theory'],
     difficulty,
     instructions,
@@ -390,7 +428,12 @@ router.post('/exams/:id/generate', asyncWrap(async (req, res) => {
 router.post('/exams/:id/pdf', upload.single('file'), asyncWrap(async (req, res) => {
   const exam = db.prepare('SELECT * FROM exams WHERE id = ?').get(req.params.id);
   if (!exam) return res.status(404).json({ error: 'Exam not found' });
+  if (exam.status === 'live' || exam.status === 'ended') {
+    return res.status(400).json({ error: 'Exam is already live/ended. Questions can no longer be edited.' });
+  }
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+  const magic = req.file.buffer.slice(0, 5).toString('latin1');
+  if (magic !== '%PDF-') return res.status(400).json({ error: 'Uploaded file is not a valid PDF.' });
 
   const text = await pdf.extractText(req.file.buffer);
   pdf.saveUpload(req.file.buffer, req.file.originalname);
@@ -533,18 +576,29 @@ router.get('/results/:sessionId', (req, res) => {
 
 router.patch('/results/:sessionId/answers/:answerId', (req, res) => {
   const { marks_awarded, reviewed } = req.body;
+  const answer = db.prepare('SELECT * FROM answers WHERE id = ? AND session_id = ?').get(req.params.answerId, req.params.sessionId);
+  if (!answer) return res.status(404).json({ error: 'Answer not found' });
   const fields = [];
   const vals = [];
-  if (marks_awarded !== undefined) { fields.push('marks_awarded=?'); vals.push(parseFloat(marks_awarded)); }
+  if (marks_awarded !== undefined) {
+    const m = parseFloat(marks_awarded);
+    fields.push('marks_awarded=?');
+    vals.push(Number.isFinite(m) ? Math.min(Math.max(m, 0), answer.max_marks || 0) : answer.marks_awarded);
+  }
   if (reviewed !== undefined) { fields.push('reviewed=?'); vals.push(reviewed ? 1 : 0); }
   if (fields.length) {
     fields.push('needs_review=0');
-    vals.push(req.params.answerId);
+    vals.push(answer.id);
     db.prepare(`UPDATE answers SET ${fields.join(', ')} WHERE id = ?`).run(...vals);
   }
-  const sessionId = db.prepare('SELECT session_id FROM answers WHERE id = ?').get(req.params.answerId)?.session_id;
-  if (sessionId) results.computeForSession(sessionId);
-  res.json({ ok: true });
+  const updated = results.persistSessionTotals(answer.session_id);
+  res.json({ ok: true, score: updated.score, percentage: updated.percentage, passed: updated.passed });
+});
+
+router.get('/results/:sessionId/report-url', (req, res) => {
+  const session = db.prepare('SELECT * FROM sessions WHERE id = ?').get(req.params.sessionId);
+  if (!session) return res.status(404).json({ error: 'Session not found' });
+  res.json({ url: auth.reportUrl(session.id) });
 });
 
 // ── Students ───────────────────────────────────────────────────────────

@@ -1,6 +1,7 @@
 const db = require('../db');
 const config = require('../config');
 const wa = require('./whatsapp');
+const auth = require('../auth');
 
 function computeForSession(sessionId) {
   const session = db.prepare('SELECT * FROM sessions WHERE id = ?').get(sessionId);
@@ -23,6 +24,14 @@ function computeForSession(sessionId) {
   };
 }
 
+function persistSessionTotals(sessionId) {
+  const r = computeForSession(sessionId);
+  db.prepare(
+    `UPDATE sessions SET final_score = ?, final_percentage = ?, passed = ? WHERE id = ?`
+  ).run(r.score, r.percentage, r.passed ? 1 : 0, sessionId);
+  return r;
+}
+
 async function sendResultMessage(sessionId, phone, reason) {
   const r = computeForSession(sessionId);
   const passMark = r.exam.pass_percentage;
@@ -43,7 +52,7 @@ async function sendResultMessage(sessionId, phone, reason) {
        ORDER BY q.q_order`
     )
     .all(sessionId);
-  if (key.length) {
+  if (config.exam.sendAnswerKey && key.length) {
     msg += `\n*Answer key* (yours → correct):\n` +
       key
         .map((k) => {
@@ -61,7 +70,7 @@ async function sendResultMessage(sessionId, phone, reason) {
     .get(sessionId).c;
   if (reviewCount) msg += `\n⚠️ ${reviewCount} answer(s) pending review by your administrator.\n`;
 
-  msg += `\nFull report: ${config.appUrl}/report/${sessionId}`;
+  msg += `\nFull report: ${config.appUrl}${auth.reportUrl(sessionId)}`;
 
   await wa.sendText(phone, msg);
 }
@@ -91,7 +100,7 @@ function reportHTML(sessionId) {
       if (a.type === 'objective') {
         const opts = JSON.parse(a.options || '[]');
         details = `<div class="opts">${opts
-          .map((o) => `<div class="${o.key === a.correct_answer ? 'correct' : ''}">${o.key}. ${o.text}${o.key === a.correct_answer ? ' ✓' : ''}</div>`)
+          .map((o) => `<div class="${o.key === a.correct_answer ? 'correct' : ''}">${esc(o.key)}. ${esc(o.text)}${o.key === a.correct_answer ? ' ✓' : ''}</div>`)
           .join('')}</div>`;
       } else {
         const sch = a.scheme ? JSON.parse(a.scheme) : null;
@@ -158,4 +167,4 @@ function esc(s) {
     .replace(/>/g, '&gt;');
 }
 
-module.exports = { computeForSession, sendResultMessage, reportHTML };
+module.exports = { computeForSession, persistSessionTotals, sendResultMessage, reportHTML };

@@ -3,9 +3,9 @@ const config = require('./config');
 const api = require('./routes/api');
 const webhook = require('./routes/webhook');
 const results = require('./services/results');
+const auth = require('./auth');
 
 const app = express();
-app.use(express.json());
 
 function originAllowed(origin) {
   if (config.corsOrigins.includes(origin)) return true;
@@ -21,16 +21,25 @@ app.use((req, res, next) => {
   if (origin && originAllowed(origin)) {
     res.setHeader('Access-Control-Allow-Origin', origin);
     res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
     res.setHeader('Vary', 'Origin');
   }
   if (req.method === 'OPTIONS') return res.sendStatus(204);
   next();
 });
 
-app.use('/api', api);
+// Webhook must be mounted BEFORE express.json() so the raw body is intact
+// for x-hub-signature-256 HMAC verification.
 app.use('/webhook/whatsapp', webhook);
+
+app.use(express.json());
+app.use('/api', api);
 app.get('/report/:sessionId', (req, res) => {
+  if (!auth.verifyReportToken(req.query.token, req.params.sessionId)) {
+    return res
+      .status(403)
+      .send('This report link is invalid or expired. Ask your administrator to resend your result.');
+  }
   const r = results.reportHTML(req.params.sessionId);
   res.status(r.status).send(r.html);
 });
@@ -39,6 +48,9 @@ const API_GROUPS = [
   ['System', [
     ['GET', '/health', 'Health check'],
     ['GET', '/api/stats', 'Dashboard summary counts'],
+  ]],
+  ['Auth', [
+    ['POST', '/api/auth/login', 'Sign in — returns a bearer token (required for all /api routes)'],
   ]],
   ['Exams', [
     ['GET', '/api/exams', 'List exams'],
@@ -70,6 +82,7 @@ const API_GROUPS = [
     ['GET', '/api/results', 'Completed sessions'],
     ['GET', '/api/results/:sessionId', 'Session detail + answers'],
     ['PATCH', '/api/results/:sessionId/answers/:answerId', 'Adjust awarded marks'],
+    ['GET', '/api/results/:sessionId/report-url', 'Get a signed shareable report link'],
     ['POST', '/api/results/:sessionId/resend', 'Resend result via WhatsApp'],
     ['GET', '/api/students', 'List students'],
     ['PATCH', '/api/students/:id', 'Rename a student'],
@@ -208,6 +221,10 @@ app.get('/privacy', (req, res) => {
 app.get('/health', (req, res) => res.json({ ok: true, appUrl: config.appUrl }));
 
 app.use((err, req, res, next) => {
+  if (err && err.name === 'MulterError') {
+    const status = err.code === 'LIMIT_FILE_SIZE' ? 413 : 400;
+    return res.status(status).json({ error: `Upload failed: ${err.message}` });
+  }
   console.error(err);
   res.status(err.status || 500).json({ error: err.message || 'Internal server error' });
 });
@@ -243,6 +260,14 @@ if (require.main === module) {
           ? `AI: configured (${config.ai.model}) ✓`
           : 'AI: NOT configured (set AI_API_KEY/AI_BASE_URL in .env)'
       );
+      if (config.admin.isGenerated) {
+        console.log(`⚠️  No ADMIN_PASSWORD set — generated a random one for this boot: ${config.admin.password}`);
+        console.log('    Set ADMIN_PASSWORD in your environment (Render env vars) to keep a stable password.');
+      }
+      if (!config.whatsapp.appSecret) {
+        console.warn('⚠️  WHATSAPP_APP_SECRET not set — webhook POSTs are REJECTED.');
+        console.warn('    Set WHATSAPP_APP_SECRET in .env to receive student replies from WhatsApp.');
+      }
     });
   };
   run().catch((e) => {

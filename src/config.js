@@ -1,11 +1,19 @@
 require('dotenv').config();
 const path = require('path');
+const crypto = require('crypto');
 
 const root = path.resolve(__dirname, '..');
 
 function valid(v) {
   return !!v && !/your_|example|changeme|^$/.test(v);
 }
+
+const adminPassword = (() => {
+  const p = process.env.ADMIN_PASSWORD || '';
+  if (valid(p)) return p;
+  return 'wa-' + crypto.randomBytes(12).toString('base64url');
+})();
+const adminPasswordIsGenerated = !valid(process.env.ADMIN_PASSWORD || '');
 
 const config = {
   port: parseInt(process.env.PORT || '3000', 10),
@@ -23,7 +31,8 @@ const config = {
   whatsapp: {
     accessToken: valid(process.env.WHATSAPP_ACCESS_TOKEN) ? process.env.WHATSAPP_ACCESS_TOKEN : '',
     phoneNumberId: valid(process.env.WHATSAPP_PHONE_NUMBER_ID) ? process.env.WHATSAPP_PHONE_NUMBER_ID : '',
-    verifyToken: process.env.WHATSAPP_VERIFY_TOKEN || 'la_exam_verify_token',
+    verifyToken: valid(process.env.WHATSAPP_VERIFY_TOKEN) ? process.env.WHATSAPP_VERIFY_TOKEN : '',
+    appSecret: valid(process.env.WHATSAPP_APP_SECRET) ? process.env.WHATSAPP_APP_SECRET : '',
     templateName: (process.env.WHATSAPP_TEMPLATE_NAME || '').trim(),
     templateLanguage: process.env.WHATSAPP_TEMPLATE_LANGUAGE || 'en',
     templateParams: (process.env.WHATSAPP_TEMPLATE_PARAMS || '')
@@ -45,6 +54,11 @@ const config = {
     allowResendResults: process.env.ALLOW_RESEND_RESULTS !== 'false',
     sendConcurrency: parseInt(process.env.SEND_CONCURRENCY || '5', 10),
     sendCertificates: process.env.SEND_CERTIFICATES !== 'false',
+  },
+
+  admin: {
+    password: adminPassword,
+    isGenerated: adminPasswordIsGenerated,
   },
 
   seedOnBoot: process.env.SEED_ON_BOOT !== 'false',

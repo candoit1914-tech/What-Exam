@@ -1,7 +1,13 @@
 /* What Exam — premium emerald landing dashboard (vanilla JS SPA) */
 
 const API_BASE = (window.API_BASE || 'http://localhost:3000').replace(/\/+$/, '');
+const AUTH_KEY = 'wa_exam_token';
 const $view = document.getElementById('view');
+
+// ── Session ─────────────────────────────────────────────────────
+function getToken() { return localStorage.getItem(AUTH_KEY); }
+function setToken(t) { localStorage.setItem(AUTH_KEY, t); }
+function clearToken() { localStorage.removeItem(AUTH_KEY); }
 
 // ── Performance: API cache ───────────────────────────────────────
 const _cache = new Map();
@@ -17,12 +23,24 @@ async function api(path, opts = {}) {
     _cache.delete(key);
   }
 
+  const hasBody = opts.body != null;
+  const isForm = hasBody && typeof FormData !== 'undefined' && opts.body instanceof FormData;
+  const headers = Object.assign({}, opts.headers || {});
+  if (!isForm) headers['Content-Type'] = 'application/json';
+  const token = getToken();
+  if (token) headers.Authorization = `Bearer ${token}`;
+
   const res = await fetch(API_BASE + path, {
-    headers: { 'Content-Type': 'application/json' },
     ...opts,
-    body: opts.body ? JSON.stringify(opts.body) : undefined,
+    headers,
+    body: hasBody ? (isForm ? opts.body : JSON.stringify(opts.body)) : undefined,
   });
   const data = await res.json().catch(() => ({}));
+  if (res.status === 401 && !path.startsWith('/auth/login')) {
+    clearToken();
+    showLogin();
+    throw new Error(data.error || 'Session expired — please sign in.');
+  }
   if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
 
   if (key) _cache.set(key, { data, ts: Date.now() });
@@ -33,6 +51,62 @@ function invalidateCache(pattern) {
   for (const k of _cache.keys()) {
     if (k.includes(pattern)) _cache.delete(k);
   }
+}
+
+// ── Auth ────────────────────────────────────────────────────────
+function showLogin() {
+  clearToken();
+  $view.innerHTML = `
+    <div class="login-wrap">
+      <div class="login-card">
+        <div class="login-brand"><img src="/icon.svg" alt="What Exam"><span>WHAT&nbsp;EXAM</span></div>
+        <h1>Admin sign in</h1>
+        <p class="sub">This dashboard is protected. Enter the admin password to continue.</p>
+        <form id="login_form" onsubmit="event.preventDefault(); login();">
+          <div class="field"><label>Password</label>
+            <input type="password" id="login_pass" autocomplete="current-password" autofocus placeholder="••••••••">
+          </div>
+          <button class="btn btn-primary btn-block" type="submit" id="login_btn">Sign In</button>
+        </form>
+      </div>
+    </div>`;
+  const input = document.querySelector('#login_pass');
+  if (input) input.focus();
+}
+
+async function login() {
+  const btn = document.querySelector('#login_btn');
+  const input = document.querySelector('#login_pass');
+  if (!input || !btn) return;
+  const password = input.value;
+  if (!password) return toast('Enter the admin password.', true);
+  btn.disabled = true;
+  btn.textContent = 'Signing in…';
+  try {
+    const { token } = await api('/api/auth/login', { method: 'POST', body: { password } });
+    setToken(token);
+    _cache.clear();
+    toast('Welcome back.');
+    router();
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = 'Sign In';
+    toast(e.message, true);
+  }
+}
+
+function logout() {
+  clearToken();
+  _cache.clear();
+  showLogin();
+}
+
+const _reportUrls = new Map();
+async function reportUrl(sessionId) {
+  if (_reportUrls.has(sessionId)) return _reportUrls.get(sessionId);
+  const { url } = await api(`/api/results/${sessionId}/report-url`);
+  _reportUrls.set(sessionId, url);
+  return url;
 }
 
 function debounce(fn, ms = 200) {
@@ -260,6 +334,7 @@ function router() {
       setTimeout(() => { $view.style.willChange = 'auto'; }, 400);
       observeReveals();
       initHeroScene();
+      applySearchFilter();
       document.querySelectorAll('[data-count]').forEach((el) => {
         animateCountUp(el, parseInt(el.dataset.count) || 0);
       });
@@ -511,6 +586,12 @@ async function renderTab() {
         </tbody>
       </table></div>`;
   } else if (tab === 'results') {
+    const urls = {};
+    await Promise.all(
+      results
+        .filter((s) => ['completed', 'expired', 'ended'].includes(s.status))
+        .map(async (s) => { urls[s.id] = await reportUrl(s.id).catch(() => null); })
+    );
     bodyEl.innerHTML = `<div class="card table-card"><table>
       <thead><tr><th>Student</th><th>Phone</th><th>Score</th><th>%</th><th>Result</th><th>Status</th><th>Started</th><th></th></tr></thead>
       <tbody>
@@ -527,8 +608,8 @@ async function renderTab() {
             <td>${badge(s.status)}</td>
             <td class="muted">${s.started_at}</td>
             <td class="row">
-              ${finished ? `<a href="${API_BASE}/report/${s.id}" target="_blank"><button class="small ghost">Report</button></a>
-              <button class="small ghost" onclick="resendResult(${s.id})">Resend</button>` : ''}
+              ${finished ? (urls[s.id] ? `<a href="${API_BASE}${urls[s.id]}" target="_blank"><button class="small ghost">Report</button></a>` : '')
+                + `<button class="small ghost" onclick="resendResult(${s.id})">Resend</button>` : ''}
               <a href="#/results/${s.id}"><button class="small ghost">Details</button></a>
             </td>
           </tr>`;
@@ -776,7 +857,10 @@ async function pdfUploadForm(id) {
     const fd = new FormData();
     fd.append('file', file);
     try {
-      const res = await fetch(`${API_BASE}/api/exams/${id}/pdf`, { method: 'POST', body: fd });
+      const headers = {};
+      const token = getToken();
+      if (token) headers.Authorization = `Bearer ${token}`;
+      const res = await fetch(`${API_BASE}/api/exams/${id}/pdf`, { method: 'POST', headers, body: fd });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error);
       invalidateCache(`/api/exams/${id}`);
@@ -938,6 +1022,8 @@ async function renderResults() {
     <div class="card table-card"><div class="skeleton skeleton-row" style="margin:10px"></div></div>`;
 
   const results = await api('/api/results');
+  const urls = {};
+  await Promise.all(results.map(async (s) => { urls[s.id] = await reportUrl(s.id).catch(() => null); }));
   $view.innerHTML = `
       ${pageHead('chart', 'RESU<span class="gr">LTS</span>', 'Completed, expired and ended sessions')}
     <div class="card table-card reveal">
@@ -954,7 +1040,7 @@ async function renderResults() {
             <td>${s.pass_percentage}%</td>
             <td class="muted">${s.ended_at || '—'}</td>
             <td class="row">
-              <a href="${API_BASE}/report/${s.id}" target="_blank"><button class="small ghost">Report</button></a>
+              ${urls[s.id] ? `<a href="${API_BASE}${urls[s.id]}" target="_blank"><button class="small ghost">Report</button></a>` : ''}
               <button class="small ghost" onclick="resendResult(${s.id})">Resend</button>
               <a href="#/results/${s.id}"><button class="small ghost">Details</button></a>
             </td>
@@ -971,6 +1057,7 @@ async function renderResultDetail(id) {
     <div class="card"><div class="skeleton skeleton-card"></div></div>`;
 
   const r = await api(`/api/results/${id}`);
+  const url = await reportUrl(id).catch(() => null);
   $view.innerHTML = `
     <div class="spread">
       <div>
@@ -978,7 +1065,7 @@ async function renderResultDetail(id) {
         <p class="muted" style="margin-top:4px">Score ${r.score}/${r.totalMarks} · ${r.percentage}% · <span class="${r.passed ? 'pass' : 'fail'}">${r.passed ? 'PASS' : 'FAIL'}</span> (pass ${r.exam.pass_percentage}%)</p>
       </div>
       <div class="row">
-        <a href="${API_BASE}/report/${id}" target="_blank"><button class="btn btn-primary">Open Report</button></a>
+        ${url ? `<a href="${API_BASE}${url}" target="_blank"><button class="btn btn-primary">Open Report</button></a>` : ''}
         <button class="btn btn-ghost" onclick="resendResult(${id})">Resend Result</button>
         <a href="#/results"><button class="btn btn-ghost">Back</button></a>
       </div>
@@ -1133,5 +1220,19 @@ document.addEventListener('mouseover', (e) => {
   }
 });
 
+// ── Search filter (filters the visible table) ──────────────────
+function applySearchFilter() {
+  const q = (document.querySelector('.search input')?.value || '').trim().toLowerCase();
+  document.querySelectorAll('#view table tbody tr').forEach((tr) => {
+    tr.style.display = !q || tr.textContent.toLowerCase().includes(q) ? '' : 'none';
+  });
+}
+const searchInput = document.querySelector('.search input');
+if (searchInput) {
+  const debouncedFilter = debounce(applySearchFilter, 150);
+  searchInput.addEventListener('input', debouncedFilter);
+}
+
 // ── Boot ─────────────────────────────────────────────────────────
-router();
+if (getToken()) router();
+else showLogin();
