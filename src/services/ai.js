@@ -11,7 +11,9 @@ function aiConfigured() {
   return !!(config.ai.apiKey || config.ai.baseUrl);
 }
 
-async function chatJSON(messages, { temperature = 0.4, maxRetries = 2, timeoutMs = config.ai.timeoutMs } = {}) {
+const delay = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function chatJSON(messages, { temperature = 0.4, maxRetries = 2, timeoutMs = config.ai.timeoutMs, maxTokens = 8192 } = {}) {
   if (!aiConfigured()) {
     throw new AIError('AI is not configured. Set AI_API_KEY and AI_BASE_URL in .env');
   }
@@ -20,7 +22,7 @@ async function chatJSON(messages, { temperature = 0.4, maxRetries = 2, timeoutMs
     model: config.ai.model,
     messages,
     temperature,
-    max_tokens: 8192,
+    max_tokens: maxTokens,
   };
 
   let lastErr;
@@ -55,7 +57,13 @@ async function chatJSON(messages, { temperature = 0.4, maxRetries = 2, timeoutMs
       // A hard timeout must surface (never retry) so an exam question never
       // hangs the flow indefinitely waiting on an unresponsive AI endpoint.
       if (err && err.name === 'AbortError') throw new AIError(`AI request timed out after ${Math.round(timeoutMs / 1000)}s.`);
-      if (err instanceof AIError && attempt < maxRetries) continue;
+      // Retry transient network failures (ECONNRESET etc.) and HTTP errors with
+      // a small backoff; concurrent extraction blocks make these more likely.
+      const retryable = err instanceof AIError || err instanceof TypeError;
+      if (retryable && attempt < maxRetries) {
+        await delay(500 * (attempt + 1));
+        continue;
+      }
       throw err;
     }
   }
@@ -89,6 +97,14 @@ const SYSTEM_BASE =
 // question extraction) get a generous window; the default timeout applies to
 // everything else.
 const BULK_TIMEOUT_MS = 5 * 60 * 1000;
+
+// PDF/paper extraction runs in small question-aligned blocks so every AI call
+// stays fast on slow endpoints. Each block generates at most BLOCK_MAX_TOKENS
+// of output; the cap also keeps a single rambling block from burning the timeout.
+const BLOCK_QUESTIONS = 10;
+const BLOCK_MAX_CHARS = 8000;
+const BLOCK_CONCURRENCY = 2;
+const BLOCK_MAX_TOKENS = 4000;
 
 /** Run fn over items with at most `limit` promises in flight (like a semaphore). */
 async function mapLimit(items, limit, fn) {
@@ -262,8 +278,20 @@ function textSimilarity(a, b) {
 /**
  * Extract structured questions from raw exam text (from PDF or pasted document).
  * Detects options and answer keys; generates schemes where missing.
+ *
+ * The document is split into question-aligned blocks and each block is
+ * extracted by a SEPARATE small AI call, run concurrently. A single call that
+ * must parse and emit the entire paper (often >8000 output tokens) easily
+ * exceeds the bulk timeout on slow models (e.g. huge 100B+ endpoints), which
+ * is what made PDF uploads time out. Small blocks keep every call fast.
  */
 async function extractQuestionsFromText(rawText) {
+  const text = String(rawText || '').trim();
+  if (!text) return [];
+
+  const answerKey = extractAnswerKeySection(text);
+  const blocks = splitIntoBlocks(text);
+
   const system = SYSTEM_BASE + `
 You are given the raw text of an examination document. Extract every question.
 
@@ -303,15 +331,91 @@ Rules:
 - Do NOT invent answer keys that are not in the document. Leave correct_answer/explanation empty when unknown.
 `;
 
-  const result = await chatJSON(
-    [
-      { role: 'system', content: system },
-      { role: 'user', content: `Examination document:\n\n${rawText.slice(0, 120000)}` },
-    ],
-    { timeoutMs: BULK_TIMEOUT_MS }
+  const user = (block) => [
+    'Extract every question from the document block below.',
+    answerKey
+      ? `\nThe document includes this answer key (use it to fill correct_answer — the option LETTER — for the matching questions):\n${answerKey}`
+      : '',
+    `\n--- Document block ---\n${block}`,
+  ].join('\n');
+
+  const tasks = blocks.map((block) => () =>
+    chatJSON(
+      [
+        { role: 'system', content: system },
+        { role: 'user', content: user(block) },
+      ],
+      { timeoutMs: BULK_TIMEOUT_MS, maxTokens: BLOCK_MAX_TOKENS }
+    )
   );
 
-  return Array.isArray(result) ? result : result.questions;
+  const settled = await mapLimit(tasks, BLOCK_CONCURRENCY, (run) => run());
+
+  const seen = new Set();
+  const all = [];
+  for (const result of settled) {
+    const list = Array.isArray(result) ? result : result.questions;
+    for (const q of list || []) {
+      const t = String((q && q.text) || '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .toLowerCase();
+      if (t && !seen.has(t)) {
+        seen.add(t);
+        all.push(q);
+      }
+    }
+  }
+  return all;
+}
+
+// A numbered question line, e.g. "1. What is..." or "12) State...". Option
+// lines ("A. ...") and section headers do not match.
+const QUESTION_START = /^\s*\d{1,3}\s*[.)]\s+\S/;
+
+/** Split document text into blocks that only break BETWEEN questions. */
+function splitIntoBlocks(text, perBlock = BLOCK_QUESTIONS, maxChars = BLOCK_MAX_CHARS) {
+  const lines = text.split(/\r?\n/);
+  const blocks = [];
+  let cur = [];
+  let qCount = 0;
+  let totalChars = 0;
+  const flush = () => {
+    if (cur.length) {
+      blocks.push(cur.join('\n'));
+      cur = [];
+      qCount = 0;
+      totalChars = 0;
+    }
+  };
+  for (const line of lines) {
+    const isQuestion = QUESTION_START.test(line);
+    if ((qCount >= perBlock || totalChars + line.length >= maxChars) && isQuestion && cur.length) {
+      flush();
+    }
+    cur.push(line);
+    totalChars += line.length + 1;
+    if (isQuestion) qCount++;
+  }
+  flush();
+  return blocks;
+}
+
+/** Find the answer-key section ("Answers: 1-B, 2-C ...") near the end of the doc. */
+function extractAnswerKeySection(text) {
+  const lines = text.split(/\r?\n/);
+  let start = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (
+      /^\s*(?:answers?|answer\s*key|key)\s*[:.\-]?\s*$/i.test(lines[i]) ||
+      /^\s*(?:answers?|answer\s*key|key)\s*[:.\-]\s*\d+\s*[.)\-]\s*[A-Da-d]/i.test(lines[i])
+    ) {
+      start = i;
+      break;
+    }
+  }
+  if (start === -1) return '';
+  return lines.slice(start).join('\n').slice(0, 4000);
 }
 
 /**
