@@ -156,6 +156,26 @@ function timeRemaining(session, exam) {
   return `${mm}:${ss}`;
 }
 
+// Paper-only exam instructions (shading, booklets, margins, ink) make no sense
+// in a typed chat. A sentence is dropped only when it BOTH reads like an
+// instruction AND names a physical-paper mechanic, so comprehension prose that
+// happens to mention "pencil" is never corrupted.
+const PAPER_ONLY =
+  /\bshad(?:e|e in|ing)\b|\bpencil\b|\bpen\b|\bH\s*B\b|\banswer\s+(?:booklet|sheet|grid)\b|\bmargins?\b|\bruled\s+lines?\b|\brough\s+work\b|\b(?:blue|black)\s+ink\b|\btick\b|\bcross\s+out\b|\b(circle|ring|underline)\b|\bfill\s+in\b|\bdo\s+not\s+write\b|\bquestion\s+paper\b/i;
+const INSTRUCTION_START =
+  /^(write|shade|use|tick|cross|circle|ring|underline|fill|answer|do not|don't|ensure|make sure|remember|leave|erase|rub)/i;
+const INSTRUCTION_PHRASE = /(your\s+answers?|answer\s+(sheet|booklet|grid|paper)|should\s+be|in\s+the\s+box)/i;
+
+function stripPaperOnlyInstructions(text) {
+  const segments = String(text || '')
+    .split(/\n+|(?<=[.!?])\s+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  return segments
+    .filter((s) => !((INSTRUCTION_START.test(s) || INSTRUCTION_PHRASE.test(s)) && PAPER_ONLY.test(s)))
+    .join('\n');
+}
+
 /** Answer-options message for objective questions (sent right after the question). */
 function formatOptions(exam, session, question) {
   const options = JSON.parse(question.options || '[]');
@@ -728,4 +748,5 @@ module.exports = {
   deadline,
   markAllPendingTheory,
   formatQuestion,
+  stripPaperOnlyInstructions,
 };

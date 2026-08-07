@@ -213,3 +213,23 @@ test('correctKeyFor ignores a null correct_index instead of guessing option A', 
   assert.equal(pdfImport.correctKeyFor(opts, { correct_answer: '', correct_index: null }), null);
   assert.equal(pdfImport.correctKeyFor(opts, { correct_answer: '', correct_index: undefined }), null);
 });
+
+test('stripPaperOnlyInstructions drops paper-only mechanics but keeps passages and useful instructions', () => {
+  const input = [
+    'Read the following passage carefully and answer questions 1 to 5.',
+    'Ama lost her pencil on the way to school.',
+    'Answer ALL questions in this section.',
+    'Your answer should be between 250 and 300 words.',
+    'Shade your answer with a pencil.',
+    'Write your answers in the answer booklet.',
+    'Do not write in the margin.',
+  ].join('\n');
+  const out = exam.stripPaperOnlyInstructions(input);
+  assert.match(out, /Read the following passage/, 'passage-introducing instruction stays');
+  assert.match(out, /Ama lost her pencil/, 'prose mention of pencil survives');
+  assert.match(out, /Answer ALL questions/, '"Answer ALL" stays');
+  assert.match(out, /250 and 300 words/, 'word limit stays');
+  assert.doesNotMatch(out, /Shade your answer/, 'pencil-shading instruction dropped');
+  assert.doesNotMatch(out, /answer booklet/, 'booklet instruction dropped');
+  assert.doesNotMatch(out, /Do not write in the margin/, 'margin instruction dropped');
+});
