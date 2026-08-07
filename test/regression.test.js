@@ -233,3 +233,34 @@ test('sessionQuestionSequence uses template order when no pool is drawn', () => 
   const seq = exam.sessionQuestionSequence(session);
   assert.ok(Array.isArray(seq), 'returns an array');
 });
+
+test('buildQuestionBubbles sends OBJECTIVE banner once then each question', () => {
+  const q1 = { id: 1, q_order: 1, type: 'objective', text: 'Q1', passage: '' };
+  const q2 = { id: 2, q_order: 2, type: 'objective', text: 'Q2', passage: '' };
+  const seq = [q1, q2];
+  assert.deepEqual(exam.buildQuestionBubbles({}, q1, seq, 0), ['*OBJECTIVE*', '*QUESTION 1*\n\nQ1']);
+  assert.deepEqual(exam.buildQuestionBubbles({}, q2, seq, 1), ['*QUESTION 2*\n\nQ2']);
+});
+
+test('buildQuestionBubbles sends THEORY banner once before theory questions', () => {
+  const q1 = { id: 1, q_order: 1, type: 'objective', text: 'Q1', passage: '' };
+  const q2 = { id: 2, q_order: 2, type: 'theory', text: 'Q2', passage: '' };
+  const q3 = { id: 3, q_order: 3, type: 'theory', text: 'Q3', passage: '' };
+  const seq = [q1, q2, q3];
+  assert.deepEqual(exam.buildQuestionBubbles({}, q2, seq, 1), ['*THEORY*', '*QUESTION 2*\n\nQ2']);
+  assert.deepEqual(exam.buildQuestionBubbles({}, q3, seq, 2), ['*QUESTION 3*\n\nQ3']);
+});
+
+test('buildQuestionBubbles sends a shared passage once before the first question that uses it', () => {
+  const passage = 'Read the passage.\nAma lost her pencil on the way to school.';
+  const q1 = { id: 1, q_order: 1, type: 'objective', text: 'Q1', passage };
+  const q2 = { id: 2, q_order: 2, type: 'objective', text: 'Q2', passage };
+  const seq = [q1, q2];
+  assert.deepEqual(exam.buildQuestionBubbles({}, q1, seq, 0), ['*OBJECTIVE*', passage, '*QUESTION 1*\n\nQ1']);
+  assert.deepEqual(exam.buildQuestionBubbles({}, q2, seq, 1), ['*QUESTION 2*\n\nQ2']);
+});
+
+test('buildQuestionBubbles treats an unknown index as the first question', () => {
+  const q = { id: 7, q_order: 3, type: 'objective', text: 'Q3', passage: 'Read the passage.' };
+  assert.deepEqual(exam.buildQuestionBubbles({}, q, [], -1), ['*OBJECTIVE*', 'Read the passage.', '*QUESTION 3*\n\nQ3']);
+});

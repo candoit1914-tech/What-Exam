@@ -195,6 +195,28 @@ function stripPaperOnlyInstructions(text) {
     .join('\n');
 }
 
+/**
+ * The chat bubbles to send for one question: a bold type banner (once per
+ * type, before the first of its kind), the cleaned passage/instruction (once,
+ * before the first question that uses it), then the question bubble. "Already
+ * sent" is derived from the questions that precede this one in the sequence,
+ * so resume/nudge re-sends never duplicate banners or passages.
+ */
+function buildQuestionBubbles(exam, question, sequence, index) {
+  const bubbles = [];
+  const type = question.type === 'theory' ? 'THEORY' : 'OBJECTIVE';
+  const prev = index > 0 ? sequence.slice(0, index) : [];
+  if (!prev.some((q) => q.type === question.type)) {
+    bubbles.push(`*${type}*`);
+  }
+  const passage = stripPaperOnlyInstructions(question.passage).trim();
+  if (passage && !prev.some((q) => stripPaperOnlyInstructions(q.passage).trim() === passage)) {
+    bubbles.push(passage);
+  }
+  bubbles.push(formatQuestion(exam, question));
+  return bubbles;
+}
+
 /** Answer-options message for objective questions (sent right after the question). */
 function formatOptions(exam, session, question) {
   const options = JSON.parse(question.options || '[]');
@@ -768,5 +790,6 @@ module.exports = {
   deadline,
   markAllPendingTheory,
   formatQuestion,
+  buildQuestionBubbles,
   stripPaperOnlyInstructions,
 };
