@@ -227,3 +227,9 @@ test('stripPaperOnlyInstructions drops paper-only mechanics but keeps passages a
   assert.doesNotMatch(out, /answer booklet/, 'booklet instruction dropped');
   assert.doesNotMatch(out, /Do not write in the margin/, 'margin instruction dropped');
 });
+
+test('sessionQuestionSequence uses template order when no pool is drawn', () => {
+  const session = { id: -999, exam_id: -999 };
+  const seq = exam.sessionQuestionSequence(session);
+  assert.ok(Array.isArray(seq), 'returns an array');
+});

@@ -119,6 +119,26 @@ function getSessionQuestionCount(sessionId) {
   return db.prepare('SELECT COUNT(*) c FROM session_questions WHERE session_id = ?').get(sessionId).c;
 }
 
+/** Ordered questions this session presents, in the order the student sees them. */
+function sessionQuestionSequence(session) {
+  const s = db.prepare('SELECT exam_id FROM sessions WHERE id = ?').get(session.id);
+  if (!s) return [];
+  const drawn = db
+    .prepare('SELECT q_order, question_id FROM session_questions WHERE session_id = ? ORDER BY q_order')
+    .all(session.id);
+  if (drawn.length) {
+    const get = db.prepare('SELECT * FROM question_pool WHERE id = ?');
+    return drawn
+      .map((m) => {
+        const row = get.get(m.question_id);
+        if (row) row._pool = true;
+        return row;
+      })
+      .filter(Boolean);
+  }
+  return db.prepare('SELECT * FROM questions WHERE exam_id = ? ORDER BY q_order').all(s.exam_id);
+}
+
 function deadline(session) {
   return new Date(new Date(session.started_at).getTime() + session.duration_minutes * 60000);
 }
@@ -743,6 +763,7 @@ module.exports = {
   restartSession,
   getSessionQuestion,
   getSessionQuestionCount,
+  sessionQuestionSequence,
   drawSessionQuestions,
   deadline,
   markAllPendingTheory,
