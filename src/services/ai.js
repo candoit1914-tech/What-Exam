@@ -105,6 +105,11 @@ const BLOCK_QUESTIONS = 15;
 const BLOCK_MAX_CHARS = 8000;
 const BLOCK_CONCURRENCY = 5;
 const BLOCK_MAX_TOKENS = 5000;
+// A single extraction block runs on its own shorter clock with a single retry.
+// A slow/failed block is now SKIPPED (never fails the whole paper), so this
+// bounds how long one stubborn block can stall the import.
+const BLOCK_TIMEOUT_MS = 3 * 60 * 1000;
+const BLOCK_RETRIES = 1;
 
 /** Run fn over items with at most `limit` promises in flight (like a semaphore). */
 async function mapLimit(items, limit, fn) {
@@ -390,16 +395,33 @@ Rules:
   });
 
   let completed = 0;
-  const tasks = blockPrompts.map(({ block, shared }) => () => {
+  // A single block runs on its own shorter clock with a single retry. If it
+  // still fails (timeout, HTTP error, bad JSON), the block is SKIPPED — the
+  // paper is saved with the blocks that did succeed instead of failing the
+  // whole import on one stubborn block.
+  const tasks = blockPrompts.map(({ block, shared }) => async () => {
     completed++;
     if (onProgress) onProgress(completed, blocks.length);
-    return chatJSON(
-      [
-        { role: 'system', content: system },
-        { role: 'user', content: user(block, shared) },
-      ],
-      { timeoutMs: BULK_TIMEOUT_MS, maxTokens: BLOCK_MAX_TOKENS }
-    );
+    for (let attempt = 0; attempt <= BLOCK_RETRIES; attempt++) {
+      try {
+        return await chatJSON(
+          [
+            { role: 'system', content: system },
+            { role: 'user', content: user(block, shared) },
+          ],
+          { timeoutMs: BLOCK_TIMEOUT_MS, maxTokens: BLOCK_MAX_TOKENS }
+        );
+      } catch (err) {
+        const isTimeout = err && err.name === 'AIError' && /timed out/i.test(err.message);
+        if (attempt < BLOCK_RETRIES) {
+          await delay(1000 * (attempt + 1));
+          continue;
+        }
+        console.error('[ai] extraction block skipped:', isTimeout ? 'timeout' : err.message);
+        return null;
+      }
+    }
+    return null;
   });
 
   const settled = await mapLimit(tasks, BLOCK_CONCURRENCY, (run) => run());
