@@ -318,7 +318,11 @@ async function sendQuestionTo(session, student) {
     await finalize(session, student);
     return false;
   }
-  await wa.sendText(student.phone, formatQuestion(exam, question, count));
+  const sequence = sessionQuestionSequence(session);
+  const index = sequence.findIndex((q) => q.id === question.id);
+  for (const bubble of buildQuestionBubbles(exam, question, sequence, index)) {
+    await wa.sendText(student.phone, bubble);
+  }
   if (question.type === 'objective') {
     await wa.sendText(student.phone, formatOptions(exam, session, question));
   }
