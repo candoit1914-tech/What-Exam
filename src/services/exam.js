@@ -312,7 +312,6 @@ async function sendQuestionTo(session, student) {
     await wa.sendText(student.phone, `The exam for this session is no longer active. No more questions will be sent.`);
     return false;
   }
-  const count = db.prepare('SELECT COUNT(*) c FROM questions WHERE exam_id = ?').get(exam.id).c;
   const question = getSessionQuestion(session.id, session.current_q_order);
   if (!question) {
     await finalize(session, student);

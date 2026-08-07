@@ -264,3 +264,40 @@ test('buildQuestionBubbles treats an unknown index as the first question', () =>
   const q = { id: 7, q_order: 3, type: 'objective', text: 'Q3', passage: 'Read the passage.' };
   assert.deepEqual(exam.buildQuestionBubbles({}, q, [], -1), ['*OBJECTIVE*', 'Read the passage.', '*QUESTION 3*\n\nQ3']);
 });
+
+test('sessionQuestionSequence resolves drawn pool order and ids match for wiring', () => {
+  const db = require('../src/db');
+  db.exec('BEGIN');
+  try {
+    const examId = db
+      .prepare('INSERT INTO exams (title, subject, duration_minutes) VALUES (?,?,?)')
+      .run('__seq_test_exam__', 'Test', 30).lastInsertRowid;
+    const studentId = db
+      .prepare('INSERT INTO students (phone) VALUES (?)')
+      .run('__seq_test_phone__' + Date.now()).lastInsertRowid;
+    const sessionId = db
+      .prepare('INSERT INTO sessions (exam_id, student_id) VALUES (?,?)')
+      .run(examId, studentId).lastInsertRowid;
+    const p1 = db
+      .prepare('INSERT INTO question_pool (exam_id, type, text) VALUES (?,?,?)')
+      .run(examId, 'objective', 'pool Q1').lastInsertRowid;
+    const p2 = db
+      .prepare('INSERT INTO question_pool (exam_id, type, text) VALUES (?,?,?)')
+      .run(examId, 'objective', 'pool Q2').lastInsertRowid;
+    // Drawn order: Q2 first, Q1 second.
+    db.prepare('INSERT INTO session_questions (session_id, question_id, q_order) VALUES (?,?,?)').run(sessionId, p2, 1);
+    db.prepare('INSERT INTO session_questions (session_id, question_id, q_order) VALUES (?,?,?)').run(sessionId, p1, 2);
+
+    const seq = exam.sessionQuestionSequence({ id: sessionId });
+    assert.equal(seq.length, 2);
+    assert.equal(seq[0].id, p2, 'drawn order: Q2 first');
+    assert.equal(seq[1].id, p1, 'drawn order: Q1 second');
+    assert.ok(seq[0]._pool, 'pool rows are flagged');
+
+    const question = exam.getSessionQuestion(sessionId, 1);
+    assert.equal(question.q_order, 1, 'session q_order is stamped onto the pool row');
+    assert.equal(seq.findIndex((q) => q.id === question.id), 0, 'findIndex matches the pool row id the wiring relies on');
+  } finally {
+    db.exec('ROLLBACK');
+  }
+});
