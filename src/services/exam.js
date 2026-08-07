@@ -141,10 +141,9 @@ const START_WORDS = new Set([
 ]);
 
 function formatQuestion(exam, question, qCount) {
-  const passage = String(question.passage || '').trim();
-  const typeLabel = question.type === 'theory' ? 'THEORY' : 'OBJECTIVE';
-  const body = passage ? `${passage}\n\n${question.text}` : question.text;
-  return `*QUESTION ${question.q_order} — ${typeLabel}*\n\n${body}`;
+  // The type banner and any passage/instruction are sent as their own bubbles
+  // by buildQuestionBubbles, so the question bubble carries just the stem.
+  return `*QUESTION ${question.q_order}*\n\n${String(question.text).trim()}`;
 }
 
 /** mm:ss left on the clock, computed from the session start + exam duration. */

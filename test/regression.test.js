@@ -159,20 +159,14 @@ test('correctKeyFor yields null when nothing can be resolved', () => {
 
 // ── AI-integrity design: bold question-type headers, review-safe marking ──
 
-test('formatQuestion renders a bold OBJECTIVE header line', () => {
-  const q = { q_order: 1, type: 'objective', text: 'What is 2+2?', passage: '' };
-  assert.equal(
-    exam.formatQuestion({ title: 'Test' }, q, 10),
-    '*QUESTION 1 — OBJECTIVE*\n\nWhat is 2+2?'
-  );
+test('formatQuestion renders a bold QUESTION header without the passage', () => {
+  const q = { q_order: 1, type: 'objective', text: 'What is 2+2?', passage: 'Read the passage.' };
+  assert.equal(exam.formatQuestion({ title: 'Test' }, q, 10), '*QUESTION 1*\n\nWhat is 2+2?');
 });
 
-test('formatQuestion renders a bold THEORY header and keeps the passage', () => {
+test('formatQuestion drops the type suffix and never inlines the passage', () => {
   const q = { q_order: 2, type: 'theory', text: 'Explain photosynthesis.', passage: 'Read the passage.' };
-  assert.equal(
-    exam.formatQuestion({ title: 'Test' }, q, 10),
-    '*QUESTION 2 — THEORY*\n\nRead the passage.\n\nExplain photosynthesis.'
-  );
+  assert.equal(exam.formatQuestion({ title: 'Test' }, q, 10), '*QUESTION 2*\n\nExplain photosynthesis.');
 });
 
 test('markObjective is review-safe when no correct answer is stored', () => {
