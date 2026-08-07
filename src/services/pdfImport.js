@@ -37,8 +37,10 @@ function buildOptions(rawOptions) {
  * correct answer to wrong.
  */
 function correctKeyFor(opts, aiAnswer, fallback) {
-  const ci = Number(aiAnswer && aiAnswer.correct_index);
-  if (Number.isInteger(ci) && ci >= 0 && ci < opts.length) return opts[ci].key;
+  const ci = aiAnswer && aiAnswer.correct_index;
+  if (ci != null && Number.isInteger(Number(ci)) && Number(ci) >= 0 && Number(ci) < opts.length) {
+    return opts[Number(ci)].key;
+  }
   if (aiAnswer && aiAnswer.correct_answer) {
     const k = marking.sanitizeCorrectAnswer(aiAnswer.correct_answer, opts);
     if (k) return k;

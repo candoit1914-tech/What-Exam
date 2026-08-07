@@ -184,3 +184,32 @@ test('markObjective is review-safe when no correct answer is stored', () => {
   assert.equal(out.marksAwarded, 0);
   assert.equal(out.maxMarks, 1);
 });
+
+// ── PDF import resilience: truncated JSON repaired, null-index answers never guessed ──
+
+test('parseJSON recovers a JSON payload truncated by the output-token cap', () => {
+  const truncated =
+    '{"questions":[{"type":"objective","text":"The oxen ___ in the field","options":["A. graze","B. grazes"],"correct_answer":"A","correct_index":0,';
+  const parsed = ai.parseJSON(truncated);
+  assert.ok(parsed && Array.isArray(parsed.questions), 'truncated payload is salvaged');
+  assert.equal(parsed.questions.length, 1);
+  assert.equal(parsed.questions[0].text, 'The oxen ___ in the field');
+  assert.equal(parsed.questions[0].correct_answer, 'A');
+});
+
+test('parseJSON still rejects garbage that is not JSON', () => {
+  assert.throws(() => ai.parseJSON('We need to extract every question from the document block...'), /not valid JSON/);
+});
+
+test('parseJSON strips a markdown code fence', () => {
+  const wrapped = '```json\n{"questions":[]}\n```';
+  assert.deepEqual(ai.parseJSON(wrapped), { questions: [] });
+});
+
+test('correctKeyFor ignores a null correct_index instead of guessing option A', () => {
+  // Regression: Number(null) === 0, so an AI that honestly answers
+  // "no key present" must not silently mark the first option correct.
+  const opts = pdfImport.buildOptions(['A. Kumasi', 'B. Accra', 'C. Tamale', 'D. Cape Coast']);
+  assert.equal(pdfImport.correctKeyFor(opts, { correct_answer: '', correct_index: null }), null);
+  assert.equal(pdfImport.correctKeyFor(opts, { correct_answer: '', correct_index: undefined }), null);
+});

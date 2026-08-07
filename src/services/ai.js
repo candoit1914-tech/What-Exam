@@ -13,6 +13,26 @@ function aiConfigured() {
 
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * Reject with an AIError after `ms` if `promise` has not settled. This is a
+ * HARD timeout: some Node/undici versions keep an aborted request pending
+ * indefinitely, so AbortController alone cannot be relied on to unblock a
+ * stuck AI call. Racing the promise against a timer guarantees a hanging
+ * endpoint can never stall a job forever.
+ */
+function withHardTimeout(promise, ms) {
+  if (!ms || ms <= 0) return promise;
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      const e = new AIError(`AI request timed out after ${Math.round(ms / 1000)}s.`);
+      e.name = 'AIError';
+      reject(e);
+    }, ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
 async function chatJSON(messages, { temperature = 0.4, maxRetries = 2, timeoutMs = config.ai.timeoutMs, maxTokens = 8192 } = {}) {
   if (!aiConfigured()) {
     throw new AIError('AI is not configured. Set AI_API_KEY and AI_BASE_URL in .env');
@@ -27,19 +47,18 @@ async function chatJSON(messages, { temperature = 0.4, maxRetries = 2, timeoutMs
 
   let lastErr;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const res = await fetch(`${config.ai.baseUrl}/chat/completions`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${config.ai.apiKey}`,
-        },
-        body: JSON.stringify(body),
-        signal: controller.signal,
-      });
-      clearTimeout(timer);
+      const res = await withHardTimeout(
+        fetch(`${config.ai.baseUrl}/chat/completions`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${config.ai.apiKey}`,
+          },
+          body: JSON.stringify(body),
+        }),
+        timeoutMs
+      );
 
       if (!res.ok) {
         const text = await res.text().catch(() => '');
@@ -52,11 +71,12 @@ async function chatJSON(messages, { temperature = 0.4, maxRetries = 2, timeoutMs
 
       return parseJSON(content);
     } catch (err) {
-      clearTimeout(timer);
       lastErr = err;
       // A hard timeout must surface (never retry) so an exam question never
       // hangs the flow indefinitely waiting on an unresponsive AI endpoint.
-      if (err && err.name === 'AbortError') throw new AIError(`AI request timed out after ${Math.round(timeoutMs / 1000)}s.`);
+      if (err instanceof AIError && /timed out/i.test(err.message)) {
+        throw new AIError(`AI request timed out after ${Math.round(timeoutMs / 1000)}s.`);
+      }
       // Retry transient network failures (ECONNRESET etc.) and HTTP errors with
       // a small backoff; concurrent extraction blocks make these more likely.
       const retryable = err instanceof AIError || err instanceof TypeError;
@@ -68,6 +88,36 @@ async function chatJSON(messages, { temperature = 0.4, maxRetries = 2, timeoutMs
     }
   }
   throw lastErr;
+}
+
+/**
+ * A slow model occasionally hits the output-token cap mid-object, leaving a
+ * JSON payload that ends mid-value (often with an unterminated string, since
+ * the final closing quotes are cut off). Close the dangling value and the
+ * enclosing brackets so every question the model DID finish is recovered
+ * instead of losing the whole block. Example: `... "text": "The oxen ___`
+ * becomes `... "text": "The oxen ___"]}`.
+ */
+function repairTruncatedJSON(text) {
+  const out = text.replace(/[,\s]+$/, '');
+  const last = out[out.length - 1];
+  // 1. Ends mid-string → close the string first.
+  let patched = last === '"' ? out + '"' : out;
+  // 2. Close every still-open bracket in the order they were opened.
+  const stack = [];
+  for (const ch of patched) {
+    if (ch === '{' || ch === '[') stack.push(ch);
+    else if ((ch === '}' || ch === ']') && stack.length && ((ch === '}' && stack[stack.length - 1] === '{') || (ch === ']' && stack[stack.length - 1] === '['))) {
+      stack.pop();
+    }
+  }
+  for (let i = stack.length - 1; i >= 0; i--) {
+    patched += stack[i] === '{' ? '}' : ']';
+  }
+  try {
+    return JSON.parse(patched);
+  } catch { /* continue */ }
+  return null;
 }
 
 function parseJSON(content) {
@@ -85,12 +135,18 @@ function parseJSON(content) {
       return JSON.parse(c);
     } catch { /* try next */ }
   }
+  // Last resort: the payload may have been truncated mid-question by the token
+  // cap. Salvage what the model finished.
+  for (const c of candidates) {
+    const repaired = repairTruncatedJSON(c);
+    if (repaired) return repaired;
+  }
   throw new AIError('AI response was not valid JSON: ' + text.slice(0, 200));
 }
 
 const SYSTEM_BASE =
   'You are an expert examination setter and examiner. Always answer with valid JSON only. ' +
-  'Never include markdown, code fences, or commentary.';
+  'Never include markdown, code fences, or commentary. Respond with ONLY the JSON object, nothing else.';
 
 // Slow/commercial AI endpoints (e.g. huge 100B+ models) can take well over a
 // minute to structure a full exam paper. Bulk admin operations (PDF upload /
@@ -101,15 +157,19 @@ const BULK_TIMEOUT_MS = 5 * 60 * 1000;
 // PDF/paper extraction runs in small question-aligned blocks so every AI call
 // stays fast on slow endpoints. Each block generates at most BLOCK_MAX_TOKENS
 // of output; the cap also keeps a single rambling block from burning the timeout.
-const BLOCK_QUESTIONS = 15;
-const BLOCK_MAX_CHARS = 8000;
-const BLOCK_CONCURRENCY = 5;
-const BLOCK_MAX_TOKENS = 5000;
-// A single extraction block runs on its own shorter clock with a single retry.
-// A slow/failed block is now SKIPPED (never fails the whole paper), so this
-// bounds how long one stubborn block can stall the import.
-const BLOCK_TIMEOUT_MS = 3 * 60 * 1000;
-const BLOCK_RETRIES = 1;
+// Blocks are kept SMALL on purpose: a huge block forces a slow (e.g. 100B+)
+// model to generate a very long JSON payload, which can take minutes and hang
+// the whole import. Small blocks finish quickly even on slow endpoints.
+const BLOCK_QUESTIONS = 5;
+const BLOCK_MAX_CHARS = 3500;
+const BLOCK_CONCURRENCY = 2;
+const BLOCK_MAX_TOKENS = 3000;
+// A single extraction block runs on its own clock with a couple of retries
+// (flaky shared endpoints drop requests under concurrency). A block that still
+// fails is SKIPPED — never fails the whole paper — so this only bounds how
+// long one stubborn block can stall the import.
+const BLOCK_TIMEOUT_MS = 4 * 60 * 1000;
+const BLOCK_RETRIES = 2;
 
 /** Run fn over items with at most `limit` promises in flight (like a semaphore). */
 async function mapLimit(items, limit, fn) {
@@ -320,8 +380,8 @@ Objective:
   "type": "objective",
   "text": "stem (options already removed)",
   "options": ["A. Kumasi", "B. Accra", ...]  // KEEP the original letter prefixes (A., B., C., D.) exactly as written on the paper
-  "correct_answer": "B",   // the option LETTER if the document has an answer key, else ""
-  "correct_index": 1,      // 0-based position of the correct option IN the options array you return (matches correct_answer)
+  "correct_answer": "B",   // the option LETTER if the document has an answer key, else "" (empty string)
+  "correct_index": 1,      // 0-based position of the correct option IN the options array you return (matches correct_answer); set to null (NOT 0) when the document has no answer key
   "passage": "",           // full passage/context this question is based on, else ""
   "marks": 1,
   "difficulty": "easy|medium|hard",
@@ -353,7 +413,8 @@ Rules:
 - SECTION INSTRUCTIONS: Preserve section-level instructions students need to answer the questions (e.g. "Answer ONE question in this section", "Your answer should be between 250 and 300 words", "Answer ALL questions", "Write a letter", "Translate into English"). Attach them to the "passage" field of the FIRST question of that section — for BOTH objective and theory questions — and leave "passage": "" on the later questions of the same section. Never drop instructions that appear in the document.
 - MARKING SCHEME: If a marking scheme / model answer / suggested answers section for the questions is quoted in the prompt, use it VERBATIM to fill model_answer, key_points and rubric for the matching theory questions (do not regenerate or paraphrase it).
 - For theory questions with no rubric in the source, leave rubric/model_answer empty (the system will generate them).
-- Do NOT invent answer keys that are not in the document. Leave correct_answer/correct_index/explanation empty when unknown.
+- Do NOT invent answer keys that are not in the document. Leave correct_answer as "" and correct_index as null when unknown.
+- COMPACT OUTPUT: keep option text short, leave explanation and learning_objective empty, and do not repeat the passage for later questions. Output ONLY the JSON object.
 `;
 
   const user = (block, shared) => [
@@ -409,7 +470,9 @@ Rules:
             { role: 'system', content: system },
             { role: 'user', content: user(block, shared) },
           ],
-          { timeoutMs: BLOCK_TIMEOUT_MS, maxTokens: BLOCK_MAX_TOKENS }
+          // Internal retries are disabled: the block wrapper owns retries, and
+          // the hard timeout guarantees a stuck fetch cannot stall the import.
+          { timeoutMs: BLOCK_TIMEOUT_MS, maxTokens: BLOCK_MAX_TOKENS, maxRetries: 0 }
         );
       } catch (err) {
         const isTimeout = err && err.name === 'AIError' && /timed out/i.test(err.message);
@@ -430,6 +493,7 @@ Rules:
   const all = [];
   for (let i = 0; i < settled.length; i++) {
     const result = settled[i];
+    if (!result) continue; // skipped block (timed out / failed) — keep the rest
     const shared = blockPrompts[i].shared;
     const list = Array.isArray(result) ? result : result.questions;
     let cur = '';
@@ -632,7 +696,17 @@ Rules:
  * Answers the self-verification pass cannot CONFIRM come back with
  * correct_index: -1 — callers must leave the answer unset and flag the
  * question for review rather than store a guess that marks students wrong.
+ *
+ * The questions are answered in SMALL AI batches (the same strategy as PDF
+ * extraction): a single request that must answer dozens of questions is slow,
+ * easily truncated, and one failure loses every answer. Batching means a
+ * flaky/slow endpoint loses only a handful of questions, never the whole paper.
  */
+const ANSWER_BATCH = 10;
+const ANSWER_CONCURRENCY = 2;
+const ANSWER_TIMEOUT_MS = 4 * 60 * 1000;
+const ANSWER_MAX_TOKENS = 3000;
+
 async function answerObjectiveQuestions(questions) {
   if (!questions.length) return [];
   const system = SYSTEM_BASE + `
@@ -644,26 +718,52 @@ Rules:
 - If a question is ambiguous, has more than one defensible answer, or you are not certain, set correct_index to -1 and explain why. NEVER guess.
 - Pick the objectively correct answer only when exactly one option is clearly right.
 - Provide a one-sentence explanation for each.
+- COMPACT OUTPUT: keep explanations to a single short sentence. Output ONLY the JSON object.
 `;
-  const user = questions
-    .map(
-      (q, i) =>
-        `Q${i} (index ${q.index}):\n${q.text}\nOptions:\n${q.options
-          .map((o, j) => `  ${j}. ${o.text}`)
-          .join('\n')}`
-    )
-    .join('\n\n');
 
-  const result = await chatJSON(
-    [
-      { role: 'system', content: system },
-      { role: 'user', content: user },
-    ],
-    { timeoutMs: BULK_TIMEOUT_MS, temperature: 0.2 }
-  );
+  const chunks = [];
+  for (let i = 0; i < questions.length; i += ANSWER_BATCH) chunks.push(questions.slice(i, i + ANSWER_BATCH));
 
+  const answerBatch = (chunk) => async () => {
+    const user = chunk
+      .map((q, i) => {
+        const opts = (q.options || []).map((o, j) => {
+          const text = typeof o === 'string' ? o : (o && (o.text ?? o.key)) || '';
+          return `  ${j}. ${text}`;
+        });
+        return `Q${i} (index ${q.index}):\n${q.text}\nOptions:\n${opts.join('\n')}`;
+      })
+      .join('\n\n');
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const result = await chatJSON(
+          [
+            { role: 'system', content: system },
+            { role: 'user', content: user },
+          ],
+          { timeoutMs: ANSWER_TIMEOUT_MS, maxTokens: ANSWER_MAX_TOKENS, maxRetries: 0, temperature: 0.2 }
+        );
+        const byIndex = {};
+        for (const a of result.answers || result) byIndex[a.index] = a;
+        return chunk.map((q) => ({
+          index: q.index,
+          correct_index: byIndex[q.index] ? Number(byIndex[q.index].correct_index) : -1,
+          explanation: byIndex[q.index]?.explanation || '',
+        }));
+      } catch (err) {
+        if (attempt === 0) {
+          await delay(1000);
+          continue;
+        }
+        console.error('[ai] answer batch skipped:', err.message);
+        return chunk.map((q) => ({ index: q.index, correct_index: -1, explanation: '' }));
+      }
+    }
+  };
+
+  const settled = await mapLimit(chunks.map(answerBatch), ANSWER_CONCURRENCY, (run) => run());
   const byIndex = {};
-  for (const a of result.answers || result) byIndex[a.index] = a;
+  for (const batch of settled) for (const a of batch) byIndex[a.index] = a;
 
   // Self-verification pass: independently re-check every first-pass answer.
   // This is authoritative — a second look that cannot confirm an answer voids
@@ -696,8 +796,15 @@ Rules:
  * Second-pass verification of AI-generated objective answers. Confirms each
  * answer against its question and options. Answers that cannot be confirmed
  * are returned with correct_index: -1 (never guessed).
+ *
+ * Runs in small AI batches (like answerObjectiveQuestions): a single request
+ * that must verify dozens of answers is slow, easily truncated, and a lone
+ * failure voids every answer.
  */
+const VERIFY_BATCH = 10;
+
 async function verifyObjectiveAnswers(questions, answers) {
+  if (!answers.length) return [];
   const system = SYSTEM_BASE + `
 You are verifying an exam answer key before it is used to grade students. For each question, confirm whether the proposed correct option is genuinely and unambiguously correct.
 Return:
@@ -707,37 +814,61 @@ Rules:
 - If the proposed answer is wrong, ambiguous, or you are not certain, set confirmed to false and correct_index to -1.
 - A wrong key marks innocent students wrong, so when in doubt, do NOT confirm.
 `;
-  const user = answers
-    .map((a) => {
-      const q = questions.find((qq) => qq.index === a.index);
-      return (
-        `Q (index ${a.index}):\n${q ? q.text : '?'}\n` +
-        `Options:\n${(q ? q.options : []).map((o, j) => `  ${j}. ${o && o.text}`).join('\n') || '(none)'}\n` +
-        `Proposed correct: index ${a.correct_index}\n` +
-        `Reason given: ${a.explanation || ''}`
-      );
-    })
-    .join('\n\n');
 
-  const result = await chatJSON(
-    [
-      { role: 'system', content: system },
-      { role: 'user', content: user },
-    ],
-    { timeoutMs: BULK_TIMEOUT_MS, temperature: 0.1 }
-  );
+  const chunks = [];
+  for (let i = 0; i < answers.length; i += VERIFY_BATCH) chunks.push(answers.slice(i, i + VERIFY_BATCH));
 
-  const byIndex = {};
-  for (const v of result.answers || result) byIndex[v.index] = v;
-  return answers.map((a) => {
-    const v = byIndex[a.index];
-    const confirmed = !!(v && v.confirmed);
-    return {
-      index: a.index,
-      correct_index: confirmed ? a.correct_index : -1,
-      explanation: a.explanation || '',
-    };
-  });
+  const verifyBatch = (chunk) => async () => {
+    const user = chunk
+      .map((a) => {
+        const q = questions.find((qq) => qq.index === a.index);
+        const opts = (q ? q.options : []).map((o, j) => {
+          const text = typeof o === 'string' ? o : (o && (o.text ?? o.key)) || '';
+          return `  ${j}. ${text}`;
+        });
+        return (
+          `Q (index ${a.index}):\n${q ? q.text : '?'}\n` +
+          `Options:\n${opts.join('\n') || '(none)'}\n` +
+          `Proposed correct: index ${a.correct_index}\n` +
+          `Reason given: ${a.explanation || ''}`
+        );
+      })
+      .join('\n\n');
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const result = await chatJSON(
+          [
+            { role: 'system', content: system },
+            { role: 'user', content: user },
+          ],
+          { timeoutMs: ANSWER_TIMEOUT_MS, maxTokens: ANSWER_MAX_TOKENS, maxRetries: 0, temperature: 0.1 }
+        );
+        const byIndex = {};
+        for (const v of result.answers || result) byIndex[v.index] = v;
+        return chunk.map((a) => {
+          const v = byIndex[a.index];
+          const confirmed = !!(v && v.confirmed);
+          return {
+            index: a.index,
+            correct_index: confirmed ? a.correct_index : -1,
+            explanation: a.explanation || '',
+          };
+        });
+      } catch (err) {
+        if (attempt === 0) {
+          await delay(1000);
+          continue;
+        }
+        console.error('[ai] verify batch skipped:', err.message);
+        return chunk.map((a) => ({ index: a.index, correct_index: -1, explanation: a.explanation || '' }));
+      }
+    }
+  };
+
+  const settled = await mapLimit(chunks.map(verifyBatch), ANSWER_CONCURRENCY, (run) => run());
+  const merged = [];
+  for (const batch of settled) merged.push(...batch);
+  return merged;
 }
 
 /**
@@ -865,4 +996,6 @@ module.exports = {
   trailingContext,
   extractAnswerKeySection,
   extractMarkingSchemeSection,
+  parseJSON,
+  repairTruncatedJSON,
 };
