@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS questions (
   q_order       INTEGER NOT NULL,
   type          TEXT NOT NULL,                        -- objective|theory
   text          TEXT NOT NULL,
+  passage       TEXT DEFAULT '',                      -- reading passage/context the question is based on
   options       TEXT,                                 -- JSON [{key,text}] for objective
   correct_answer TEXT,                                -- letter for objective, null for theory
   marks         REAL NOT NULL DEFAULT 1,
@@ -90,10 +91,11 @@ CREATE TABLE IF NOT EXISTS answers (
   is_correct    INTEGER,
   marks_awarded REAL DEFAULT 0,
   max_marks     REAL DEFAULT 0,
-  marked_by     TEXT DEFAULT 'auto',                  -- auto|ai|manual
+  marked_by     TEXT DEFAULT 'auto',                  -- auto|ai|manual|pending
   ai_feedback   TEXT DEFAULT '',
   needs_review  INTEGER NOT NULL DEFAULT 0,
   reviewed      INTEGER NOT NULL DEFAULT 0,
+  ai_detected   INTEGER NOT NULL DEFAULT 0,           -- 1 = theory answer flagged as AI-copied (cheating)
   received_at   TEXT NOT NULL DEFAULT (datetime('now')),
   marked_at     TEXT
 );
@@ -113,6 +115,7 @@ CREATE TABLE IF NOT EXISTS question_pool (
   exam_id            INTEGER NOT NULL REFERENCES exams(id) ON DELETE CASCADE,
   type               TEXT NOT NULL,                      -- objective|theory
   text               TEXT NOT NULL,
+  passage            TEXT DEFAULT '',                    -- reading passage/context the question is based on
   options            TEXT,                               -- JSON [{key,text}]
   correct_answer     TEXT,
   marks              REAL NOT NULL DEFAULT 1,
@@ -148,6 +151,24 @@ CREATE TABLE IF NOT EXISTS outbound_messages (
 CREATE INDEX IF NOT EXISTS idx_outbound_message_id ON outbound_messages(message_id);
 CREATE INDEX IF NOT EXISTS idx_outbound_recipient ON outbound_messages(recipient);
 
+-- Background jobs (e.g. PDF question import). Long-running AI work runs here
+-- so the HTTP request returns instantly instead of blocking on slow models.
+CREATE TABLE IF NOT EXISTS jobs (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  type       TEXT NOT NULL DEFAULT 'pdf_import',   -- pdf_import
+  exam_id    INTEGER NOT NULL,
+  filename   TEXT DEFAULT '',
+  status     TEXT NOT NULL DEFAULT 'pending',      -- pending|running|done|error
+  stage      TEXT DEFAULT '',
+  progress   INTEGER NOT NULL DEFAULT 0,           -- 0-100
+  count      INTEGER DEFAULT 0,
+  error      TEXT DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_jobs_exam ON jobs(exam_id);
+
 CREATE INDEX IF NOT EXISTS idx_questions_exam ON questions(exam_id, q_order);
 CREATE INDEX IF NOT EXISTS idx_sessions_exam ON sessions(exam_id);
 CREATE INDEX IF NOT EXISTS idx_answers_session ON answers(session_id, q_order);
@@ -155,6 +176,20 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_schemes_question ON marking_schemes(questi
 `;
 
 db.exec(SCHEMA);
+
+// Lightweight column migration for existing databases: CREATE TABLE IF NOT
+// EXISTS never alters a table that already exists, so add the passage column
+// (introduced for reading-comprehension papers) when it is missing.
+function ensureColumn(table, column, ddl) {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all();
+  if (!cols.some((c) => c.name === column)) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`);
+    console.log(`Migrated ${table}: added column ${column}.`);
+  }
+}
+ensureColumn('questions', 'passage', "TEXT DEFAULT ''");
+ensureColumn('question_pool', 'passage', "TEXT DEFAULT ''");
+ensureColumn('answers', 'ai_detected', "INTEGER NOT NULL DEFAULT 0");
 
 // Migration: answers.question_id used to be FK-constrained to questions().
 // Attempts may now answer pool-variant questions, so the constraint must go.
@@ -180,15 +215,16 @@ if (answersDdl && /REFERENCES\s+questions/i.test(answersDdl.sql)) {
       ai_feedback   TEXT DEFAULT '',
       needs_review  INTEGER NOT NULL DEFAULT 0,
       reviewed      INTEGER NOT NULL DEFAULT 0,
+      ai_detected   INTEGER NOT NULL DEFAULT 0,
       received_at   TEXT NOT NULL DEFAULT (datetime('now')),
       marked_at     TEXT
     );
     INSERT INTO answers
       (id, session_id, question_id, q_order, answer_text, is_correct, marks_awarded,
-       max_marks, marked_by, ai_feedback, needs_review, reviewed, received_at, marked_at)
+       max_marks, marked_by, ai_feedback, needs_review, reviewed, ai_detected, received_at, marked_at)
     SELECT
       id, session_id, question_id, q_order, answer_text, is_correct, marks_awarded,
-      max_marks, marked_by, ai_feedback, needs_review, reviewed, received_at, marked_at
+      max_marks, marked_by, ai_feedback, needs_review, reviewed, 0, received_at, marked_at
     FROM answers_legacy;
     DROP TABLE answers_legacy;
     COMMIT;

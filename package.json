@@ -10,6 +10,7 @@
     "start:all": "node scripts/start-all.js",
     "dev": "node --watch src/server.js",
     "init": "node src/server.js --init",
+    "test": "node --test test/regression.test.js",
     "seed": "node scripts/seed-exam.js",
     "send": "node scripts/send-exam.js"
   },

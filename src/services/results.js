@@ -72,6 +72,39 @@ async function sendResultMessage(sessionId, phone, reason) {
       '\n';
   }
 
+  const theory = db
+    .prepare(
+      `SELECT a.q_order, a.marks_awarded, a.max_marks, a.ai_detected
+       FROM answers a
+       LEFT JOIN session_questions sq ON sq.session_id = a.session_id AND sq.q_order = a.q_order
+       LEFT JOIN question_pool p ON p.id = sq.question_id
+       LEFT JOIN questions q ON q.id = a.question_id AND p.id IS NULL
+       WHERE a.session_id = ? AND COALESCE(p.type, q.type) = 'theory'
+       ORDER BY a.q_order`
+    )
+    .all(sessionId);
+  if (theory.length) {
+    msg += `\n*Theory marks* (yours / max):\n` +
+      theory
+        .map((t) => {
+          const cheated = Number(t.ai_detected) === 1;
+          return `Q${t.q_order}. ${t.marks_awarded}/${t.max_marks}${cheated ? ' ⚠️ AI-copied' : ''}`;
+        })
+        .join('\n') +
+      '\n';
+  }
+
+  const cheats = db
+    .prepare('SELECT q_order FROM answers WHERE session_id = ? AND ai_detected = 1 ORDER BY q_order')
+    .all(sessionId);
+  if (cheats.length) {
+    const list = cheats.map((c) => c.q_order).join(', ');
+    msg +=
+      `\n⚠️ *Caution:* Your answer${cheats.length === 1 ? '' : 's'} to Q${list} looked like it was ` +
+      `written by an AI (e.g. ChatGPT, Gemini, Claude) and copied in. Copying AI answers is cheating, ` +
+      `so it earned *0 marks*.\n`;
+  }
+
   const reviewCount = db
     .prepare('SELECT COUNT(*) c FROM answers WHERE session_id = ? AND needs_review = 1')
     .get(sessionId).c;
@@ -93,6 +126,7 @@ function reportHTML(sessionId) {
       `SELECT a.*,
               COALESCE(p.type, q.type) AS type,
               COALESCE(p.text, q.text) AS text,
+              COALESCE(p.passage, q.passage) AS passage,
               COALESCE(p.options, q.options) AS options,
               COALESCE(p.correct_answer, q.correct_answer) AS correct_answer,
               COALESCE(p.explanation, q.explanation) AS explanation,
@@ -161,6 +195,7 @@ function reportHTML(sessionId) {
             <span class="chip ${a.marks_awarded >= (a.max_marks || 0) / 2 ? 'chip-pass' : 'chip-fail'}">${a.marks_awarded} / ${a.max_marks} marks</span>
             ${a.marked_by === 'manual' ? '<span class="chip chip-manual">Marked by admin</span>' : a.marked_by === 'ai' ? '<span class="chip chip-ai">Marked by AI</span>' : '<span class="chip chip-auto">Auto</span>'}
             ${a.needs_review ? '<span class="chip chip-review">Needs review</span>' : ''}
+            ${Number(a.ai_detected) === 1 ? '<span class="chip chip-cheat">AI-copied — 0 marks</span>' : ''}
           </div>
           <details class="model">
             <summary>Model answer &amp; key points</summary>
@@ -178,7 +213,7 @@ function reportHTML(sessionId) {
           <span class="q-type">${a.max_marks} mark${Number(a.max_marks) === 1 ? '' : 's'}</span>
           <span class="q-status ${isCorrect ? 's-pass' : 's-fail'}">${isCorrect ? 'Correct' : a.needs_review ? 'Review' : 'Incorrect'}</span>
         </header>
-        <p class="q-text">${esc(a.text)}</p>
+        <p class="q-text">${a.passage ? `<span class="q-passage">${esc(a.passage)}</span><br><br>` : ''}${esc(a.text)}</p>
         ${body}
       </article>`;
     })
@@ -225,6 +260,7 @@ function reportHTML(sessionId) {
   .s-pass{background:#dcfce7;color:var(--green-dark)}
   .s-fail{background:#fee2e2;color:var(--red)}
   .q-text{font-size:1rem;font-weight:600;margin:0 0 14px;color:var(--ink)}
+  .q-passage{display:block;font-size:.85rem;font-weight:500;color:#475569;background:#f8fafc;border-left:3px solid var(--teal);padding:10px 14px;border-radius:0 10px 10px 0;white-space:pre-wrap}
   .opts{display:grid;grid-template-columns:1fr 1fr;gap:8px}
   .opt{display:flex;align-items:center;gap:8px;border:1px solid var(--line);border-radius:12px;padding:9px 12px;font-size:.9rem;background:#fafbfc;position:relative}
   .opt-key{font-weight:800;color:var(--muted);background:#fff;border:1px solid var(--line);border-radius:7px;width:24px;height:24px;display:inline-flex;align-items:center;justify-content:center;flex:none}
@@ -243,6 +279,7 @@ function reportHTML(sessionId) {
   .chip-auto{background:#f1f5f9;color:var(--muted)}
   .chip-manual{background:#ede9fe;color:#6d28d9}
   .chip-review{background:#fef3c7;color:#b45309}
+  .chip-cheat{background:#fecaca;color:#b91c1c}
   .expl,.feedback{margin:12px 0 0;font-size:.88rem;color:#475569;background:#f8fafc;border-left:3px solid var(--green);border-radius:0 10px 10px 0;padding:10px 14px}
   .theory-block{margin-top:12px}
   .theory-meta{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px}

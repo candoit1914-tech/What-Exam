@@ -141,7 +141,10 @@ const START_WORDS = new Set([
 ]);
 
 function formatQuestion(exam, question, qCount) {
-  return `Question ${question.q_order}\n${question.text}`;
+  const passage = String(question.passage || '').trim();
+  const typeLabel = question.type === 'theory' ? 'THEORY' : 'OBJECTIVE';
+  const body = passage ? `${passage}\n\n${question.text}` : question.text;
+  return `*QUESTION ${question.q_order} — ${typeLabel}*\n\n${body}`;
 }
 
 /** mm:ss left on the clock, computed from the session start + exam duration. */
@@ -179,10 +182,11 @@ function formatExamIntro(exam, questionCount) {
   const steps = [
     'Questions arrive one at a time.',
     type === 'Theory'
-      ? 'Type your full answer to each question as a single message.'
+      ? 'Type your full answer to each question as a single message. Theory answers are marked at the end of the exam.'
       : 'After each question, its answer options are sent in a separate message; reply with the letter of your answer (e.g. *A*).',
     'Answers are locked once you send them.',
     'Your timer starts now. The exam ends automatically when time is up.',
+    'Copying AI-written answers (e.g. ChatGPT, Gemini) is cheating — such answers are detected and earn 0 marks.',
   ];
   const instructions = steps.map((s, i) => `${i + 1}. ${s}`).join('\n');
   return (
@@ -418,7 +422,6 @@ async function processAnswer(session, student, body, meta = {}) {
 }
 
 async function handleAnswer(exam, session, student, question, body, meta = {}) {
-  let result;
   if (question.type === 'objective') {
     const letter = resolveObjectiveLetter(question, body, meta);
     if (!letter) {
@@ -428,7 +431,20 @@ async function handleAnswer(exam, session, student, question, body, meta = {}) {
       );
       return false;
     }
-    result = marking.markObjective(question, letter);
+    // No verified answer key stored → the admin must fill it. Flag for review
+    // instead of marking an innocent student wrong on a guessed key.
+    if (!marking.resolveCorrectKey(question)) {
+      db.prepare(
+        `INSERT INTO answers (session_id, question_id, q_order, answer_text, is_correct, marks_awarded, max_marks, marked_by, ai_feedback, needs_review, marked_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,datetime('now'))`
+      ).run(
+        session.id, question.id, question.q_order, letter,
+        null, 0, question.marks, 'manual',
+        'No answer key stored for this question — flagged for review.', 1
+      );
+      return true;
+    }
+    const result = marking.markObjective(question, letter);
     const saved = db
       .prepare(
         `INSERT INTO answers (session_id, question_id, q_order, answer_text, is_correct, marks_awarded, max_marks, marked_by, marked_at)
@@ -442,55 +458,90 @@ async function handleAnswer(exam, session, student, question, body, meta = {}) {
     // No per-question feedback — answers are only revealed with the grade
     // after the final question (per product requirement).
   } else {
-    // theory — AI marked
+    // Theory — the answer is stored immediately but NOT marked yet. All theory
+    // answers are AI-marked together when the exam ends. A quick inline AI
+    // check catches AI-copied answers so the student can be cautioned right
+    // away; such answers are locked to 0 marks.
     const answerText = body;
-    let marked = null;
-    let err = null;
-    try {
-      let scheme = null;
-      if (question._pool) {
-        try {
-          scheme = JSON.parse(question.scheme_json || '{}');
-        } catch {
-          scheme = null;
+    const context = [question.passage, question.text].filter(Boolean).join('\n\n');
+    let aiDetected = 0;
+    let caution = '';
+    if (ai.aiConfigured()) {
+      try {
+        const det = await ai.detectAiGeneratedAnswer({ questionText: context, studentAnswer: answerText });
+        if (det.ai_generated) {
+          aiDetected = 1;
+          caution =
+            `⚠️ *Warning: AI-written answer detected*\n\n` +
+            `Your answer to Question ${question.q_order} looks like it was written by an AI (e.g. ChatGPT, Gemini, Claude) and copied in.\n\n` +
+            `Copying AI answers is considered *cheating* in this exam, so this answer will earn *0 marks*.\n\n` +
+            `Please answer the remaining questions yourself.`;
         }
+      } catch (e) {
+        aiDetected = 0; // detection failure never blocks the exam
       }
-      marked = await marking.markTheoryAnswer(question, answerText, scheme);
-    } catch (e) {
-      err = e;
-    }
-
-    let marksAwarded = 0;
-    let feedback = '';
-    let needsReview = 0;
-    if (marked) {
-      marksAwarded = marked.marksAwarded;
-      feedback = marked.feedback;
-    } else {
-      marksAwarded = 0;
-      needsReview = 1;
-      feedback = 'This answer needs manual review by your administrator.';
-      err = null; // not fatal
     }
 
     db.prepare(
-      `INSERT INTO answers (session_id, question_id, q_order, answer_text, is_correct, marks_awarded, max_marks, marked_by, ai_feedback, needs_review, marked_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,datetime('now'))`
+      `INSERT INTO answers (session_id, question_id, q_order, answer_text, is_correct, marks_awarded, max_marks, marked_by, ai_feedback, needs_review, ai_detected)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?)`
     ).run(
       session.id, question.id, question.q_order, answerText,
-      null, marksAwarded, question.marks,
-      marked ? 'ai' : 'manual', feedback, needsReview
+      null, 0, question.marks, 'pending', caution, aiDetected ? 1 : 0, aiDetected
     );
 
-    await wa.sendText(student.phone, feedback);
+    if (aiDetected) await wa.sendText(student.phone, caution);
   }
   return true;
 }
 
 // ── Finalize ───────────────────────────────────────────────────────────
 
+/**
+ * AI-mark every pending theory answer for a session at the end of the exam.
+ * Runs together (concurrency-capped) so the student gets one complete result.
+ * - Answers flagged as AI-copied (inline or by the marker) are capped at 0.
+ * - Marking failures never block results — the answer is flagged for review.
+ */
+async function markAllPendingTheory(sessionId) {
+  const pending = db
+    .prepare(`SELECT * FROM answers WHERE session_id = ? AND marked_by = 'pending' ORDER BY q_order`)
+    .all(sessionId);
+  if (!pending.length) return;
+
+  const tasks = pending.map((a) => async () => {
+    const question = getSessionQuestion(sessionId, a.q_order);
+    if (!question) return;
+    let scheme = null;
+    if (question._pool) {
+      try {
+        scheme = JSON.parse(question.scheme_json || '{}');
+      } catch {
+        scheme = null;
+      }
+    }
+    try {
+      const marked = await marking.markTheoryAnswer(question, a.answer_text, scheme);
+      const detected = !!marked.aiGenerated || Number(a.ai_detected) === 1;
+      const feedback = detected
+        ? `⚠️ AI-written answer detected — 0 marks awarded (copying AI answers is cheating). ${marked.feedback || marked.aiReason}`.trim()
+        : marked.feedback;
+      db.prepare(
+        `UPDATE answers SET marked_by='ai', marks_awarded=?, ai_feedback=?, needs_review=?, ai_detected=?, marked_at=datetime('now') WHERE id=?`
+      ).run(detected ? 0 : marked.marksAwarded, feedback, detected ? 1 : 0, detected ? 1 : 0, a.id);
+    } catch (err) {
+      db.prepare(
+        `UPDATE answers SET marked_by='manual', marks_awarded=0, needs_review=1, ai_feedback='This answer needs manual review by your administrator.', marked_at=datetime('now') WHERE id=?`
+      ).run(a.id);
+    }
+  });
+
+  await ai.mapLimit(tasks, 3, (run) => run());
+}
+
 async function finalize(session, student, reason = 'completed') {
   if (session.status !== 'in_progress') return;
+  await markAllPendingTheory(session.id);
   const result = results.computeForSession(session.id);
   db.prepare(
     `UPDATE sessions SET status = ?, ended_at = datetime('now'), final_score = ?, final_percentage = ?, passed = ?
@@ -542,6 +593,7 @@ async function endExam(examId) {
     `This exam has been ended by your administrator. No more questions will be sent.`;
 
   for (const s of active) {
+    await markAllPendingTheory(s.id);
     const result = results.computeForSession(s.id);
     db.prepare(
       `UPDATE sessions SET status='ended', ended_at=datetime('now'), final_score=?, final_percentage=?, passed=? WHERE id=?`
@@ -674,4 +726,6 @@ module.exports = {
   getSessionQuestionCount,
   drawSessionQuestions,
   deadline,
+  markAllPendingTheory,
+  formatQuestion,
 };

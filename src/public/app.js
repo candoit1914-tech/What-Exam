@@ -639,6 +639,7 @@ function qitemHTML(q, id) {
     <div class="qhead">
       <div>
         <div class="muted" style="font-size:12px">Q${q.q_order} · ${q.type} · ${q.marks} mark(s) · ${q.difficulty} · ${badge(q.source)}</div>
+        ${q.passage ? `<div class="qpassage">${esc(q.passage)}</div>` : ''}
         <div class="qtext">${esc(q.text)}</div>
         <div class="opts-list">
           ${opts.map((o) => `<div class="${o.key === q.correct_answer ? 'correct' : ''}">${o.key}. ${esc(o.text)}${o.key === q.correct_answer ? ' ✓' : ''}</div>`).join('')}
@@ -669,7 +670,7 @@ function schemeHTML(q, id) {
   }
   return `<div class="qitem">
     <div class="qhead">
-      <div><div class="muted" style="font-size:12px">Q${q.q_order} · ${q.type}</div><div class="qtext">${esc(q.text)}</div></div>
+      <div><div class="muted" style="font-size:12px">Q${q.q_order} · ${q.type}</div>${q.passage ? `<div class="qpassage">${esc(q.passage)}</div>` : ''}<div class="qtext">${esc(q.text)}</div></div>
       <div class="row">
         ${q.type === 'theory' ? `<button class="small ghost" onclick="regenerateScheme(${id}, ${q.id})">${I.spark} AI Regenerate</button>` : ''}
         <button class="small ghost" onclick="editScheme(${id}, ${q.id}, ${q.type === 'theory'})">Edit JSON</button>
@@ -691,6 +692,7 @@ function questionFormHTML(q) {
       <label style="display:flex;gap:6px;align-items:center"><input type="radio" name="q_type" value="theory" ${type === 'theory' ? 'checked' : ''} onchange="toggleType()"> Theory</label>
     </div>
     <div class="field"><label>Question</label><textarea id="qf_text">${esc(q?.text || '')}</textarea></div>
+    <div class="field"><label>Passage (reading comprehension) — optional</label><textarea id="qf_passage" placeholder="Text the question is based on...">${esc(q?.passage || '')}</textarea></div>
     <div id="qf_opts">
       ${opts.map((o) => `<div class="row" style="margin:4px 0">
         <input type="text" style="width:44px;text-align:center" value="${esc(o.key)}" disabled>
@@ -727,6 +729,7 @@ async function addQuestionForm(id) {
       <label style="display:flex;gap:6px;align-items:center"><input type="radio" name="q_type" value="theory" onchange="toggleType()"> Theory</label>
     </div></div>
     <div class="field"><label>Question</label><textarea id="qf_text" placeholder="What is the capital of Ghana?"></textarea></div>
+    <div class="field"><label>Passage (reading comprehension) — optional</label><textarea id="qf_passage" placeholder="Text the question is based on..."></textarea></div>
     <div id="qf_opts">
       ${['A', 'B', 'C', 'D'].map((k) => `<div class="row" style="margin:4px 0">
         <input type="text" style="width:44px;text-align:center" value="${k}" disabled>
@@ -749,6 +752,7 @@ async function addQuestionForm(id) {
     const payload = {
       type,
       text: document.querySelector('#qf_text').value,
+      passage: document.querySelector('#qf_passage').value,
       marks: parseFloat(document.querySelector('#qf_marks').value) || 1,
       difficulty: document.querySelector('#qf_diff').value,
       learning_objective: '',
@@ -782,6 +786,7 @@ async function editQuestionForm(id, qid) {
     const payload = {
       type,
       text: document.querySelector('#qf_text').value,
+      passage: document.querySelector('#qf_passage').value,
       marks: parseFloat(document.querySelector('#qf_marks').value) || 1,
       difficulty: document.querySelector('#qf_diff').value,
       learning_objective: document.querySelector('#qf_lo').value,
@@ -813,7 +818,10 @@ async function deleteQuestion(id, qid) {
 async function aiGenerateForm(id) {
   const div = await openModal('Generate Questions with AI', `
     <div class="field"><label>Subject / topic area</label><input type="text" id="ag_subject" placeholder="e.g. Integrated Science — Soil Erosion"></div>
-    <div class="field"><label>Number of questions</label><input type="number" id="ag_count" value="10"></div>
+    <div class="row">
+      <div class="field"><label>Objective questions</label><input type="number" id="ag_obj_count" value="40" min="1"></div>
+      <div class="field"><label>Theory questions</label><input type="number" id="ag_theory_count" value="5" min="0"></div>
+    </div>
     <div class="field"><label>Types</label>
       <div class="row">
         <label style="display:flex;gap:6px"><input type="checkbox" id="ag_obj" checked> Objective</label>
@@ -845,9 +853,12 @@ async function aiGenerateForm(id) {
       const types = [];
       if (document.querySelector('#ag_obj').checked) types.push('objective');
       if (document.querySelector('#ag_theory').checked) types.push('theory');
+      const objCount = Math.max(1, parseInt(document.querySelector('#ag_obj_count').value) || 40);
+      const theoryCount = Math.max(0, parseInt(document.querySelector('#ag_theory_count').value) || 0);
       const body = {
         subject: document.querySelector('#ag_subject').value,
-        count: parseInt(document.querySelector('#ag_count').value) || 10,
+        objectiveCount: objCount,
+        theoryCount: types.includes('theory') ? theoryCount : 0,
         types,
         difficulty: document.querySelector('#ag_diff').value,
         instructions: document.querySelector('#ag_inst').value,
@@ -867,21 +878,35 @@ async function aiGenerateForm(id) {
   });
 }
 
-// ── PDF upload ───────────────────────────────────────────────────
+// ── PDF upload (background job + polling) ────────────────────────────
 
 async function pdfUploadForm(id) {
   const div = await openModal('Upload Exam PDF', `
     <p class="muted" style="margin-bottom:12px">Text-based PDFs only (scanned images are not supported yet). Answer keys and options are detected automatically; missing answers are generated by AI.</p>
-    <input type="file" id="pdf_file" accept="application/pdf">
-    <div class="modal-actions" style="margin-top:18px"><button id="pdf_run" class="btn btn-primary">Extract Questions</button></div>
+    <div id="pdf_status"></div>
+    <div id="pdf_upload">
+      <input type="file" id="pdf_file" accept="application/pdf">
+      <div class="modal-actions" style="margin-top:18px"><button id="pdf_run" class="btn btn-primary">Extract Questions</button></div>
+    </div>
   `);
   if (!div) return;
+
+  // Resume an import that is already running for this exam instead of starting a duplicate.
+  try {
+    const jobs = await api(`/api/jobs?exam_id=${id}`);
+    const active = (jobs || []).find((j) => j.status === 'pending' || j.status === 'running');
+    if (active) {
+      document.querySelector('#pdf_upload').style.display = 'none';
+      return pollPdfJob(id, div, active.id);
+    }
+  } catch { /* no active job */ }
+
   document.querySelector('#pdf_run').addEventListener('click', async () => {
     const file = document.querySelector('#pdf_file').files[0];
     if (!file) return toast('Choose a PDF file first.', true);
     const btn = document.querySelector('#pdf_run');
     btn.disabled = true;
-    btn.textContent = 'Extracting…';
+    btn.textContent = 'Uploading…';
     const fd = new FormData();
     fd.append('file', file);
     try {
@@ -891,16 +916,39 @@ async function pdfUploadForm(id) {
       const res = await fetch(`${API_BASE}/api/exams/${id}/pdf`, { method: 'POST', headers, body: fd });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error);
-      invalidateCache(`/api/exams/${id}`);
-      div.remove();
-      toast(`Extracted ${data.count} questions (schemes generated automatically).`);
-      renderExam(id);
+      document.querySelector('#pdf_upload').style.display = 'none';
+      return pollPdfJob(id, div, data.jobId);
     } catch (e) {
       btn.disabled = false;
       btn.textContent = 'Extract Questions';
       toast(e.message, true);
     }
   });
+}
+
+function pollPdfJob(examId, div, jobId) {
+  const status = document.querySelector('#pdf_status');
+  const update = (text) => { if (status) status.innerHTML = `<p class="muted" style="margin:8px 0">${text}</p>`; };
+  const timer = setInterval(async () => {
+    let job;
+    try {
+      job = await api(`/api/jobs/${jobId}`);
+    } catch {
+      return; // keep polling until the server answers
+    }
+    update(`<span class="spinner"></span> ${esc(job.stage || 'Processing…')} <strong>${job.progress || 0}%</strong>`);
+    if (job.status === 'done') {
+      clearInterval(timer);
+      invalidateCache(`/api/exams/${examId}`);
+      div.remove();
+      toast(`Extracted ${job.count} questions (schemes generated automatically).`);
+      renderExam(examId);
+    } else if (job.status === 'error') {
+      clearInterval(timer);
+      div.remove();
+      toast(job.error || 'Extraction failed.', true);
+    }
+  }, 2000);
 }
 
 // ── Scheme actions ───────────────────────────────────────────────
@@ -1107,7 +1155,7 @@ async function renderResultDetail(id) {
           <td>${esc(a.answer_text)}</td>
           <td>${a.type === 'objective' ? esc(a.correct_answer) : '—'}</td>
           <td><input type="number" data-aw="${a.id}" value="${a.marks_awarded}" step="0.5" style="width:70px"> / ${a.max_marks}</td>
-          <td>${a.marked_by}${a.needs_review ? ' ' + badge('review') : ''}</td>
+          <td>${a.marked_by}${a.needs_review ? ' ' + badge('review') : ''}${Number(a.ai_detected) === 1 ? ' ' + badge('ai-copied') : ''}</td>
           <td style="max-width:280px">${esc(a.ai_feedback)}</td>
           <td><button class="small ghost" onclick="saveMarks(${id}, ${a.id})">Save</button></td>
         </tr>`).join('')}

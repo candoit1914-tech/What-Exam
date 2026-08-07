@@ -101,10 +101,10 @@ const BULK_TIMEOUT_MS = 5 * 60 * 1000;
 // PDF/paper extraction runs in small question-aligned blocks so every AI call
 // stays fast on slow endpoints. Each block generates at most BLOCK_MAX_TOKENS
 // of output; the cap also keeps a single rambling block from burning the timeout.
-const BLOCK_QUESTIONS = 10;
+const BLOCK_QUESTIONS = 15;
 const BLOCK_MAX_CHARS = 8000;
-const BLOCK_CONCURRENCY = 2;
-const BLOCK_MAX_TOKENS = 4000;
+const BLOCK_CONCURRENCY = 5;
+const BLOCK_MAX_TOKENS = 5000;
 
 /** Run fn over items with at most `limit` promises in flight (like a semaphore). */
 async function mapLimit(items, limit, fn) {
@@ -130,21 +130,32 @@ async function mapLimit(items, limit, fn) {
  * the round trip to the AI endpoint, so parallelizing collapses the wall-clock
  * time from "sum of all batches" to "one slowest batch × few rounds".
  */
-async function generateQuestions({ subject, topics, count, types, difficulty, instructions, poolSize, avoid = [] }) {
+async function generateQuestions({ subject, topics, count, objectiveCount, theoryCount, types, difficulty, instructions, poolSize, avoid = [] }) {
   const typeList = Array.isArray(types) && types.length ? types : ['objective', 'theory'];
   const hasTheory = typeList.includes('theory');
-  const objectiveCount = Math.max(1, Math.round(count / typeList.length));
-  const theoryCount = hasTheory ? Math.max(0, count - objectiveCount) : 0;
 
-  const target = Math.min(Math.max(parseInt(poolSize) || count, count), 150);
+  // Explicit per-type counts win (the admin can choose them); otherwise fall
+  // back to the legacy even split of `count` across the selected types.
+  let objN = objectiveCount != null
+    ? Math.max(1, Math.round(Number(objectiveCount) || 0))
+    : Math.max(1, Math.round(count / typeList.length));
+  let theoN = theoryCount != null
+    ? Math.max(0, Math.round(Number(theoryCount) || 0))
+    : hasTheory
+      ? Math.max(0, count - objN)
+      : 0;
+  if (objN === 0 && theoN > 0) { objN = 1; theoN = Math.max(0, theoN - 1); }
+  const total = objN + theoN;
+
+  const target = Math.min(Math.max(parseInt(poolSize) || total, total), 150);
   const batchSize = Math.max(1, Math.min(target, 10));
   const maxCalls = Math.min(Math.ceil(target / batchSize), 16);
 
   // Keep the same objective/theory split within each smaller batch so the
   // per-batch counts stay consistent with the overall request.
-  const ratio = count > 0 ? batchSize / count : 1;
-  const perBatchObjective = hasTheory ? Math.max(1, Math.round(objectiveCount * ratio)) : batchSize;
-  const perBatchTheory = hasTheory ? Math.max(0, batchSize - perBatchObjective) : 0;
+  const ratio = total > 0 ? batchSize / total : 1;
+  const perBatchTheory = theoN > 0 ? Math.max(1, Math.round(theoN * ratio)) : 0;
+  const perBatchObjective = Math.max(1, batchSize - perBatchTheory);
 
   const NOVELTY_RULE =
     'NOVELTY (non-negotiable): every question must be ORIGINAL and UNPREDICTABLE.\n' +
@@ -201,6 +212,7 @@ Rules:
 - The number of objective questions MUST be ${objN} and theory questions MUST be ${theoN}.
 - Options must have exactly one correct answer; distractors must be plausible.
 - correct_index is the 0-based index of the correct option.
+- CORRECTNESS IS NON-NEGOTIABLE: the option at correct_index must be the ONLY defensible correct answer. If a stem or options are ambiguous, rewrite them so exactly one option is clearly correct. These keys are used to grade students, so a wrong key marks innocent students wrong — never emit an uncertain key.
 - Theory rubric points must sum to (marks - presentation_marks - grammar_marks) or less; total scoring adds up to exactly marks where sensible.
 - Difficulty overall: ${difficulty || 'mixed'}.
 - Style: write like the Ghana Basic Education Certificate Examination (BECE) for a Junior High School (JHS) candidate. Use clear, age-appropriate English and concise stems. Each objective question has exactly four options (A-D) with ONE clearly correct answer and three plausible distractors. No trick wording, no ambiguity, no questions that depend on a textbook not available to the student. Theory questions may use sub-parts (a), (b), (c) where natural.
@@ -250,14 +262,14 @@ ${avoidBlock}`;
     }
   }
 
-  // The first `count` questions form the main set; every extra pool question
+  // The first `total` questions form the main set; every extra pool question
   // must be genuinely distinct from them (and from its siblings), so an
   // attempt can never show a question that paraphrases one already in the exam.
   // Threshold is deliberately high (0.8) so only clear paraphrases are dropped —
   // two different questions on the same topic still share vocabulary.
-  const active = all.slice(0, count);
+  const active = all.slice(0, total);
   const rest = [];
-  for (const q of all.slice(count)) {
+  for (const q of all.slice(total)) {
     const dupActive = active.some((a) => textSimilarity(a.text, q.text) > 0.8);
     const dupRest = rest.some((p) => textSimilarity(p.text, q.text) > 0.8);
     if (!dupActive && !dupRest) rest.push(q);
@@ -285,11 +297,12 @@ function textSimilarity(a, b) {
  * exceeds the bulk timeout on slow models (e.g. huge 100B+ endpoints), which
  * is what made PDF uploads time out. Small blocks keep every call fast.
  */
-async function extractQuestionsFromText(rawText) {
+async function extractQuestionsFromText(rawText, onProgress) {
   const text = String(rawText || '').trim();
   if (!text) return [];
 
   const answerKey = extractAnswerKeySection(text);
+  const markingScheme = extractMarkingSchemeSection(text);
   const blocks = splitIntoBlocks(text);
 
   const system = SYSTEM_BASE + `
@@ -301,8 +314,10 @@ Objective:
 {
   "type": "objective",
   "text": "stem (options already removed)",
-  "options": ["A. Kumasi", "B. Accra", ...]  // keep any letter prefixes as-is, or plain text
+  "options": ["A. Kumasi", "B. Accra", ...]  // KEEP the original letter prefixes (A., B., C., D.) exactly as written on the paper
   "correct_answer": "B",   // the option LETTER if the document has an answer key, else ""
+  "correct_index": 1,      // 0-based position of the correct option IN the options array you return (matches correct_answer)
+  "passage": "",           // full passage/context this question is based on, else ""
   "marks": 1,
   "difficulty": "easy|medium|hard",
   "learning_objective": "",
@@ -313,6 +328,7 @@ Theory:
 {
   "type": "theory",
   "text": "stem",
+  "passage": "",     // full passage/context this question is based on, else ""
   "marks": 5,
   "difficulty": "easy|medium|hard",
   "learning_objective": "",
@@ -324,38 +340,89 @@ Theory:
 }
 
 Rules:
-- Preserve question numbers, drop them from the text.
-- If the document contains an answer key (e.g. "Answers: 1-B, 2-C" or similar), use it as correct_answer. correct_answer must be the letter.
+- Preserve question numbers, drop them from the text. Keep any instruction that is part of the question stem (e.g. "Read the passage below and answer questions 1 to 5.") inside text when it belongs to a single question, otherwise it stays as context.
+- If the document contains an answer key (e.g. "Answers: 1-B, 2-C" or similar), use it to fill correct_answer (the option LETTER) AND correct_index (the 0-based position of that option in the options array you return).
 - If options are numbered 1-4 with possible answers, infer the letter as A-D.
+- KEEP the options in the exact order and with the exact letters they have on the paper.
+- PASSAGES: Reading-comprehension questions are based on a passage that appears before them in the document. If a question depends on such a passage, set its "passage" field to the full passage text VERBATIM on the FIRST question that uses that passage, and leave "passage": "" on the LATER questions that use the SAME passage (the system attaches it to the whole group). Preserve instructions that introduce the passage ("Read the following passage carefully and answer questions 1 to 5.") as part of that first question's passage.
+- SECTION INSTRUCTIONS: Preserve section-level instructions students need to answer the questions (e.g. "Answer ONE question in this section", "Your answer should be between 250 and 300 words", "Answer ALL questions", "Write a letter", "Translate into English"). Attach them to the "passage" field of the FIRST question of that section — for BOTH objective and theory questions — and leave "passage": "" on the later questions of the same section. Never drop instructions that appear in the document.
+- MARKING SCHEME: If a marking scheme / model answer / suggested answers section for the questions is quoted in the prompt, use it VERBATIM to fill model_answer, key_points and rubric for the matching theory questions (do not regenerate or paraphrase it).
 - For theory questions with no rubric in the source, leave rubric/model_answer empty (the system will generate them).
-- Do NOT invent answer keys that are not in the document. Leave correct_answer/explanation empty when unknown.
+- Do NOT invent answer keys that are not in the document. Leave correct_answer/correct_index/explanation empty when unknown.
 `;
 
-  const user = (block) => [
+  const user = (block, shared) => [
     'Extract every question from the document block below.',
     answerKey
-      ? `\nThe document includes this answer key (use it to fill correct_answer — the option LETTER — for the matching questions):\n${answerKey}`
+      ? `\nThe document includes this answer key (use it to fill correct_answer — the option LETTER — and correct_index for the matching questions):\n${answerKey}`
+      : '',
+    markingScheme
+      ? `\nThe document includes this marking scheme / model answers (use it VERBATIM to fill model_answer, key_points and rubric for the matching theory questions):\n${markingScheme}`
+      : '',
+    shared
+      ? `\nThe questions in this block are based on the following passage/context (quoted from earlier in the document). Use it to answer comprehension questions and preserve it VERBATIM in the passage field of the first question that uses it (and attach any section instructions such as "Answer ONE question in this section" to that first question's passage as well):\n${shared}`
       : '',
     `\n--- Document block ---\n${block}`,
   ].join('\n');
 
-  const tasks = blocks.map((block) => () =>
-    chatJSON(
+  // A block's leading context is the passage and/or section instructions that
+  // sit in front of its first question (the splitter breaks blocks at
+  // instruction lines precisely so this is the group's own context). Leading
+  // title lines ("ENGLISH LANGUAGE", "BIG EXAM PAPER") are dropped so they are
+  // not attached to every question. If a block has no context of its own, the
+  // most recent one is carried forward so questions never lose context.
+  const sharedFor = (block) => {
+    const lines = leadingContext(block.split(/\r?\n/));
+    let start = 0;
+    while (start < lines.length) {
+      const l = lines[start].trim();
+      if (CONTEXT_START.test(l) || l.length >= 40) break;
+      start++; // skip title-like lines
+    }
+    return lines.slice(start).join('\n').trim();
+  };
+  let lastPassage = '';
+  const blockPrompts = blocks.map((block) => {
+    const lead = sharedFor(block);
+    const isContext = lead.length > 0;
+    if (isContext) lastPassage = lead;
+    return { block, shared: isContext ? lead : lastPassage };
+  });
+
+  let completed = 0;
+  const tasks = blockPrompts.map(({ block, shared }) => () => {
+    completed++;
+    if (onProgress) onProgress(completed, blocks.length);
+    return chatJSON(
       [
         { role: 'system', content: system },
-        { role: 'user', content: user(block) },
+        { role: 'user', content: user(block, shared) },
       ],
       { timeoutMs: BULK_TIMEOUT_MS, maxTokens: BLOCK_MAX_TOKENS }
-    )
-  );
+    );
+  });
 
   const settled = await mapLimit(tasks, BLOCK_CONCURRENCY, (run) => run());
 
   const seen = new Set();
   const all = [];
-  for (const result of settled) {
+  for (let i = 0; i < settled.length; i++) {
+    const result = settled[i];
+    const shared = blockPrompts[i].shared;
     const list = Array.isArray(result) ? result : result.questions;
+    let cur = '';
     for (const q of list || []) {
+      if (q && typeof q === 'object') {
+        // Attach passage/instructions to every question. Prefer the passage the
+        // AI attached (first question of a group), then carry that forward to
+        // the following questions of the group, and fall back to this block's
+        // shared context so instructions are never lost even if the AI omitted
+        // them. This is authoritative: students always see what they need.
+        const p = q.passage && String(q.passage).trim();
+        if (p) cur = p;
+        if (!cur && shared) cur = shared;
+        if (!q.passage || !String(q.passage).trim()) q.passage = cur;
+      }
       const t = String((q && q.text) || '')
         .replace(/\s+/g, ' ')
         .trim()
@@ -373,7 +440,62 @@ Rules:
 // lines ("A. ...") and section headers do not match.
 const QUESTION_START = /^\s*\d{1,3}\s*[.)]\s+\S/;
 
-/** Split document text into blocks that only break BETWEEN questions. */
+// An answer-option line, e.g. "A. Accra", "B) Gold", "(C) Yes". Requires a
+// real separator after the letter so a prose word like "Accra" or "Cape
+// Coast" is not mistaken for an option.
+const OPTION_START = /^\s*\(?[A-Da-d]\)?[.\-:\])]/;
+
+// An instruction / context header line (e.g. "Section A: Comprehension",
+// "Read the following passage below and answer questions 1 to 5", "Answer ONE
+// question in this section", "Your answer should be between 250 and 300
+// words"). These start a new context for the questions that follow, so the
+// splitter breaks the document at them and each group keeps its own passage
+// and instructions instead of inheriting the previous section's.
+// Also matches French paper wording (English Language / French / Ghanaian
+// Language comprehension sections), e.g. "Lisez le texte", "Répondez à toutes
+// les questions", "Traduisez en anglais", "Écrivez une composition".
+const CONTEXT_START =
+  /^\s*(?:section\s*[A-Za-z0-9]|instruction|note\s*:|read\s+the|study\s+the|use\s+the|answer\s+all\s+(?:the\s+)?questions|answer\s+(?:any\s+)?(?:one|two|three)\s+(?:question|questions)|write\s+(?:an?\s+)?(?:essay|story|composition|letter)|your\s+answer\s+(?:should|must)|in\s+not\s+(?:less|more)\s+than|between\s+\d+\s+and\s+\d+\s+words|lisez\s+(?:le\s+)?(?:texte|passage)|lis\s+le\s+(?:texte|passage)|lisez\s+attentivement|r[ée]pondez?\s+(?:[àa]\s+)?toutes\s+les\s+questions|r[ée]pondez\s+aux\s+questions|r[ée]pondez\s+[àa]\s+toutes|traduis(?:ez)?\s+(?:en|into)|e?[çc]ri(?:vez|s|re)\s+(?:une|la)|compl[ée]tez|choisiss(?:ez|s))/i;
+
+/**
+ * Extract the run of trailing non-question lines from a block (passage text,
+ * section headers). Answer-option lines belong to their question, so they are
+ * NOT treated as trailing context: a reading passage that follows a group of
+ * questions is carried to the next block, but Q5's own options stay with Q5.
+ */
+function trailingContext(lines) {
+  let i = lines.length;
+  while (i > 0) {
+    const line = lines[i - 1];
+    if (QUESTION_START.test(line) || OPTION_START.test(line)) break;
+    i--;
+  }
+  return lines.slice(i);
+}
+
+/** Detect a leading passage/context run at the start of a block. */
+function leadingContext(lines) {
+  let i = 0;
+  while (i < lines.length && !QUESTION_START.test(lines[i])) i++;
+  return lines.slice(0, i);
+}
+
+/**
+ * Split document text into blocks that only break BETWEEN questions (or at
+ * section/instruction boundaries).
+ *
+ * Reading-comprehension papers put a passage (and instructions) in front of a
+ * group of questions, and a fresh instruction line starts each new section
+ * (e.g. "Read the following passage...", "Section B: Essay", "Answer ONE
+ * question in this section"). Rules:
+ *  - A block is never flushed before it contains its first question, so a
+ *    leading passage always stays with the questions that follow it.
+ *  - When a block is flushed, any trailing non-question lines (a passage or
+ *    section instructions) travel WITH the next block, not the one being flushed.
+ *  - A new instruction/context line after a question starts a fresh block, so
+ *    the next group's passage and instructions become that block's leading
+ *    context and are never glued onto the previous group.
+ */
 function splitIntoBlocks(text, perBlock = BLOCK_QUESTIONS, maxChars = BLOCK_MAX_CHARS) {
   const lines = text.split(/\r?\n/);
   const blocks = [];
@@ -383,15 +505,29 @@ function splitIntoBlocks(text, perBlock = BLOCK_QUESTIONS, maxChars = BLOCK_MAX_
   const flush = () => {
     if (cur.length) {
       blocks.push(cur.join('\n'));
-      cur = [];
-      qCount = 0;
-      totalChars = 0;
     }
+    cur = [];
+    qCount = 0;
+    totalChars = 0;
+  };
+  const startNewBlock = () => {
+    const ctx = trailingContext(cur);
+    cur = cur.slice(0, cur.length - ctx.length);
+    flush();
+    cur = ctx; // passage / instructions lead the next block
+    totalChars = ctx.reduce((s, l) => s + l.length + 1, 0);
   };
   for (const line of lines) {
     const isQuestion = QUESTION_START.test(line);
-    if ((qCount >= perBlock || totalChars + line.length >= maxChars) && isQuestion && cur.length) {
-      flush();
+    const isContext = CONTEXT_START.test(line);
+    const tooBig = qCount > 0 && totalChars + line.length >= maxChars;
+    const tooMany = qCount >= perBlock;
+    if (tooBig || tooMany) {
+      if (isQuestion) startNewBlock();
+    } else if (isContext && qCount > 0) {
+      // New section / passage intro after some questions: break the block here
+      // so the following questions keep their own context as leading text.
+      startNewBlock();
     }
     cur.push(line);
     totalChars += line.length + 1;
@@ -416,6 +552,27 @@ function extractAnswerKeySection(text) {
   }
   if (start === -1) return '';
   return lines.slice(start).join('\n').slice(0, 4000);
+}
+
+/**
+ * Find a marking scheme / model answers section (e.g. "MARKING SCHEME",
+ * "MARKING GUIDE", "SUGGESTED ANSWERS", "MODEL ANSWERS", "SOLUTIONS"). Used to
+ * reuse the paper's own rubric/model answers instead of regenerating them.
+ */
+function extractMarkingSchemeSection(text) {
+  const lines = text.split(/\r?\n/);
+  let start = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (
+      /^\s*(?:marking\s*(?:scheme|guide)|(?:suggested|model|sample)\s*answers?|solutions?)\s*[:.\-]?\s*$/i.test(lines[i]) ||
+      /^\s*(?:marking\s*(?:scheme|guide))\s*[:.\-]\s*\d+\s*[.)\-]/i.test(lines[i])
+    ) {
+      start = i;
+      break;
+    }
+  }
+  if (start === -1) return '';
+  return lines.slice(start).join('\n').slice(0, 6000);
 }
 
 /**
@@ -449,6 +606,10 @@ Rules:
  * Determine the correct answers for objective questions that have no answer key.
  * questions: [{index, text, options:[{key,text}]}]
  * Returns: [{index, correct_index, explanation}]
+ *
+ * Answers the self-verification pass cannot CONFIRM come back with
+ * correct_index: -1 — callers must leave the answer unset and flag the
+ * question for review rather than store a guess that marks students wrong.
  */
 async function answerObjectiveQuestions(questions) {
   if (!questions.length) return [];
@@ -457,7 +618,9 @@ For each question, determine the single correct answer option. Return:
 {"answers":[{"index": 0, "correct_index": 2, "explanation": "short reason"}]}
 Rules:
 - correct_index is the 0-based index into the options array.
-- Pick the objectively correct answer; if ambiguous, choose the best answer.
+- CORRECTNESS IS NON-NEGOTIABLE: only pick an answer you are CERTAIN is correct. These keys are used to grade students, so a wrong key marks innocent students wrong.
+- If a question is ambiguous, has more than one defensible answer, or you are not certain, set correct_index to -1 and explain why. NEVER guess.
+- Pick the objectively correct answer only when exactly one option is clearly right.
 - Provide a one-sentence explanation for each.
 `;
   const user = questions
@@ -474,16 +637,129 @@ Rules:
       { role: 'system', content: system },
       { role: 'user', content: user },
     ],
-    { timeoutMs: BULK_TIMEOUT_MS }
+    { timeoutMs: BULK_TIMEOUT_MS, temperature: 0.2 }
   );
 
   const byIndex = {};
   for (const a of result.answers || result) byIndex[a.index] = a;
-  return questions.map((q) => ({
-    index: q.index,
-    correct_index: byIndex[q.index]?.correct_index ?? -1,
-    explanation: byIndex[q.index]?.explanation || '',
-  }));
+
+  // Self-verification pass: independently re-check every first-pass answer.
+  // This is authoritative — a second look that cannot confirm an answer voids
+  // it (correct_index: -1) so the question is flagged for review, not guessed.
+  const toVerify = questions
+    .map((q) => ({ q, a: byIndex[q.index] }))
+    .filter((x) => x.a && Number(x.a.correct_index) >= 0)
+    .map((x) => ({ index: x.q.index, correct_index: x.a.correct_index, explanation: x.a.explanation || '' }));
+  if (toVerify.length) {
+    try {
+      const verified = await verifyObjectiveAnswers(questions, toVerify);
+      for (const v of verified) byIndex[v.index] = v;
+    } catch (err) {
+      // Verification failure keeps the first-pass answers; never fatal.
+      console.error('[ai] objective answer verification failed (keeping first-pass answers):', err.message);
+    }
+  }
+
+  return questions.map((q) => {
+    const a = byIndex[q.index];
+    return {
+      index: q.index,
+      correct_index: a ? Number(a.correct_index) : -1,
+      explanation: a?.explanation || '',
+    };
+  });
+}
+
+/**
+ * Second-pass verification of AI-generated objective answers. Confirms each
+ * answer against its question and options. Answers that cannot be confirmed
+ * are returned with correct_index: -1 (never guessed).
+ */
+async function verifyObjectiveAnswers(questions, answers) {
+  const system = SYSTEM_BASE + `
+You are verifying an exam answer key before it is used to grade students. For each question, confirm whether the proposed correct option is genuinely and unambiguously correct.
+Return:
+{"answers":[{"index": 0, "correct_index": 2, "confirmed": true}]}
+Rules:
+- confirmed must be true ONLY when the proposed answer is certainly correct AND every other option is clearly wrong.
+- If the proposed answer is wrong, ambiguous, or you are not certain, set confirmed to false and correct_index to -1.
+- A wrong key marks innocent students wrong, so when in doubt, do NOT confirm.
+`;
+  const user = answers
+    .map((a) => {
+      const q = questions.find((qq) => qq.index === a.index);
+      return (
+        `Q (index ${a.index}):\n${q ? q.text : '?'}\n` +
+        `Options:\n${(q ? q.options : []).map((o, j) => `  ${j}. ${o && o.text}`).join('\n') || '(none)'}\n` +
+        `Proposed correct: index ${a.correct_index}\n` +
+        `Reason given: ${a.explanation || ''}`
+      );
+    })
+    .join('\n\n');
+
+  const result = await chatJSON(
+    [
+      { role: 'system', content: system },
+      { role: 'user', content: user },
+    ],
+    { timeoutMs: BULK_TIMEOUT_MS, temperature: 0.1 }
+  );
+
+  const byIndex = {};
+  for (const v of result.answers || result) byIndex[v.index] = v;
+  return answers.map((a) => {
+    const v = byIndex[a.index];
+    const confirmed = !!(v && v.confirmed);
+    return {
+      index: a.index,
+      correct_index: confirmed ? a.correct_index : -1,
+      explanation: a.explanation || '',
+    };
+  });
+}
+
+/**
+ * Detect whether a theory answer was likely written or copied from an AI
+ * assistant (ChatGPT, Gemini, Claude, ...). Returns { ai_generated, ai_reason }.
+ * Conservative: when unsure, ai_generated is false (benefit of the doubt —
+ * accusing a genuine student is worse than missing a cheater).
+ */
+async function detectAiGeneratedAnswer({ questionText, studentAnswer }) {
+  const system = SYSTEM_BASE + `
+You detect whether a student's theory exam answer was written by the student themselves or copied from an AI assistant (e.g. ChatGPT, Gemini, Claude).
+
+Return exactly:
+{"ai_generated": boolean, "ai_reason": "short explanation"}
+
+Signs the answer was produced by an AI:
+- Suspiciously perfect: no spelling or grammar errors at all, polished generic phrasing.
+- Generic AI-typical vocabulary and structure ("In conclusion", "Moreover", "It is important to note", perfectly balanced paragraphs).
+- Does not reflect the specific question's wording or a student's own reasoning and voice.
+- Uniformly fluent, with no signs of the student's own working or genuine attempt.
+
+Signs it was written by the student:
+- Natural unevenness, personal wording, minor imperfections, first-person reasoning, concrete personal examples.
+- The answer paraphrases the question or textbook in the student's own words.
+
+Rules:
+- Be CONSERVATIVE. Only set ai_generated=true when it is MORE LIKELY THAN NOT that the text was produced or copied from an AI.
+- When in doubt, set ai_generated=false. Never decide based on the answer being correct or well-written alone.
+`;
+
+  const user = `QUESTION:\n${questionText}\n\nSTUDENT ANSWER:\n${studentAnswer}`;
+
+  const result = await chatJSON(
+    [
+      { role: 'system', content: system },
+      { role: 'user', content: user },
+    ],
+    { temperature: 0.1 }
+  );
+
+  return {
+    ai_generated: !!result.ai_generated,
+    ai_reason: String(result.ai_reason || '').slice(0, 300),
+  };
 }
 
 /**
@@ -498,7 +774,9 @@ Return exactly:
   "marks_awarded": number,
   "max_marks": number,
   "breakdown": [{"criterion": "...", "marks": number, "comment": "..."}],
-  "feedback": "2-3 sentences of constructive feedback"
+  "feedback": "2-3 sentences of constructive feedback",
+  "ai_generated": boolean,
+  "ai_reason": "short explanation"
 }
 
 Rules:
@@ -506,6 +784,7 @@ Rules:
 - Award PARTIAL marks generously but fairly. Be consistent: if a rubric point is partially addressed, give partial marks.
 - Presentation and grammar marks are awarded only if the writing is clear/organized and grammatically acceptable.
 - marks_awarded MUST be an integer or half-integer between 0 and max_marks.
+- AI-COPIED ANSWERS: Also assess whether the student answer was likely written or copied from an AI assistant (ChatGPT, Gemini, Claude). Set ai_generated=true ONLY when it is MORE LIKELY THAN NOT that it is AI-produced (suspiciously perfect, no errors, generic AI phrasing, no personal reasoning). When ai_generated is true, marks_awarded MUST be 0 and ai_reason must explain. When unsure, set ai_generated=false (benefit of the doubt).
 `;
 
   const rubricText = Array.isArray(rubric) && rubric.length
@@ -536,6 +815,8 @@ Rules:
     maxMarks,
     breakdown: result.breakdown || [],
     feedback: result.feedback || '',
+    aiGenerated: !!result.ai_generated,
+    aiReason: String(result.ai_reason || '').slice(0, 300),
   };
 }
 
@@ -549,9 +830,17 @@ module.exports = {
   AIError,
   aiConfigured,
   chatJSON,
+  mapLimit,
   generateQuestions,
   extractQuestionsFromText,
   answerObjectiveQuestions,
+  verifyObjectiveAnswers,
+  detectAiGeneratedAnswer,
   generateTheoryScheme,
   markTheory,
+  splitIntoBlocks,
+  leadingContext,
+  trailingContext,
+  extractAnswerKeySection,
+  extractMarkingSchemeSection,
 };

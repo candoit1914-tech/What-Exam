@@ -1,0 +1,186 @@
+'use strict';
+const { test } = require('node:test');
+const assert = require('node:assert/strict');
+
+const ai = require('../src/services/ai');
+const marking = require('../src/services/marking');
+const pdfImport = require('../src/services/pdfImport');
+const exam = require('../src/services/exam');
+
+// ── Bug 2 regression: reading passages must stay with the questions they belong to ──
+
+function comprehensionPaper() {
+  const passage1 = [
+    'Read the following passage carefully and answer questions 1 to 5.',
+    'The farmers of the valley rely on irrigation channels that carry water from the mountain.',
+    'Every dry season the council dredges the channels so the fields stay productive.',
+  ].join('\n');
+  const passage2 = [
+    'Read the following passage and answer questions 6 to 10.',
+    'Port Klondike grew around a single deep-water jetty built in 1923.',
+    'By 1950 the harbour handled more tonnage than any other port on the coast.',
+  ].join('\n');
+  const opts = ['A. Option one', 'B. Option two', 'C. Option three', 'D. Option four'];
+  const qs = [];
+  for (let i = 1; i <= 10; i++) {
+    qs.push(`${i}. Question number ${i}?`);
+    qs.push(...opts);
+  }
+  return `${passage1}\n\n${qs.slice(0, 25).join('\n')}\n\n${passage2}\n\n${qs.slice(25).join('\n')}`;
+}
+
+test('splitIntoBlocks keeps each passage with the questions that follow it', () => {
+  const blocks = ai.splitIntoBlocks(comprehensionPaper(), 5);
+
+  assert.equal(blocks.length, 2, 'paper with two passages splits into two blocks');
+  assert.match(blocks[0], /irrigation channels/, 'block 0 carries passage 1');
+  assert.match(blocks[0], /Question number 1/, 'block 0 starts with Q1');
+  assert.match(blocks[0], /Question number 5/, 'block 0 ends with Q5');
+  assert.match(blocks[0], /D\. Option four/, 'Q5 keeps its own options in block 0');
+  assert.doesNotMatch(blocks[0], /Port Klondike/, 'passage 2 is NOT glued onto block 0');
+
+  assert.match(blocks[1], /^\s*Read the following passage/, 'block 1 starts with the carried passage, not orphaned options');
+  assert.match(blocks[1], /Port Klondike/, 'block 1 carries passage 2 as leading context');
+  assert.doesNotMatch(blocks[1], /Question number 5/, 'block 1 does not repeat Q5');
+  assert.match(blocks[1], /Question number 10/, 'block 1 ends with Q10');
+});
+
+test('trailingContext finds the non-question lines after the last question', () => {
+  const lines = '1. A question?\nA. X\nB. Y\n\nExtra note.'.split(/\r?\n/);
+  const trail = ai.trailingContext(lines);
+  assert.deepEqual(trail, ['', 'Extra note.']);
+});
+
+test('splitIntoBlocks breaks at section instructions so they lead the next block', () => {
+  const paper = [
+    '1. One plus one?',
+    'A. 1 B. 2 C. 3 D. 4',
+    '2. Two plus two?',
+    'A. 2 B. 3 C. 4 D. 5',
+    'Section B: Essay Writing',
+    'Answer ONE question in this section. Your answer should be between 250 and 300 words.',
+    '3. Write an essay on discipline.',
+    '4. Write a story ending with "the end".',
+  ].join('\n');
+  const blocks = ai.splitIntoBlocks(paper);
+
+  assert.equal(blocks.length, 2, 'a new section starts a new block');
+  assert.doesNotMatch(blocks[0], /Section B/, 'the previous block is not polluted by the new section');
+  assert.match(blocks[0], /Question number|One plus one/);
+  assert.match(blocks[1], /^Section B: Essay Writing/m, 'the new block leads with its section header');
+  assert.match(blocks[1], /Answer ONE question in this section/, 'the section instruction leads the new block');
+  assert.match(blocks[1], /3\. Write an essay/, 'theory questions stay in the section block');
+});
+
+// ── Bug 1 regression: stored correct answers that are NOT bare letters ──
+
+const OPTIONS = [
+  { key: 'A', text: 'Kumasi' },
+  { key: 'B', text: 'Accra' },
+  { key: 'C', text: 'Tamale' },
+  { key: 'D', text: 'Cape Coast' },
+];
+
+test('resolveCorrectKey accepts bare letters and dot variants', () => {
+  assert.equal(marking.resolveCorrectKey({ correct_answer: 'B', options: OPTIONS }), 'B');
+  assert.equal(marking.resolveCorrectKey({ correct_answer: 'b.', options: OPTIONS }), 'B');
+  assert.equal(marking.resolveCorrectKey({ correct_answer: 'C', options: OPTIONS }), 'C');
+});
+
+test('resolveCorrectKey reconciles letter+text values ("B. Accra") against options', () => {
+  assert.equal(marking.resolveCorrectKey({ correct_answer: 'B. Accra', options: OPTIONS }), 'B');
+  assert.equal(marking.sanitizeCorrectAnswer('B. Accra', OPTIONS), 'B');
+});
+
+test('resolveCorrectKey handles "Option X" and full option text', () => {
+  assert.equal(marking.resolveCorrectKey({ correct_answer: 'Option C', options: OPTIONS }), 'C');
+  assert.equal(marking.resolveCorrectKey({ correct_answer: 'Accra', options: OPTIONS }), 'B');
+});
+
+test('resolveCorrectKey returns null for unparseable answers', () => {
+  assert.equal(marking.resolveCorrectKey({ correct_answer: '', options: OPTIONS }), null);
+  assert.equal(marking.resolveCorrectKey({ correct_answer: null, options: OPTIONS }), null);
+  assert.equal(marking.resolveCorrectKey({ correct_answer: 'Zebra', options: OPTIONS }), null);
+});
+
+test('markObjective marks the correct letter right even when the stored key is messy', () => {
+  // Regression: the old code compared the student letter to the raw stored
+  // value "B. Accra" → "B" !== "B. ACCRA" → marked wrong.
+  const q = { correct_answer: 'B. Accra', options: OPTIONS, marks: 1 };
+  assert.deepEqual(marking.markObjective(q, 'B'), { isCorrect: true, marksAwarded: 1, maxMarks: 1 });
+  assert.deepEqual(marking.markObjective(q, 'b.'), { isCorrect: true, marksAwarded: 1, maxMarks: 1 });
+  assert.equal(marking.markObjective(q, 'C').isCorrect, false);
+});
+
+test('markObjective matches a full option text answer', () => {
+  const q = { correct_answer: 'B', options: OPTIONS, marks: 2 };
+  assert.deepEqual(marking.markObjective(q, 'Accra'), { isCorrect: true, marksAwarded: 2, maxMarks: 2 });
+});
+
+// ── pdfImport helpers: option letters are preserved and answers resolved safely ──
+
+test('buildOptions preserves the letters printed on the paper', () => {
+  assert.deepEqual(
+    pdfImport.buildOptions(['A. Kumasi', 'B. Accra', 'C. Tamale', 'D. Cape Coast']),
+    [
+      { key: 'A', text: 'Kumasi' },
+      { key: 'B', text: 'Accra' },
+      { key: 'C', text: 'Tamale' },
+      { key: 'D', text: 'Cape Coast' },
+    ]
+  );
+});
+
+test('buildOptions falls back to positional A-D when letters are missing', () => {
+  assert.deepEqual(
+    pdfImport.buildOptions(['Kumasi', 'Accra', 'Tamale', 'Cape Coast']).map((o) => o.key),
+    ['A', 'B', 'C', 'D']
+  );
+});
+
+test('correctKeyFor prefers a validated correct_index (anchored to the returned array)', () => {
+  const opts = pdfImport.buildOptions(['A. Kumasi', 'B. Accra', 'C. Tamale', 'D. Cape Coast']);
+  assert.equal(pdfImport.correctKeyFor(opts, { correct_answer: 'B', correct_index: 1 }), 'B');
+  // Index wins even when the letter would point at a different option.
+  assert.equal(pdfImport.correctKeyFor(opts, { correct_answer: 'B', correct_index: 2 }), 'C');
+});
+
+test('correctKeyFor sanitizes messy answer-key letters', () => {
+  const opts = pdfImport.buildOptions(['A. Kumasi', 'B. Accra', 'C. Tamale', 'D. Cape Coast']);
+  assert.equal(pdfImport.correctKeyFor(opts, { correct_answer: 'B. Accra' }), 'B');
+  assert.equal(pdfImport.correctKeyFor(opts, { correct_answer: 'Option D' }), 'D');
+});
+
+test('correctKeyFor yields null when nothing can be resolved', () => {
+  const opts = pdfImport.buildOptions(['A. Kumasi', 'B. Accra', 'C. Tamale', 'D. Cape Coast']);
+  assert.equal(pdfImport.correctKeyFor(opts, { correct_answer: '', correct_index: -1 }), null);
+  assert.equal(pdfImport.correctKeyFor(opts, { correct_answer: 'Zebra' }), null);
+});
+
+// ── AI-integrity design: bold question-type headers, review-safe marking ──
+
+test('formatQuestion renders a bold OBJECTIVE header line', () => {
+  const q = { q_order: 1, type: 'objective', text: 'What is 2+2?', passage: '' };
+  assert.equal(
+    exam.formatQuestion({ title: 'Test' }, q, 10),
+    '*QUESTION 1 — OBJECTIVE*\n\nWhat is 2+2?'
+  );
+});
+
+test('formatQuestion renders a bold THEORY header and keeps the passage', () => {
+  const q = { q_order: 2, type: 'theory', text: 'Explain photosynthesis.', passage: 'Read the passage.' };
+  assert.equal(
+    exam.formatQuestion({ title: 'Test' }, q, 10),
+    '*QUESTION 2 — THEORY*\n\nRead the passage.\n\nExplain photosynthesis.'
+  );
+});
+
+test('markObjective is review-safe when no correct answer is stored', () => {
+  // Regression: an objective question whose AI answer was never verified
+  // (NULL correct_answer) must never be marked correct or crash the marker.
+  const q = { correct_answer: null, options: OPTIONS, marks: 1 };
+  const out = marking.markObjective(q, 'B');
+  assert.equal(out.isCorrect, false);
+  assert.equal(out.marksAwarded, 0);
+  assert.equal(out.maxMarks, 1);
+});

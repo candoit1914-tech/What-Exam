@@ -88,11 +88,72 @@ function isObjectiveAnswer(input) {
   return /^[A-D]$/.test(normalizeAnswer(input).replace(/\.$/, ''));
 }
 
-/** Instant objective marking. Accepts "B", "b", "B." */
+function parseOptions(question) {
+  if (!question) return [];
+  if (Array.isArray(question.options)) return question.options;
+  try {
+    return JSON.parse(question.options || '[]');
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Resolve the correct option KEY (a bare A-D letter) for an objective question,
+ * tolerating messy stored values like "B", "b.", "B. Accra", "Option B", or a
+ * full option text ("Accra"). The stored value is reconciled against the
+ * question's options, so a student who picks the genuinely correct option is
+ * never marked wrong just because the answer key was stored with extra text or
+ * a different format.
+ */
+function resolveCorrectKey(question) {
+  const raw = question && question.correct_answer;
+  if (raw == null || String(raw).trim() === '') return null;
+  const opts = parseOptions(question);
+
+  const exact = normalizeAnswer(raw).replace(/\.$/, '');
+  if (/^[A-D]$/.test(exact)) return exact;
+
+  const ot = (o) => normalizeAnswer(o && o.text);
+  const byText = opts.find((o) => {
+    const t = ot(o);
+    return !!t && (t === exact || t.includes(exact) || exact.includes(t));
+  });
+  if (byText) return String(byText.key || '').toUpperCase();
+
+  const lead =
+    String(raw).match(/^(?:option\s*)?\(?([A-Da-d])\)?$/i) ||
+    String(raw).match(/^(?:option\s*)?\(?([A-Da-d])\)?\s*[.\-:\]](?:\s|$)/i);
+  if (lead) return lead[1].toUpperCase();
+
+  return null;
+}
+
+/** Reduce any stored correct answer to a bare A-D letter (or null). */
+function sanitizeCorrectAnswer(value, options) {
+  return resolveCorrectKey({ correct_answer: value, options });
+}
+
+/**
+ * Resolve the student's answer to a bare A-D letter, accepting a letter,
+ * "b.", or the full option text ("Accra"). Returns null when nothing matches.
+ */
+function resolveStudentLetter(question, raw) {
+  const ans = normalizeAnswer(raw).replace(/\.$/, '');
+  if (/^[A-D]$/.test(ans)) return ans;
+  const opts = parseOptions(question);
+  const hit = opts.find((o) => {
+    const t = normalizeAnswer(o && o.text);
+    return !!t && (t === ans || t.includes(ans) || ans.includes(t));
+  });
+  return hit ? String(hit.key || '').toUpperCase() : null;
+}
+
+/** Instant objective marking. Accepts "B", "b", "B." or the full option text. */
 function markObjective(question, studentAnswer) {
-  const ans = normalizeAnswer(studentAnswer).replace(/\.$/, '');
-  const correct = normalizeAnswer(question.correct_answer).replace(/\.$/, '');
-  const isCorrect = ans === correct;
+  const ans = resolveStudentLetter(question, studentAnswer);
+  const correct = resolveCorrectKey(question);
+  const isCorrect = !!ans && !!correct && ans === correct;
   return {
     isCorrect,
     marksAwarded: isCorrect ? Number(question.marks) : 0,
@@ -117,7 +178,14 @@ async function markTheoryAnswer(question, studentAnswer, scheme) {
     maxMarks: total,
     studentAnswer,
   });
-  return result;
+  return {
+    marksAwarded: result.marksAwarded,
+    maxMarks: result.maxMarks,
+    breakdown: result.breakdown || [],
+    feedback: result.feedback || '',
+    aiGenerated: !!result.aiGenerated,
+    aiReason: result.aiReason || '',
+  };
 }
 
 // ── Exam totals ────────────────────────────────────────────────────────
@@ -135,6 +203,9 @@ module.exports = {
   getScheme,
   normalizeAnswer,
   isObjectiveAnswer,
+  resolveCorrectKey,
+  sanitizeCorrectAnswer,
+  resolveStudentLetter,
   markObjective,
   markTheoryAnswer,
   recomputeExamTotal,

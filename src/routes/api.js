@@ -4,6 +4,7 @@ const db = require('../db');
 const ai = require('../services/ai');
 const marking = require('../services/marking');
 const pdf = require('../services/pdf');
+const pdfImport = require('../services/pdfImport');
 const examService = require('../services/exam');
 const results = require('../services/results');
 const config = require('../config');
@@ -11,21 +12,6 @@ const auth = require('../auth');
 
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
-
-/** Run fn over items with at most `limit` promises in flight. */
-async function mapLimit(items, limit, fn) {
-  const out = new Array(items.length);
-  let next = 0;
-  const worker = async () => {
-    while (next < items.length) {
-      const idx = next++;
-      out[idx] = await fn(items[idx]);
-    }
-  };
-  const n = Math.max(1, Math.min(limit, items.length));
-  await Promise.all(Array.from({ length: n }, worker));
-  return out;
-}
 
 // ── Admin auth ─────────────────────────────────────────────────────────
 router.post('/auth/login', (req, res) => {
@@ -53,6 +39,7 @@ function qWithScheme(row) {
     q_order: row.q_order,
     type: row.type,
     text: row.text,
+    passage: row.passage || '',
     options: row.options ? JSON.parse(row.options) : null,
     correct_answer: row.correct_answer,
     marks: row.marks,
@@ -274,11 +261,11 @@ router.post('/exams/:id/questions', asyncWrap(async (req, res) => {
   const marks = parseFloat(q.marks) || 1;
   const info = db
     .prepare(
-      `INSERT INTO questions (exam_id, q_order, type, text, options, correct_answer, marks, difficulty, learning_objective, explanation, source)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?)`
+      `INSERT INTO questions (exam_id, q_order, type, text, passage, options, correct_answer, marks, difficulty, learning_objective, explanation, source)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`
     )
     .run(
-      exam.id, nextOrder, q.type || 'objective', q.text,
+      exam.id, nextOrder, q.type || 'objective', q.text, q.passage || '',
       q.type === 'objective' && Array.isArray(q.options)
         ? JSON.stringify(q.options.map((o, i) => ({ key: String.fromCharCode(65 + i), text: o })))
         : null,
@@ -304,6 +291,7 @@ router.put('/exams/:id/questions/:qid', (req, res) => {
   const fields = [];
   const vals = [];
   if (b.text !== undefined) { fields.push('text=?'); vals.push(String(b.text)); }
+  if (b.passage !== undefined) { fields.push('passage=?'); vals.push(String(b.passage)); }
   if (b.type !== undefined) { fields.push('type=?'); vals.push(String(b.type)); }
   if (b.correct_answer !== undefined) { fields.push('correct_answer=?'); vals.push(b.correct_answer || null); }
   if (b.marks !== undefined) { fields.push('marks=?'); vals.push(parseFloat(b.marks)); }
@@ -377,8 +365,10 @@ router.post('/exams/:id/generate', asyncWrap(async (req, res) => {
   if (exam.status === 'live' || exam.status === 'ended') {
     return res.status(400).json({ error: 'Exam is already live/ended.' });
   }
-  const { subject, topics, count, types, difficulty, instructions, pool, poolMultiplier } = req.body;
+  const { subject, topics, count, objectiveCount, theoryCount, types, difficulty, instructions, pool, poolMultiplier } = req.body;
   const n = Math.min(Math.max(parseInt(count) || 10, 1), 50);
+  const objN = objectiveCount != null ? Math.min(Math.max(parseInt(objectiveCount) || 0, 0), 50) : null;
+  const theoN = theoryCount != null ? Math.min(Math.max(parseInt(theoryCount) || 0, 0), 50) : null;
   const multiplier = pool ? Math.min(Math.max(parseInt(poolMultiplier) || 3, 2), 7) : 1;
   const existing = db
     .prepare('SELECT text FROM questions WHERE exam_id = ? ORDER BY q_order LIMIT 20')
@@ -388,6 +378,8 @@ router.post('/exams/:id/generate', asyncWrap(async (req, res) => {
     subject: subject || exam.subject || exam.title,
     topics,
     count: n,
+    objectiveCount: objN,
+    theoryCount: theoN,
     poolSize: pool ? n * multiplier : n,
     types: Array.isArray(types) ? types : ['objective', 'theory'],
     difficulty,
@@ -400,12 +392,12 @@ router.post('/exams/:id/generate', asyncWrap(async (req, res) => {
 
   let nextOrder = (db.prepare('SELECT MAX(q_order) m FROM questions WHERE exam_id = ?').get(exam.id).m || 0) + 1;
   const insert = db.prepare(
-    `INSERT INTO questions (exam_id, q_order, type, text, options, correct_answer, marks, difficulty, learning_objective, explanation, source)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?)`
+    `INSERT INTO questions (exam_id, q_order, type, text, passage, options, correct_answer, marks, difficulty, learning_objective, explanation, source)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`
   );
   const insertPool = db.prepare(
-    `INSERT INTO question_pool (exam_id, type, text, options, correct_answer, marks, difficulty, learning_objective, explanation, scheme_json, source)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?)`
+    `INSERT INTO question_pool (exam_id, type, text, passage, options, correct_answer, marks, difficulty, learning_objective, explanation, scheme_json, source)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`
   );
   const created = [];
   for (const g of active) {
@@ -413,7 +405,7 @@ router.post('/exams/:id/generate', asyncWrap(async (req, res) => {
       const opts = (g.options || []).map((t, i) => ({ key: String.fromCharCode(65 + i), text: t }));
       const correct = g.correct_index != null ? opts[g.correct_index]?.key : g.correct_answer;
       const info = insert.run(
-        exam.id, nextOrder, 'objective', g.text, JSON.stringify(opts),
+        exam.id, nextOrder, 'objective', g.text, g.passage || '', JSON.stringify(opts),
         correct || null, parseFloat(g.marks) || 1,
         g.difficulty || 'medium', g.learning_objective || '', g.explanation || '', 'ai'
       );
@@ -430,7 +422,7 @@ router.post('/exams/:id/generate', asyncWrap(async (req, res) => {
       }));
     } else {
       const info = insert.run(
-        exam.id, nextOrder, 'theory', g.text, null, null,
+        exam.id, nextOrder, 'theory', g.text, g.passage || '', null, null,
         parseFloat(g.marks) || 5, g.difficulty || 'medium', g.learning_objective || '', '', 'ai'
       );
       created.push(info.lastInsertRowid);
@@ -454,14 +446,14 @@ router.post('/exams/:id/generate', asyncWrap(async (req, res) => {
       const opts = (g.options || []).map((t, i) => ({ key: String.fromCharCode(65 + i), text: t }));
       const correct = g.correct_index != null ? opts[g.correct_index]?.key : g.correct_answer;
       insertPool.run(
-        exam.id, 'objective', g.text, JSON.stringify(opts), correct || null,
+        exam.id, 'objective', g.text, g.passage || '', JSON.stringify(opts), correct || null,
         parseFloat(g.marks) || 1, g.difficulty || 'medium', g.learning_objective || '', g.explanation || '',
         JSON.stringify({ type: 'objective', correct_answer: correct || null, marks: parseFloat(g.marks) || 1, explanation: g.explanation || '' }),
         'ai'
       );
     } else {
       insertPool.run(
-        exam.id, 'theory', g.text, null, null,
+        exam.id, 'theory', g.text, g.passage || '', null, null,
         parseFloat(g.marks) || 5, g.difficulty || 'medium', g.learning_objective || '', '',
         JSON.stringify({
           type: 'theory',
@@ -479,7 +471,7 @@ router.post('/exams/:id/generate', asyncWrap(async (req, res) => {
   res.json({ ok: true, count: created.length, poolCount: variants.length, questions: created });
 }));
 
-// ── PDF upload ─────────────────────────────────────────────────────────
+// ── PDF upload (background job) ───────────────────────────────────────
 
 router.post('/exams/:id/pdf', upload.single('file'), asyncWrap(async (req, res) => {
   const exam = db.prepare('SELECT * FROM exams WHERE id = ?').get(req.params.id);
@@ -491,99 +483,39 @@ router.post('/exams/:id/pdf', upload.single('file'), asyncWrap(async (req, res) 
   const magic = req.file.buffer.slice(0, 5).toString('latin1');
   if (magic !== '%PDF-') return res.status(400).json({ error: 'Uploaded file is not a valid PDF.' });
 
-  const text = await pdf.extractText(req.file.buffer);
+  const running = pdfImport.activeJobForExam(exam.id);
+  if (running) {
+    return res.status(409).json({
+      error: `An import is already running for this exam (${running.stage || 'processing…'}). Please wait for it to finish.`,
+    });
+  }
+
   pdf.saveUpload(req.file.buffer, req.file.originalname);
-  const parsed = await ai.extractQuestionsFromText(text);
-
-  let nextOrder = (db.prepare('SELECT MAX(q_order) m FROM questions WHERE exam_id = ?').get(exam.id).m || 0) + 1;
-  const insert = db.prepare(
-    `INSERT INTO questions (exam_id, q_order, type, text, options, correct_answer, marks, difficulty, learning_objective, explanation, source)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?)`
-  );
-
-  // prepare objective questions missing answers for AI generation
-  const missingAnswers = [];
-  const objQuestions = [];
-  for (const g of parsed) {
-    if (g.type === 'objective') {
-      objQuestions.push(g);
-      if (!g.correct_answer) missingAnswers.push({ index: objQuestions.length - 1, text: g.text, options: g.options || [] });
-    }
-  }
-  let answersMap = {};
-  if (missingAnswers.length) {
-    const answers = await ai.answerObjectiveQuestions(missingAnswers);
-    for (const a of answers) answersMap[a.index] = a;
-  }
-
-  let created = 0;
-  for (let i = 0; i < objQuestions.length; i++) {
-    const g = objQuestions[i];
-    const opts = (g.options || []).map((t, j) => ({
-      key: String.fromCharCode(65 + j),
-      text: String(t).replace(/^[A-D][.\s)]*\s*/i, '').trim(),
-    }));
-    let correct = g.correct_answer;
-    let explanation = g.explanation || '';
-    if (!correct && answersMap[i]) {
-      correct = answersMap[i].correct_index >= 0 ? opts[answersMap[i].correct_index]?.key : null;
-      explanation = answersMap[i].explanation || '';
-    }
-    insert.run(
-      exam.id, nextOrder, 'objective', g.text, JSON.stringify(opts),
-      correct || null, parseFloat(g.marks) || 1,
-      g.difficulty || 'medium', g.learning_objective || '', explanation, 'pdf'
-    );
-    const oq = db.prepare('SELECT * FROM questions WHERE id = ?').get(
-      db.prepare('SELECT id FROM questions WHERE exam_id = ? AND q_order = ?').get(exam.id, nextOrder).id
-    );
-    db.prepare(
-      `INSERT INTO marking_schemes (question_id, type, scheme) VALUES (?, 'objective', ?)
-       ON CONFLICT(question_id) DO UPDATE SET scheme=excluded.scheme, updated_at=datetime('now')`
-    ).run(oq.id, JSON.stringify({
-      type: 'objective',
-      correct_answer: oq.correct_answer,
-      marks: oq.marks,
-      explanation: oq.explanation,
-    }));
-    nextOrder++;
-    created++;
-  }
-
-  // theory questions: insert all first, then generate any missing schemes in
-  // parallel so a PDF with many theory questions does not wait on a long
-  // sequential chain of AI calls.
-  const theoryToScheme = [];
-  for (const g of parsed) {
-    if (g.type !== 'theory') continue;
-    const info = insert.run(
-      exam.id, nextOrder, 'theory', g.text, null, null,
-      parseFloat(g.marks) || 5, g.difficulty || 'medium', g.learning_objective || '', '', 'pdf'
-    );
-    const q = db.prepare('SELECT * FROM questions WHERE id = ?').get(info.lastInsertRowid);
-    if (g.model_answer && g.key_points?.length) {
-      db.prepare(
-        `INSERT INTO marking_schemes (question_id, type, scheme) VALUES (?, 'theory', ?)
-         ON CONFLICT(question_id) DO UPDATE SET scheme=excluded.scheme`
-      ).run(q.id, JSON.stringify({
-        type: 'theory',
-        model_answer: g.model_answer || '',
-        key_points: g.key_points || [],
-        rubric: g.rubric || [],
-        presentation_marks: g.presentation_marks || 0,
-        grammar_marks: g.grammar_marks || 0,
-      }));
-    } else {
-      theoryToScheme.push(q);
-    }
-    nextOrder++;
-    created++;
-  }
-  await mapLimit(theoryToScheme, 3, (q) => marking.buildMarkingScheme(q));
-
-  marking.recomputeExamTotal(exam.id);
-  res.json({ ok: true, count: created, textLength: text.length });
+  const jobId = pdfImport.createJob(exam.id, req.file.originalname);
+  // Run off the request path: the browser gets the job id instantly and
+  // polls for progress, so slow AI extraction can never hang the upload.
+  pdfImport.startJob(jobId, req.file.buffer).catch((err) => {
+    console.error('[pdf] background job crashed:', err);
+  });
+  res.json({ jobId, message: 'Upload accepted. Extraction is running in the background.' });
 }));
+
+// ── Background jobs ───────────────────────────────────────────────────
+
+router.get('/jobs', (req, res) => {
+  const { exam_id } = req.query;
+  res.json(exam_id ? pdfImport.jobsForExam(exam_id) : pdfImport.allJobs());
+});
+
+router.get('/jobs/:id', (req, res) => {
+  const job = pdfImport.getJob(req.params.id);
+  if (!job) return res.status(404).json({ error: 'Job not found' });
+  res.json(job);
+});
+
+router.delete('/jobs/:id', (req, res) => {
+  res.json({ ok: pdfImport.deleteJob(req.params.id) });
+});
 
 // ── Delivery status ────────────────────────────────────────────────────
 
@@ -624,9 +556,9 @@ router.get('/results/:sessionId', (req, res) => {
   const r = results.computeForSession(session.id);
   const answers = db
     .prepare(
-      `SELECT a.id, a.q_order, a.answer_text, a.is_correct, a.marks_awarded, a.max_marks,
-              a.marked_by, a.ai_feedback, a.needs_review, a.reviewed,
-              q.type, q.text, q.correct_answer
+       `SELECT a.id, a.q_order, a.answer_text, a.is_correct, a.marks_awarded, a.max_marks,
+               a.marked_by, a.ai_feedback, a.needs_review, a.reviewed, a.ai_detected,
+               q.type, q.text, q.correct_answer
        FROM answers a JOIN questions q ON q.id = a.question_id
        WHERE a.session_id = ? ORDER BY q.q_order`
     )
@@ -644,6 +576,8 @@ router.patch('/results/:sessionId/answers/:answerId', (req, res) => {
     const m = parseFloat(marks_awarded);
     fields.push('marks_awarded=?');
     vals.push(Number.isFinite(m) ? Math.min(Math.max(m, 0), answer.max_marks || 0) : answer.marks_awarded);
+    // An admin overrode the mark, so any AI-copy flag no longer applies.
+    fields.push('ai_detected=0');
   }
   if (reviewed !== undefined) { fields.push('reviewed=?'); vals.push(reviewed ? 1 : 0); }
   if (fields.length) {
