@@ -233,6 +233,9 @@ if (require.main === module) {
   const run = async () => {
     const db = require('./db');
     const { seedIfEmpty } = require('../scripts/seed-exam');
+    // Fail any import left mid-flight by a previous process (crash/redeploy)
+    // so stale jobs can never hang the dashboard poll or block new uploads.
+    require('./services/pdfImport').recoverStaleJobs();
     if (config.seedOnBoot) {
       try {
         const s = seedIfEmpty(db);

@@ -948,12 +948,18 @@ async function pdfUploadForm(id) {
 function pollPdfJob(examId, div, jobId) {
   const status = document.querySelector('#pdf_status');
   const update = (text) => { if (status) status.innerHTML = `<p class="muted" style="margin:8px 0">${text}</p>`; };
+  let misses = 0;
   const timer = setInterval(async () => {
     let job;
     try {
       job = await api(`/api/jobs/${jobId}`);
+      misses = 0;
     } catch {
-      return; // keep polling until the server answers
+      // Don't silently freeze on the last stage: tell the user the server
+      // went away and keep retrying (it recovers after a redeploy).
+      misses++;
+      update(`<span class="spinner"></span> Server unreachable — retrying… (attempt ${misses})`);
+      return;
     }
     update(`<span class="spinner"></span> ${esc(job.stage || 'Processing…')} <strong>${job.progress || 0}%</strong>`);
     if (job.status === 'done') {

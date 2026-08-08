@@ -817,3 +817,69 @@ test('extractQuestionsFromText caps concurrent extraction blocks at BLOCK_CONCUR
     ai.chatJSON = orig;
   }
 });
+
+test('extractQuestionsFromText reports progress only as blocks complete', async () => {
+  const orig = ai.chatJSON;
+  const progress = [];
+  let slowResolvedAt = 0;
+  ai.chatJSON = async (messages) => {
+    const content = messages[1]?.content || '';
+    if (/5\./.test(content)) {
+      await new Promise((r) => setTimeout(r, 150));
+      slowResolvedAt = Date.now();
+      return { questions: [{ type: 'objective', text: 'Slow A', options: ['A. X', 'B. Y', 'C. Z', 'D. W'], correct_answer: 'A', correct_index: 0 }] };
+    }
+    await new Promise((r) => setTimeout(r, 10));
+    return { questions: [{ type: 'objective', text: 'Fast B', options: ['A. X', 'B. Y', 'C. Z', 'D. W'], correct_answer: 'A', correct_index: 0 }] };
+  };
+  try {
+    // 10 questions -> 2 blocks. Block 0 (Q1-5) is the slow one.
+    const lines = [];
+    for (let i = 1; i <= 10; i++) lines.push(`${i}. Progress question ${i}?`, 'A. X', 'B. Y', 'C. Z', 'D. W');
+    const out = await ai.extractQuestionsFromText(
+      lines.join('\n'),
+      (done, total) => progress.push({ done, total, at: Date.now() })
+    );
+    assert.equal(progress.length, 2, 'one progress event per block');
+    assert.deepEqual(progress.map((p) => p.done), [1, 2]);
+    // (2/2) must be reported only after the slow block has resolved.
+    // Start-based reporting would have fired it while the block still ran.
+    assert.ok(
+      progress[1].at >= slowResolvedAt,
+      `final (2/2) reported at ${progress[1].at}, slow block resolved at ${slowResolvedAt}`
+    );
+    assert.equal(out.length, 2, 'both blocks still parse');
+  } finally {
+    ai.chatJSON = orig;
+  }
+});
+
+test('recoverStaleJobs marks interrupted imports as failed so they can never hang polling', async () => {
+  const db = require('../src/db');
+  db.exec('BEGIN');
+  try {
+    const runId = db
+      .prepare("INSERT INTO jobs (type, exam_id, filename, status, stage, progress) VALUES ('pdf_import', 999999, 'stale.pdf', 'running', 'Parsing questions… (16/16)', 55)")
+      .run().lastInsertRowid;
+    const pendId = db
+      .prepare("INSERT INTO jobs (type, exam_id, filename, status, progress) VALUES ('pdf_import', 999999, 'queued.pdf', 'pending', 0)")
+      .run().lastInsertRowid;
+    const doneId = db
+      .prepare("INSERT INTO jobs (type, exam_id, filename, status, stage, progress) VALUES ('pdf_import', 999999, 'finished.pdf', 'done', 'Done', 100)")
+      .run().lastInsertRowid;
+
+    pdfImport.recoverStaleJobs();
+
+    const running = db.prepare('SELECT * FROM jobs WHERE id = ?').get(runId);
+    assert.equal(running.status, 'error', 'running import is marked failed');
+    assert.match(running.error, /interrupted/i, 'failure explains the restart');
+
+    const pending = db.prepare('SELECT * FROM jobs WHERE id = ?').get(pendId);
+    assert.equal(pending.status, 'error', 'pending import is marked failed');
+
+    const done = db.prepare('SELECT * FROM jobs WHERE id = ?').get(doneId);
+    assert.equal(done.status, 'done', 'already-finished import is left alone');
+  } finally {
+    db.exec('ROLLBACK');
+  }
+});

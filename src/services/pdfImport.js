@@ -74,6 +74,28 @@ function deleteJob(id) {
   return db.prepare('DELETE FROM jobs WHERE id = ?').run(id).changes > 0;
 }
 
+/**
+ * Fail every import that was left mid-flight when this server process died
+ * (crash, Render redeploy). A stale 'running'/'pending' job would otherwise
+ * keep the dashboard polling forever and block new uploads for that exam with
+ * a "already running" 409. Called once at server boot, before anything starts.
+ */
+function recoverStaleJobs() {
+  const info = db
+    .prepare(
+      `UPDATE jobs
+       SET status='error', stage='Failed', progress=0, count=0,
+           error='The import was interrupted by a server restart. Re-upload the PDF to try again.',
+           updated_at = datetime('now')
+       WHERE type='pdf_import' AND status IN ('pending','running')`
+    )
+    .run();
+  if (info.changes) {
+    console.log(`[pdfImport] marked ${info.changes} interrupted import job(s) as failed`);
+  }
+  return info.changes;
+}
+
 function createJob(examId, filename) {
   const info = db
     .prepare(
@@ -275,6 +297,7 @@ module.exports = {
   createJob,
   updateJob,
   startJob,
+  recoverStaleJobs,
   buildOptions,
   correctKeyFor,
 };

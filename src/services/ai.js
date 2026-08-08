@@ -180,8 +180,10 @@ const BLOCK_MAX_TOKENS = 6000;
 // A single extraction block runs on its own clock with a couple of retries
 // (flaky shared endpoints drop requests under concurrency). A block that still
 // fails is SKIPPED — never fails the whole paper — so this only bounds how
-// long one stubborn block can stall the import.
-const BLOCK_TIMEOUT_MS = 4 * 60 * 1000;
+// long one stubborn block can stall the import. 150s is ~5x the healthy call
+// time (~20-30s) but caps a hung block at minutes, not the old 240s which
+// turned one stuck request into a ~24-minute stall across retries.
+const BLOCK_TIMEOUT_MS = 150 * 1000;
 const BLOCK_RETRIES = 2;
 
 /** Run fn over items with at most `limit` promises in flight (like a semaphore). */
@@ -502,9 +504,16 @@ Rules:
   };
 
   const tasks = blockPrompts.map((bp) => async () => {
-    completed++;
-    if (onProgress) onProgress(completed, blocks.length);
-    return runBlock(bp);
+    try {
+      return await runBlock(bp);
+    } finally {
+      // Progress counts COMPLETED blocks, not started ones: the dashboard
+      // must only show "(N/N)" once the last block has actually settled,
+      // otherwise the UI freezes on the final count while a slow block
+      // (and its retries) are still running.
+      completed++;
+      if (onProgress) onProgress(completed, blocks.length);
+    }
   });
 
   const settled = await mapLimit(tasks, BLOCK_CONCURRENCY, (run) => run());
