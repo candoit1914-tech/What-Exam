@@ -170,7 +170,9 @@ const BULK_TIMEOUT_MS = 5 * 60 * 1000;
 // the whole import. Small blocks finish quickly even on slow endpoints.
 const BLOCK_QUESTIONS = 5;
 const BLOCK_MAX_CHARS = 3500;
-const BLOCK_CONCURRENCY = 2;
+// Blocks run a few at a time: enough parallelism to collapse a long paper's
+// wall-clock time, capped so a flaky shared endpoint is not flooded.
+const BLOCK_CONCURRENCY = 4;
 const BLOCK_MAX_TOKENS = 3000;
 // A single extraction block runs on its own clock with a couple of retries
 // (flaky shared endpoints drop requests under concurrency). A block that still
@@ -729,7 +731,7 @@ Rules:
  * flaky/slow endpoint loses only a handful of questions, never the whole paper.
  */
 const ANSWER_BATCH = 10;
-const ANSWER_CONCURRENCY = 2;
+const ANSWER_CONCURRENCY = 4;
 const ANSWER_TIMEOUT_MS = 4 * 60 * 1000;
 const ANSWER_MAX_TOKENS = 3000;
 
