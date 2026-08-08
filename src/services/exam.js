@@ -9,6 +9,35 @@ const { stripSourceWatermarks } = require('./textClean');
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// ── Background session work ─────────────────────────────────────────────
+//
+// AI examiner work (objective key resolution, AI-copy detection) runs in the
+// BACKGROUND so it never delays sending the next question. The student's
+// answer is recorded immediately and the work is tracked per session; it MUST
+// be drained before the exam is finalized so grades are complete when results
+// are computed.
+const sessionTasks = new Map();
+
+function trackSessionTask(sessionId, promise) {
+  if (!sessionTasks.has(sessionId)) sessionTasks.set(sessionId, new Set());
+  const set = sessionTasks.get(sessionId);
+  set.add(promise);
+  promise
+    .catch(() => {}) // a background failure must never crash the process
+    .finally(() => {
+      set.delete(promise);
+      if (!set.size) sessionTasks.delete(sessionId);
+    });
+  return promise;
+}
+
+/** Wait for all background AI work of a session to settle. */
+async function drainSession(sessionId) {
+  const set = sessionTasks.get(sessionId);
+  if (!set || !set.size) return;
+  await Promise.allSettled([...set]);
+}
+
 // ── Students ───────────────────────────────────────────────────────────
 
 function normalizePhone(raw) {
@@ -56,6 +85,10 @@ function getActiveSession(studentId) {
        WHERE s.student_id = ? AND s.status = 'in_progress'`
     )
     .get(studentId);
+}
+
+function sessionHasNoAnswers(sessionId) {
+  return db.prepare('SELECT COUNT(*) c FROM answers WHERE session_id = ?').get(sessionId).c === 0;
 }
 
 function createSession(examId, studentId) {
@@ -201,10 +234,12 @@ const START_WORDS = new Set([
   'test',
 ]);
 
-function formatQuestion(exam, question, qCount) {
-  // The type banner and any passage/instruction are sent as their own bubbles
-  // by buildQuestionBubbles, so the question bubble carries just the stem.
-  return `*QUESTION ${question.q_order}*\n\n${String(question.text).trim()}`;
+function formatQuestion(exam, question, qCount, body) {
+  // The type banner and any passage/instruction/header are sent as their own
+  // bubbles by buildQuestionBubbles, so the question bubble carries just the
+  // stem (optionally pre-stripped of leading section headers).
+  const text = body != null ? body : String(question.text || '').trim();
+  return `*QUESTION ${question.q_order}*\n\n${text}`;
 }
 
 /** mm:ss left on the clock, computed from the session start + exam duration. */
@@ -272,10 +307,42 @@ function splitSectionMeta(text) {
   };
 }
 
-const SECTION_DIVIDER = '━━━━━━━━━━━━━━━━━━━━';
+// Section headers extracted from the PDF (e.g. "PART A, LEXIS AND STRUCTURE",
+// "SECTION B", "OBJECTIVE", "THEORY") are ALL-CAPS or "Section/Part …" lines of
+// at most a few words. They must be delivered as their own chat bubble, never
+// jammed onto a question or instruction. Instruction lines never qualify.
+const SECTION_HEADER_START = /^(section\s+[a-z]|part\s+[a-z]|objective\b|theory\b)/i;
+
+function isSectionHeader(line) {
+  const t = String(line).trim();
+  if (!t || isInstructionLine(t)) return false;
+  const letters = t.replace(/[^A-Za-z]/g, '');
+  if (letters.length < 3) return false; // "Q1", "A", "(a)" are labels, not headers
+  const upperRatio = t.replace(/[^A-Z]/g, '').length / letters.length;
+  const allCaps = upperRatio >= 0.75;
+  return (allCaps || SECTION_HEADER_START.test(t)) && t.split(/\s+/).length <= 6;
+}
+
+/**
+ * Pull leading section headers out of question text or passage so they can be
+ * sent as their own bubble. Returns `{ headings, body }` where `body` is the
+ * text with those leading header lines removed.
+ */
+function splitQuestionHeadings(text) {
+  const lines = String(text || '')
+    .split(/\n+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const headings = [];
+  for (const line of lines) {
+    if (isSectionHeader(line)) headings.push(line);
+    else break;
+  }
+  return { headings, body: lines.slice(headings.length).join('\n') };
+}
 
 function formatSectionHeader(type) {
-  return `*${type}*\n\n${SECTION_DIVIDER}`;
+  return `*${type}*`;
 }
 
 function formatSectionInstructions(instructions) {
@@ -298,14 +365,46 @@ function buildQuestionBubbles(exam, question, sequence, index) {
   if (firstOfType) bubbles.push(formatSectionHeader(type));
 
   const clean = (p) => stripPaperOnlyInstructions(stripSourceWatermarks(p)).trim();
-  const { instructions, passage } = splitSectionMeta(clean(question.passage));
-  if (instructions && !prev.some((q) => splitSectionMeta(clean(q.passage)).instructions === instructions)) {
+  const seen = { instructions: new Set(), passages: new Set(), headings: new Set() };
+  for (const q of prev) {
+    const pClean = clean(q.passage);
+    const pRest = splitQuestionHeadings(pClean).body;
+    const { instructions: pIns, passage: pPas } = splitSectionMeta(pRest);
+    seen.instructions.add(pIns);
+    seen.passages.add(pPas);
+    splitQuestionHeadings(pClean).headings.forEach((h) => seen.headings.add(h));
+    splitQuestionHeadings(String(q.text || '').trim()).headings.forEach((h) => seen.headings.add(h));
+  }
+
+  // Section headers, instructions and the reading passage lead the block as
+  // separate bubbles (each once across the sequence), then the question.
+  const pClean = clean(question.passage);
+  const { headings: pHead, body: pRest } = splitQuestionHeadings(pClean);
+  const { instructions, passage } = splitSectionMeta(pRest);
+  for (const h of pHead) {
+    if (!seen.headings.has(h)) {
+      bubbles.push(`*${h}*`);
+      seen.headings.add(h);
+    }
+  }
+  if (instructions && !seen.instructions.has(instructions)) {
     bubbles.push(formatSectionInstructions(instructions));
+    seen.instructions.add(instructions);
   }
-  if (passage && !prev.some((q) => splitSectionMeta(clean(q.passage)).passage === passage)) {
+  if (passage && !seen.passages.has(passage)) {
     bubbles.push(passage);
+    seen.passages.add(passage);
   }
-  bubbles.push(formatQuestion(exam, question));
+
+  const textClean = String(question.text || '').trim();
+  const { headings: tHead, body } = splitQuestionHeadings(textClean);
+  for (const h of tHead) {
+    if (!seen.headings.has(h)) {
+      bubbles.push(`*${h}*`);
+      seen.headings.add(h);
+    }
+  }
+  bubbles.push(formatQuestion(exam, question, sequence.length, body));
   return bubbles;
 }
 
@@ -429,6 +528,18 @@ async function handleInbound(phone, body, meta = {}) {
   if (!session) {
     const started = await maybeStartSession(student);
     return { started: true, ok: started.ok, reason: started.reason };
+  }
+
+  // Bulk-sent sessions are created the moment the admin clicks Send, but the
+  // timer must start when the student actually engages. A session that has no
+  // answers yet restarts its clock on the first inbound message, so a late
+  // starter is never greeted by a countdown that already ran down (e.g. the
+  // 59:57 → 6:47 jump from sending hours after the admin pressed Send).
+  if (sessionHasNoAnswers(session.id)) {
+    db.prepare(
+      `UPDATE sessions SET started_at = datetime('now'), last_active_at = datetime('now') WHERE id = ?`
+    ).run(session.id);
+    session = getActiveSession(student.id);
   }
 
   // Timer check
@@ -585,60 +696,67 @@ async function handleAnswer(exam, session, student, question, body, meta = {}) {
       );
       return false;
     }
-    // No verified answer key stored → the AI examiner determines the answer on
-    // the spot, persists it for results and future answers, and grades this
-    // answer immediately. A genuinely uncertain examiner or an AI failure
-    // records 0 marks with a neutral note — never pending admin review.
+    // No verified answer key stored → the AI examiner determines the answer in
+    // the BACKGROUND (never blocking the next question), persists it for
+    // results and future answers, and grades this answer. A genuinely
+    // uncertain examiner or an AI failure records 0 marks with a neutral note
+    // — never pending admin review. drainSession() guarantees this finishes
+    // before the exam is finalized.
     if (!marking.resolveCorrectKey(question)) {
-      let resolved = null;
-      try {
-        resolved = await ai.resolveObjectiveAnswer({
-          questionText: question.text,
-          passage: question.passage || '',
-          options: JSON.parse(question.options || '[]'),
-        });
-      } catch (e) {
-        resolved = null;
-      }
-      const idx = resolved ? Number(resolved.correct_index) : -1;
       const options = JSON.parse(question.options || '[]');
-      const key = options[idx] ? String(options[idx].key || '').toUpperCase() : null;
-
-      if (key && idx >= 0) {
-        if (question._pool) {
-          db.prepare('UPDATE question_pool SET correct_answer = ? WHERE id = ?').run(key, question.id);
-        } else {
-          db.prepare('UPDATE questions SET correct_answer = ? WHERE id = ?').run(key, question.id);
-          db.prepare(
-            `INSERT INTO marking_schemes (question_id, type, scheme) VALUES (?, 'objective', ?)
-             ON CONFLICT(question_id) DO UPDATE SET scheme=excluded.scheme, updated_at=datetime('now')`
-          ).run(question.id, JSON.stringify({
-            type: 'objective',
-            correct_answer: key,
-            marks: question.marks,
-            explanation: resolved?.explanation || '',
-          }));
+      db.prepare(
+        `INSERT INTO answers (session_id, question_id, q_order, answer_text, is_correct, marks_awarded, max_marks, marked_by, ai_feedback, needs_review, marked_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,datetime('now'))`
+      ).run(
+        session.id, question.id, question.q_order, letter,
+        0, 0, question.marks, 'pending',
+        'Answer key being resolved by the AI examiner.', 0
+      );
+      trackSessionTask(session.id, (async () => {
+        let resolved = null;
+        try {
+          resolved = await ai.resolveObjectiveAnswer({
+            questionText: question.text,
+            passage: question.passage || '',
+            options,
+          });
+        } catch (e) {
+          resolved = null;
         }
-        question.correct_answer = key;
-        const result = marking.markObjective(question, letter);
-        db.prepare(
-          `INSERT INTO answers (session_id, question_id, q_order, answer_text, is_correct, marks_awarded, max_marks, marked_by, ai_feedback, needs_review, marked_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,datetime('now'))`
-        ).run(
-          session.id, question.id, question.q_order, letter,
-          result.isCorrect ? 1 : 0, result.marksAwarded, result.maxMarks, 'ai',
-          `Answer key determined by the AI examiner: ${key}.`, 0
-        );
-      } else {
-        db.prepare(
-          `INSERT INTO answers (session_id, question_id, q_order, answer_text, is_correct, marks_awarded, max_marks, marked_by, ai_feedback, needs_review, marked_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,datetime('now'))`
-        ).run(
-          session.id, question.id, question.q_order, letter,
-          0, 0, question.marks, 'ai',
-          'The examiner could not determine the answer to this question.', 0
-        );
-      }
+        const idx = resolved ? Number(resolved.correct_index) : -1;
+        const key = options[idx] ? String(options[idx].key || '').toUpperCase() : null;
+
+        if (key && idx >= 0) {
+          if (question._pool) {
+            db.prepare('UPDATE question_pool SET correct_answer = ? WHERE id = ?').run(key, question.id);
+          } else {
+            db.prepare('UPDATE questions SET correct_answer = ? WHERE id = ?').run(key, question.id);
+            db.prepare(
+              `INSERT INTO marking_schemes (question_id, type, scheme) VALUES (?, 'objective', ?)
+               ON CONFLICT(question_id) DO UPDATE SET scheme=excluded.scheme, updated_at=datetime('now')`
+            ).run(question.id, JSON.stringify({
+              type: 'objective',
+              correct_answer: key,
+              marks: question.marks,
+              explanation: resolved?.explanation || '',
+            }));
+          }
+          const result = marking.markObjective({ ...question, correct_answer: key }, letter);
+          db.prepare(
+            `UPDATE answers SET is_correct=?, marks_awarded=?, marked_by='ai', ai_feedback=?, needs_review=0, marked_at=datetime('now')
+             WHERE session_id=? AND question_id=?`
+          ).run(
+            result.isCorrect ? 1 : 0, result.marksAwarded,
+            `Answer key determined by the AI examiner: ${key}.`,
+            session.id, question.id
+          );
+        } else {
+          db.prepare(
+            `UPDATE answers SET is_correct=0, marks_awarded=0, marked_by='ai', ai_feedback='The examiner could not determine the answer to this question.', needs_review=0, marked_at=datetime('now')
+             WHERE session_id=? AND question_id=?`
+          ).run(session.id, question.id);
+        }
+      })());
       return true;
     }
     const result = marking.markObjective(question, letter);
@@ -656,38 +774,49 @@ async function handleAnswer(exam, session, student, question, body, meta = {}) {
     // after the final question (per product requirement).
   } else {
     // Theory — the answer is stored immediately but NOT marked yet. All theory
-    // answers are AI-marked together when the exam ends. A quick inline AI
-    // check catches AI-copied answers so the student can be cautioned right
-    // away; such answers are locked to 0 marks.
+    // answers are AI-marked together when the exam ends. A quick AI-copy check
+    // runs in the BACKGROUND so it never delays the next question; a positive
+    // result cautions the student right away and locks the answer to 0 marks.
+    // The detection always finishes before the exam is finalized (drainSession).
     const answerText = body;
     const context = [question.passage, question.text].filter(Boolean).join('\n\n');
-    let aiDetected = 0;
-    let caution = '';
-    if (ai.aiConfigured()) {
-      try {
-        const det = await ai.detectAiGeneratedAnswer({ questionText: context, studentAnswer: answerText });
-        if (det.ai_generated) {
-          aiDetected = 1;
-          caution =
-            `⚠️ *Warning: AI-written answer detected*\n\n` +
-            `Your answer to Question ${question.q_order} looks like it was written by an AI (e.g. ChatGPT, Gemini, Claude) and copied in.\n\n` +
-            `Copying AI answers is considered *cheating* in this exam, so this answer will earn *0 marks*.\n\n` +
-            `Please answer the remaining questions yourself.`;
-        }
-      } catch (e) {
-        aiDetected = 0; // detection failure never blocks the exam
-      }
-    }
-
     db.prepare(
       `INSERT INTO answers (session_id, question_id, q_order, answer_text, is_correct, marks_awarded, max_marks, marked_by, ai_feedback, needs_review, ai_detected)
        VALUES (?,?,?,?,?,?,?,?,?,?,?)`
     ).run(
       session.id, question.id, question.q_order, answerText,
-      null, 0, question.marks, 'pending', caution, aiDetected ? 1 : 0, aiDetected
+      null, 0, question.marks, 'pending', '', 0, 0
     );
 
-    if (aiDetected) await wa.sendText(student.phone, caution);
+    if (ai.aiConfigured()) {
+      trackSessionTask(session.id, (async () => {
+        let aiDetected = 0;
+        let caution = '';
+        try {
+          const det = await ai.detectAiGeneratedAnswer({ questionText: context, studentAnswer: answerText });
+          if (det.ai_generated) {
+            aiDetected = 1;
+            caution =
+              `⚠️ *Warning: AI-written answer detected*\n\n` +
+              `Your answer to Question ${question.q_order} looks like it was written by an AI (e.g. ChatGPT, Gemini, Claude) and copied in.\n\n` +
+              `Copying AI answers is considered *cheating* in this exam, so this answer will earn *0 marks*.\n\n` +
+              `Please answer the remaining questions yourself.`;
+          }
+        } catch (e) {
+          aiDetected = 0; // detection failure never blocks the exam
+        }
+        if (aiDetected) {
+          db.prepare(
+            `UPDATE answers SET ai_detected=1, ai_feedback=?, needs_review=0 WHERE session_id=? AND question_id=?`
+          ).run(caution, session.id, question.id);
+          try {
+            await wa.sendText(student.phone, caution);
+          } catch (err) {
+            // the caution is best-effort; the 0-mark cap is already applied
+          }
+        }
+      })());
+    }
   }
   return true;
 }
@@ -746,6 +875,7 @@ async function markAllPendingTheory(sessionId) {
 
 async function finalize(session, student, reason = 'completed') {
   if (session.status !== 'in_progress') return;
+  await drainSession(session.id); // background AI work must finish before results are computed
   await markAllPendingTheory(session.id);
   const result = results.computeForSession(session.id);
   db.prepare(
@@ -798,6 +928,7 @@ async function endExam(examId) {
     `This exam has been ended by your administrator. No more questions will be sent.`;
 
   for (const s of active) {
+    await drainSession(s.id);
     await markAllPendingTheory(s.id);
     const result = results.computeForSession(s.id);
     db.prepare(
@@ -935,8 +1066,11 @@ module.exports = {
   nextInSequence,
   deadline,
   markAllPendingTheory,
+  drainSession,
   formatQuestion,
   buildQuestionBubbles,
+  isSectionHeader,
+  splitQuestionHeadings,
   stripPaperOnlyInstructions,
   splitSectionMeta,
 };

@@ -235,13 +235,11 @@ test('sessionQuestionSequence uses template order when no pool is drawn', () => 
   assert.ok(Array.isArray(seq), 'returns an array');
 });
 
-const SECTION_DIVIDER = '━━━━━━━━━━━━━━━━━━━━';
-
 test('buildQuestionBubbles sends OBJECTIVE header once then each question', () => {
   const q1 = { id: 1, q_order: 1, type: 'objective', text: 'Q1', passage: '' };
   const q2 = { id: 2, q_order: 2, type: 'objective', text: 'Q2', passage: '' };
   const seq = [q1, q2];
-  assert.deepEqual(exam.buildQuestionBubbles({}, q1, seq, 0), [`*OBJECTIVE*\n\n${SECTION_DIVIDER}`, '*QUESTION 1*\n\nQ1']);
+  assert.deepEqual(exam.buildQuestionBubbles({}, q1, seq, 0), ['*OBJECTIVE*', '*QUESTION 1*\n\nQ1']);
   assert.deepEqual(exam.buildQuestionBubbles({}, q2, seq, 1), ['*QUESTION 2*\n\nQ2']);
 });
 
@@ -250,7 +248,7 @@ test('buildQuestionBubbles sends THEORY header once before theory questions', ()
   const q2 = { id: 2, q_order: 2, type: 'theory', text: 'Q2', passage: '' };
   const q3 = { id: 3, q_order: 3, type: 'theory', text: 'Q3', passage: '' };
   const seq = [q1, q2, q3];
-  assert.deepEqual(exam.buildQuestionBubbles({}, q2, seq, 1), [`*THEORY*\n\n${SECTION_DIVIDER}`, '*QUESTION 2*\n\nQ2']);
+  assert.deepEqual(exam.buildQuestionBubbles({}, q2, seq, 1), ['*THEORY*', '*QUESTION 2*\n\nQ2']);
   assert.deepEqual(exam.buildQuestionBubbles({}, q3, seq, 2), ['*QUESTION 3*\n\nQ3']);
 });
 
@@ -260,7 +258,7 @@ test('buildQuestionBubbles emits header, instructions, passage, then question', 
   const q2 = { id: 2, q_order: 2, type: 'objective', text: 'Q2', passage };
   const seq = [q1, q2];
   assert.deepEqual(exam.buildQuestionBubbles({}, q1, seq, 0), [
-    `*OBJECTIVE*\n\n${SECTION_DIVIDER}`,
+    '*OBJECTIVE*',
     '*Instructions*\n\nRead the passage.',
     'Ama lost her pencil on the way to school.',
     '*QUESTION 1*\n\nQ1',
@@ -271,7 +269,7 @@ test('buildQuestionBubbles emits header, instructions, passage, then question', 
 test('buildQuestionBubbles treats an unknown index as the first question', () => {
   const q = { id: 7, q_order: 3, type: 'objective', text: 'Q3', passage: 'Read the passage.' };
   assert.deepEqual(exam.buildQuestionBubbles({}, q, [], -1), [
-    `*OBJECTIVE*\n\n${SECTION_DIVIDER}`,
+    '*OBJECTIVE*',
     '*Instructions*\n\nRead the passage.',
     '*QUESTION 3*\n\nQ3',
   ]);
@@ -476,7 +474,7 @@ test("buildQuestionBubbles keeps a later question's own instruction lines", () =
   const q2 = { id: 2, q_order: 2, type: 'objective', text: 'Q2', passage: 'Read the second passage.\nKofi stayed home.' };
   const seq = [q1, q2];
   assert.deepEqual(exam.buildQuestionBubbles({}, q1, seq, 0), [
-    `*OBJECTIVE*\n\n${SECTION_DIVIDER}`,
+    '*OBJECTIVE*',
     '*Instructions*\n\nRead the first passage.',
     'Ama went to the market.',
     '*QUESTION 1*\n\nQ1',
@@ -486,6 +484,74 @@ test("buildQuestionBubbles keeps a later question's own instruction lines", () =
     'Kofi stayed home.',
     '*QUESTION 2*\n\nQ2',
   ]);
+});
+
+test('isSectionHeader recognizes PDF section headers but not questions, prose, or instructions', () => {
+  assert.ok(exam.isSectionHeader('PART A, LEXIS AND STRUCTURE'), 'PART header');
+  assert.ok(exam.isSectionHeader('SECTION B'), 'section header');
+  assert.ok(exam.isSectionHeader('OBJECTIVE'), 'objective header');
+  assert.ok(exam.isSectionHeader('THEORY'), 'theory header');
+  assert.ok(!exam.isSectionHeader('1. Question one?'), 'a numbered question is not a header');
+  assert.ok(
+    !exam.isSectionHeader('From the words lettered A to D, choose the one that best completes each sentence.'),
+    'sentence-case instruction prose is not a header'
+  );
+  assert.ok(!exam.isSectionHeader('Ama lost her pencil on the way to school.'), 'passage prose is not a header');
+  assert.ok(!exam.isSectionHeader('Read the passage below.'), 'an instruction line is not a header');
+});
+
+test('splitQuestionHeadings pulls leading headers out of question text', () => {
+  const r = exam.splitQuestionHeadings(
+    'PART A, LEXIS AND STRUCTURE\nFrom the words lettered A to D, choose the one that best completes each sentence.'
+  );
+  assert.deepEqual(r.headings, ['PART A, LEXIS AND STRUCTURE']);
+  assert.equal(r.body, 'From the words lettered A to D, choose the one that best completes each sentence.');
+});
+
+test('buildQuestionBubbles puts a PDF section heading in its own bubble before the question', () => {
+  const q1 = {
+    id: 1,
+    q_order: 1,
+    type: 'objective',
+    text: 'PART A, LEXIS AND STRUCTURE\nFrom the words lettered A to D, choose the one that best completes each sentence.',
+    passage: '',
+  };
+  const q2 = { id: 2, q_order: 2, type: 'objective', text: 'Q2', passage: '' };
+  const seq = [q1, q2];
+  assert.deepEqual(exam.buildQuestionBubbles({}, q1, seq, 0), [
+    '*OBJECTIVE*',
+    '*PART A, LEXIS AND STRUCTURE*',
+    '*QUESTION 1*\n\nFrom the words lettered A to D, choose the one that best completes each sentence.',
+  ]);
+  assert.deepEqual(exam.buildQuestionBubbles({}, q2, seq, 1), ['*QUESTION 2*\n\nQ2']);
+});
+
+test('buildQuestionBubbles splits a header off the top of a passage and emits it once', () => {
+  const passage =
+    'SECTION B\nAnswer ONE question in this section.\nWrite an essay on any one of the following topics.';
+  const q1 = { id: 1, q_order: 1, type: 'theory', text: 'Q1', passage };
+  const q2 = { id: 2, q_order: 2, type: 'theory', text: 'Q2', passage };
+  const seq = [q1, q2];
+  assert.deepEqual(exam.buildQuestionBubbles({}, q1, seq, 0), [
+    '*THEORY*',
+    '*SECTION B*',
+    '*Instructions*\n\nAnswer ONE question in this section.\nWrite an essay on any one of the following topics.',
+    '*QUESTION 1*\n\nQ1',
+  ]);
+  const out = [
+    ...exam.buildQuestionBubbles({}, q1, seq, 0),
+    ...exam.buildQuestionBubbles({}, q2, seq, 1),
+  ];
+  assert.equal(out.filter((b) => b === '*SECTION B*').length, 1, 'header emitted exactly once');
+  assert.deepEqual(exam.buildQuestionBubbles({}, q2, seq, 1), ['*QUESTION 2*\n\nQ2']);
+});
+
+test('buildQuestionBubbles dedupes the same heading across questions', () => {
+  const q1 = { id: 1, q_order: 1, type: 'objective', text: 'PART A\nQ1', passage: '' };
+  const q2 = { id: 2, q_order: 2, type: 'objective', text: 'PART A\nQ2', passage: '' };
+  const seq = [q1, q2];
+  const out = [...exam.buildQuestionBubbles({}, q1, seq, 0), ...exam.buildQuestionBubbles({}, q2, seq, 1)];
+  assert.equal(out.filter((b) => b === '*PART A*').length, 1, 'heading emitted once across the sequence');
 });
 
 test('EXAMINER_PERSONA is a real persona and examinerPrompt prepends it', () => {
@@ -543,6 +609,8 @@ test('objective answer without a stored key is AI-resolved, persisted, and grade
       ai.resolveObjectiveAnswer = real;
     }
 
+    await exam.drainSession(sessionId); // the key resolution runs in the background
+
     const row = db.prepare('SELECT * FROM answers WHERE session_id = ?').get(sessionId);
     assert.ok(row, 'an answer row exists');
     assert.equal(row.marked_by, 'ai', 'graded by the AI examiner');
@@ -587,11 +655,153 @@ test('objective answer stays graded at 0 when the AI cannot determine a key', as
       ai.resolveObjectiveAnswer = real;
     }
 
+    await exam.drainSession(sessionId); // the key resolution runs in the background
+
     const row = db.prepare('SELECT * FROM answers WHERE session_id = ?').get(sessionId);
     assert.equal(row.marked_by, 'ai', 'graded by AI even when unresolved');
     assert.equal(row.marks_awarded, 0, 'zero marks');
     assert.equal(row.needs_review, 0, 'never pending admin review');
     assert.match(row.ai_feedback, /examiner could not determine/i, 'neutral explanatory note');
+  } finally {
+    db.exec('ROLLBACK');
+  }
+});
+
+test('handleAnswer records an objective answer without waiting on a slow AI key resolution', async () => {
+  const db = require('../src/db');
+  db.exec('BEGIN');
+  try {
+    const examId = db
+      .prepare('INSERT INTO exams (title, subject, duration_minutes) VALUES (?,?,?)')
+      .run('__obj_async_exam__', 'Test', 30).lastInsertRowid;
+    const qid = db
+      .prepare("INSERT INTO questions (exam_id, q_order, type, text, options, correct_answer, marks) VALUES (?,1,'objective',?,?,NULL,1)")
+      .run(examId, 'Capital of Ghana?', JSON.stringify([{ key: 'A', text: 'Kumasi' }, { key: 'B', text: 'Accra' }])).lastInsertRowid;
+    const q = db.prepare('SELECT * FROM questions WHERE id = ?').get(qid);
+    const studentId = db
+      .prepare('INSERT INTO students (phone) VALUES (?)')
+      .run('__obj_async_phone__' + Date.now()).lastInsertRowid;
+    const sessionId = db
+      .prepare('INSERT INTO sessions (exam_id, student_id) VALUES (?,?)')
+      .run(examId, studentId).lastInsertRowid;
+
+    const real = ai.resolveObjectiveAnswer;
+    let resolved = false;
+    ai.resolveObjectiveAnswer = async () => {
+      await new Promise((r) => setTimeout(r, 300));
+      resolved = true;
+      return { correct_index: 1, explanation: 'Accra is the capital.' };
+    };
+    try {
+      const t0 = Date.now();
+      await exam.handleAnswer(
+        { pass_percentage: 50 },
+        { id: sessionId, exam_id: examId, current_q_order: 1 },
+        { id: studentId, phone: '__none__' },
+        { ...q, _pool: false, q_order: 1 },
+        'B'
+      );
+      assert.ok(Date.now() - t0 < 150, 'handleAnswer returns before the slow AI resolve finishes');
+      assert.equal(resolved, false, 'the AI resolve is still running when handleAnswer returns');
+    } finally {
+      ai.resolveObjectiveAnswer = real;
+    }
+
+    await exam.drainSession(sessionId);
+    assert.equal(resolved, true, 'drainSession waited for the background resolution');
+    const row = db.prepare('SELECT * FROM answers WHERE session_id = ?').get(sessionId);
+    assert.equal(row.marked_by, 'ai', 'graded by the AI examiner after drain');
+    assert.equal(row.is_correct, 1, 'B matches the resolved key');
+  } finally {
+    db.exec('ROLLBACK');
+  }
+});
+
+test('handleInbound restarts the clock for a bulk-sent session on first engagement', async () => {
+  const db = require('../src/db');
+  const wa = require('../src/services/whatsapp');
+  db.exec('BEGIN');
+  try {
+    const examId = db
+      .prepare("INSERT INTO exams (title, subject, duration_minutes, status) VALUES (?,?,?,'published')")
+      .run('__timer_reset_exam__', 'Test', 60).lastInsertRowid;
+    const opts = JSON.stringify([
+      { key: 'A', text: 'Kumasi' },
+      { key: 'B', text: 'Accra' },
+      { key: 'C', text: 'Tamale' },
+      { key: 'D', text: 'Cape Coast' },
+    ]);
+    db.prepare("INSERT INTO questions (exam_id, q_order, type, text, options, correct_answer, marks) VALUES (?,1,'objective','Q1?',?,?,1)").run(examId, opts, 'B');
+    const phone = '__timer_reset_phone__' + Date.now();
+    const studentId = db
+      .prepare('INSERT INTO students (phone) VALUES (?)')
+      .run(phone).lastInsertRowid;
+    const sessionId = db
+      .prepare("INSERT INTO sessions (exam_id, student_id, started_at, last_active_at) VALUES (?,?,datetime('now','-50 minutes'),datetime('now','-50 minutes'))")
+      .run(examId, studentId).lastInsertRowid;
+
+    const real = wa.sendText;
+    wa.sendText = async () => ({ ok: true });
+    try {
+      await exam.handleInbound(phone, 'B', {});
+    } finally {
+      wa.sendText = real;
+    }
+
+    const s = db.prepare('SELECT * FROM sessions WHERE id = ?').get(sessionId);
+    const fresh = new Date(s.started_at).getTime();
+    assert.ok(Date.now() - fresh < 30000, 'clock restarted at first engagement');
+    assert.notEqual(s.status, 'expired', 'session was not expired away');
+    const row = db.prepare('SELECT * FROM answers WHERE session_id = ?').get(sessionId);
+    assert.ok(row, 'the answer was recorded after the clock reset');
+    assert.equal(row.is_correct, 1, 'answered B correctly');
+  } finally {
+    db.exec('ROLLBACK');
+  }
+});
+
+test('handleInbound does not restart the clock once a student has answered', async () => {
+  const db = require('../src/db');
+  const wa = require('../src/services/whatsapp');
+  db.exec('BEGIN');
+  try {
+    const examId = db
+      .prepare("INSERT INTO exams (title, subject, duration_minutes, status) VALUES (?,?,?,'published')")
+      .run('__timer_lock_exam__', 'Test', 60).lastInsertRowid;
+    const opts = JSON.stringify([
+      { key: 'A', text: 'Kumasi' },
+      { key: 'B', text: 'Accra' },
+      { key: 'C', text: 'Tamale' },
+      { key: 'D', text: 'Cape Coast' },
+    ]);
+    db.prepare("INSERT INTO questions (exam_id, q_order, type, text, options, correct_answer, marks) VALUES (?,1,'objective','Q1?',?,?,1)").run(examId, opts, 'B');
+    db.prepare("INSERT INTO questions (exam_id, q_order, type, text, options, correct_answer, marks) VALUES (?,2,'objective','Q2?',?,?,1)").run(examId, opts, 'C');
+    const phone = '__timer_lock_phone__' + Date.now();
+    const studentId = db
+      .prepare('INSERT INTO students (phone) VALUES (?)')
+      .run(phone).lastInsertRowid;
+    const sessionId = db
+      .prepare("INSERT INTO sessions (exam_id, student_id, current_q_order, started_at, last_active_at) VALUES (?,?,2,datetime('now','-10 minutes'),datetime('now','-10 minutes'))")
+      .run(examId, studentId).lastInsertRowid;
+    const q1 = db.prepare('SELECT id FROM questions WHERE exam_id=? AND q_order=1').get(examId);
+    db.prepare(
+      `INSERT INTO answers (session_id, question_id, q_order, answer_text, is_correct, marks_awarded, max_marks, marked_by, marked_at)
+       VALUES (?,?,1,'B',1,1,1,'auto',datetime('now'))`
+    ).run(sessionId, q1.id);
+
+    const real = wa.sendText;
+    wa.sendText = async () => ({ ok: true });
+    try {
+      await exam.handleInbound(phone, 'C', {});
+    } finally {
+      wa.sendText = real;
+    }
+
+    const s = db.prepare('SELECT * FROM sessions WHERE id = ?').get(sessionId);
+    const started = new Date(s.started_at).getTime();
+    assert.ok(Date.now() - started > 9 * 60000, 'clock NOT restarted — the exam started 10 minutes ago');
+    const row = db.prepare('SELECT * FROM answers WHERE session_id=? AND q_order=2').get(sessionId);
+    assert.equal(row.is_correct, 1, 'second answer (C) recorded on the original clock');
   } finally {
     db.exec('ROLLBACK');
   }
@@ -669,6 +879,82 @@ test('markAllPendingTheory records 0 marks, needs_review=0 after a final marking
     assert.equal(row.marks_awarded, 0, 'zero marks on final failure');
     assert.equal(row.needs_review, 0, 'never pending admin review');
     assert.match(row.ai_feedback, /could not mark this answer/, 'explanatory note');
+  } finally {
+    db.exec('ROLLBACK');
+  }
+});
+
+test('theory answers are recorded immediately; finalize drains AI-copy detection before results', async () => {
+  const db = require('../src/db');
+  const wa = require('../src/services/whatsapp');
+  const results = require('../src/services/results');
+  const certificate = require('../src/services/certificate');
+  db.exec('BEGIN');
+  try {
+    const examId = db
+      .prepare("INSERT INTO exams (title, subject, duration_minutes, status) VALUES (?,?,?,'published')")
+      .run('__theory_async_exam__', 'Test', 30).lastInsertRowid;
+    const qid = db
+      .prepare("INSERT INTO questions (exam_id, q_order, type, text, marks) VALUES (?,1,'theory','Explain.',5)")
+      .run(examId).lastInsertRowid;
+    const q = db.prepare('SELECT * FROM questions WHERE id = ?').get(qid);
+    const studentId = db
+      .prepare('INSERT INTO students (phone) VALUES (?)')
+      .run('__theory_async_phone__' + Date.now()).lastInsertRowid;
+    const sessionId = db
+      .prepare('INSERT INTO sessions (exam_id, student_id) VALUES (?,?)')
+      .run(examId, studentId).lastInsertRowid;
+
+    const realDetect = ai.detectAiGeneratedAnswer;
+    const realConfigured = ai.aiConfigured;
+    const realMark = marking.markTheoryAnswer;
+    const realSend = wa.sendText;
+    const realImage = wa.sendImage;
+    const realResult = results.sendResultMessage;
+    const realCert = certificate.renderCertificatePng;
+    let detected = false;
+    ai.aiConfigured = () => true;
+    ai.detectAiGeneratedAnswer = async () => {
+      await new Promise((r) => setTimeout(r, 300));
+      detected = true;
+      return { ai_generated: true };
+    };
+    marking.markTheoryAnswer = async () => ({ marksAwarded: 4, feedback: 'Good.', aiGenerated: true, aiReason: 'AI text' });
+    wa.sendText = async () => ({ ok: true });
+    wa.sendImage = async () => ({ ok: true });
+    results.sendResultMessage = async () => {};
+    certificate.renderCertificatePng = async () => Buffer.from('png');
+    try {
+      const t0 = Date.now();
+      await exam.handleAnswer(
+        { pass_percentage: 50 },
+        { id: sessionId, exam_id: examId, current_q_order: 1, status: 'in_progress' },
+        { id: studentId, phone: '__none__' },
+        { ...q, _pool: false, q_order: 1 },
+        'The essay the student wrote.'
+      );
+      assert.ok(Date.now() - t0 < 150, 'answer recorded without waiting on AI detection');
+      assert.equal(detected, false, 'detection is still in flight when handleAnswer returns');
+
+      await exam.finalize(
+        { id: sessionId, exam_id: examId, current_q_order: 1, status: 'in_progress' },
+        { id: studentId, phone: '__none__' },
+        'completed'
+      );
+      assert.equal(detected, true, 'finalize drained the pending detection before marking');
+      const row = db.prepare('SELECT * FROM answers WHERE session_id = ?').get(sessionId);
+      assert.equal(row.ai_detected, 1, 'flagged as AI-copied');
+      assert.equal(row.marks_awarded, 0, 'capped at 0 marks');
+      assert.equal(row.marked_by, 'ai', 'marked after drain');
+    } finally {
+      ai.detectAiGeneratedAnswer = realDetect;
+      ai.aiConfigured = realConfigured;
+      marking.markTheoryAnswer = realMark;
+      wa.sendText = realSend;
+      wa.sendImage = realImage;
+      results.sendResultMessage = realResult;
+      certificate.renderCertificatePng = realCert;
+    }
   } finally {
     db.exec('ROLLBACK');
   }
