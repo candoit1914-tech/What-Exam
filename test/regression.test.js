@@ -481,3 +481,89 @@ test('resolveObjectiveAnswer exists and maps options to 0-based lines', async ()
   assert.ok(result.correct_index >= -1 && result.correct_index <= 2, 'correct_index in range');
   assert.equal(typeof result.explanation, 'string');
 });
+
+test('objective answer without a stored key is AI-resolved, persisted, and graded', async () => {
+  const db = require('../src/db');
+  db.exec('BEGIN');
+  try {
+    const examId = db
+      .prepare('INSERT INTO exams (title, subject, duration_minutes) VALUES (?,?,?)')
+      .run('__obj_ai_exam__', 'Test', 30).lastInsertRowid;
+    const qid = db
+      .prepare("INSERT INTO questions (exam_id, q_order, type, text, options, correct_answer, marks) VALUES (?,1,'objective',?,?,NULL,1)")
+      .run(examId, 'Capital of Ghana?', JSON.stringify([{ key: 'A', text: 'Kumasi' }, { key: 'B', text: 'Accra' }])).lastInsertRowid;
+    const q = db.prepare('SELECT * FROM questions WHERE id = ?').get(qid);
+    const studentId = db
+      .prepare('INSERT INTO students (phone) VALUES (?)')
+      .run('__obj_ai_phone__' + Date.now()).lastInsertRowid;
+    const sessionId = db
+      .prepare('INSERT INTO sessions (exam_id, student_id) VALUES (?,?)')
+      .run(examId, studentId).lastInsertRowid;
+
+    const real = ai.resolveObjectiveAnswer;
+    ai.resolveObjectiveAnswer = async () => ({ correct_index: 1, explanation: 'Accra is the capital.' });
+    try {
+      await exam.handleAnswer(
+        { pass_percentage: 50 },
+        { id: sessionId, exam_id: examId, current_q_order: 1 },
+        { id: studentId, phone: '__none__' },
+        { ...q, _pool: false, q_order: 1 },
+        'B'
+      );
+    } finally {
+      ai.resolveObjectiveAnswer = real;
+    }
+
+    const row = db.prepare('SELECT * FROM answers WHERE session_id = ?').get(sessionId);
+    assert.ok(row, 'an answer row exists');
+    assert.equal(row.marked_by, 'ai', 'graded by the AI examiner');
+    assert.equal(row.needs_review, 0, 'never flagged for admin review');
+    assert.equal(row.is_correct, 1, 'student answered B which matches the resolved key');
+    const persisted = db.prepare('SELECT correct_answer FROM questions WHERE id = ?').get(qid);
+    assert.equal(persisted.correct_answer, 'B', 'resolved key persisted on the question');
+  } finally {
+    db.exec('ROLLBACK');
+  }
+});
+
+test('objective answer stays graded at 0 when the AI cannot determine a key', async () => {
+  const db = require('../src/db');
+  db.exec('BEGIN');
+  try {
+    const examId = db
+      .prepare('INSERT INTO exams (title, subject, duration_minutes) VALUES (?,?,?)')
+      .run('__obj_ai_fail_exam__', 'Test', 30).lastInsertRowid;
+    const qid = db
+      .prepare("INSERT INTO questions (exam_id, q_order, type, text, options, correct_answer, marks) VALUES (?,1,'objective',?,?,NULL,1)")
+      .run(examId, 'Tricky question?', JSON.stringify([{ key: 'A', text: 'X' }, { key: 'B', text: 'Y' }])).lastInsertRowid;
+    const q = db.prepare('SELECT * FROM questions WHERE id = ?').get(qid);
+    const studentId = db
+      .prepare('INSERT INTO students (phone) VALUES (?)')
+      .run('__obj_ai_fail_phone__' + Date.now()).lastInsertRowid;
+    const sessionId = db
+      .prepare('INSERT INTO sessions (exam_id, student_id) VALUES (?,?)')
+      .run(examId, studentId).lastInsertRowid;
+
+    const real = ai.resolveObjectiveAnswer;
+    ai.resolveObjectiveAnswer = async () => ({ correct_index: -1, explanation: 'ambiguous' });
+    try {
+      await exam.handleAnswer(
+        { pass_percentage: 50 },
+        { id: sessionId, exam_id: examId, current_q_order: 1 },
+        { id: studentId, phone: '__none__' },
+        { ...q, _pool: false, q_order: 1 },
+        'A'
+      );
+    } finally {
+      ai.resolveObjectiveAnswer = real;
+    }
+
+    const row = db.prepare('SELECT * FROM answers WHERE session_id = ?').get(sessionId);
+    assert.equal(row.marked_by, 'ai', 'graded by AI even when unresolved');
+    assert.equal(row.marks_awarded, 0, 'zero marks');
+    assert.equal(row.needs_review, 0, 'never pending admin review');
+    assert.match(row.ai_feedback, /examiner could not determine/i, 'neutral explanatory note');
+  } finally {
+    db.exec('ROLLBACK');
+  }
+});

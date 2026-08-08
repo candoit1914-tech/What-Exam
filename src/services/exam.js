@@ -537,17 +537,60 @@ async function handleAnswer(exam, session, student, question, body, meta = {}) {
       );
       return false;
     }
-    // No verified answer key stored → the admin must fill it. Flag for review
-    // instead of marking an innocent student wrong on a guessed key.
+    // No verified answer key stored → the AI examiner determines the answer on
+    // the spot, persists it for results and future answers, and grades this
+    // answer immediately. A genuinely uncertain examiner or an AI failure
+    // records 0 marks with a neutral note — never pending admin review.
     if (!marking.resolveCorrectKey(question)) {
-      db.prepare(
-        `INSERT INTO answers (session_id, question_id, q_order, answer_text, is_correct, marks_awarded, max_marks, marked_by, ai_feedback, needs_review, marked_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?,datetime('now'))`
-      ).run(
-        session.id, question.id, question.q_order, letter,
-        null, 0, question.marks, 'manual',
-        'No answer key stored for this question — flagged for review.', 1
-      );
+      let resolved = null;
+      try {
+        resolved = await ai.resolveObjectiveAnswer({
+          questionText: question.text,
+          passage: question.passage || '',
+          options: JSON.parse(question.options || '[]'),
+        });
+      } catch (e) {
+        resolved = null;
+      }
+      const idx = resolved ? Number(resolved.correct_index) : -1;
+      const options = JSON.parse(question.options || '[]');
+      const key = options[idx] ? String(options[idx].key || '').toUpperCase() : null;
+
+      if (key && idx >= 0) {
+        if (question._pool) {
+          db.prepare('UPDATE question_pool SET correct_answer = ? WHERE id = ?').run(key, question.id);
+        } else {
+          db.prepare('UPDATE questions SET correct_answer = ? WHERE id = ?').run(key, question.id);
+          db.prepare(
+            `INSERT INTO marking_schemes (question_id, type, scheme) VALUES (?, 'objective', ?)
+             ON CONFLICT(question_id) DO UPDATE SET scheme=excluded.scheme, updated_at=datetime('now')`
+          ).run(question.id, JSON.stringify({
+            type: 'objective',
+            correct_answer: key,
+            marks: question.marks,
+            explanation: resolved?.explanation || '',
+          }));
+        }
+        question.correct_answer = key;
+        const result = marking.markObjective(question, letter);
+        db.prepare(
+          `INSERT INTO answers (session_id, question_id, q_order, answer_text, is_correct, marks_awarded, max_marks, marked_by, ai_feedback, needs_review, marked_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,datetime('now'))`
+        ).run(
+          session.id, question.id, question.q_order, letter,
+          result.isCorrect ? 1 : 0, result.marksAwarded, result.maxMarks, 'ai',
+          `Answer key determined by the AI examiner: ${key}.`, 0
+        );
+      } else {
+        db.prepare(
+          `INSERT INTO answers (session_id, question_id, q_order, answer_text, is_correct, marks_awarded, max_marks, marked_by, ai_feedback, needs_review, marked_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,datetime('now'))`
+        ).run(
+          session.id, question.id, question.q_order, letter,
+          0, 0, question.marks, 'ai',
+          'The examiner could not determine the answer to this question.', 0
+        );
+      }
       return true;
     }
     const result = marking.markObjective(question, letter);
@@ -823,6 +866,7 @@ module.exports = {
   createSession,
   handleInbound,
   processAnswer,
+  handleAnswer,
   finalize,
   endExam,
   sendExamToRecipients,
