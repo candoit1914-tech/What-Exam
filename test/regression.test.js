@@ -458,3 +458,10 @@ test('buildQuestionBubbles does not duplicate a shared instruction-laden passage
   assert.equal(out.filter((b) => b === passage).length, 1, 'passage emitted exactly once across both questions');
   assert.equal(out.filter((b) => b.startsWith('*THEORY*')).length, 1, 'banner emitted exactly once');
 });
+
+test('EXAMINER_PERSONA is a real persona and examinerPrompt prepends it', () => {
+  assert.match(ai.EXAMINER_PERSONA, /40 years of experience/i, 'persona carries the examiner experience');
+  const out = ai.examinerPrompt('BASE');
+  assert.ok(out.startsWith(ai.EXAMINER_PERSONA), 'persona leads the prompt');
+  assert.match(out, /BASE/, 'base content follows the persona');
+});

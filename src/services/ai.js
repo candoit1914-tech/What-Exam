@@ -148,6 +148,14 @@ const SYSTEM_BASE =
   'You are an expert examination setter and examiner. Always answer with valid JSON only. ' +
   'Never include markdown, code fences, or commentary. Respond with ONLY the JSON object, nothing else.';
 
+const EXAMINER_PERSONA =
+  'You are a genuine, sincere, objective professional teacher and chief examiner with more than 40 years of experience, deeply well-versed in national examinations (including the Ghana BECE). You grade fairly, honestly, and consistently: you give full credit where it is due, partial credit for partially correct work, and no credit only where nothing was earned. You never mark down out of strictness or mark up out of sympathy.';
+
+/** Wrap any grading/scheme system prompt with the shared examiner persona. */
+function examinerPrompt(base) {
+  return `${EXAMINER_PERSONA}\n\n${base}`;
+}
+
 // Slow/commercial AI endpoints (e.g. huge 100B+ models) can take well over a
 // minute to structure a full exam paper. Bulk admin operations (PDF upload /
 // question extraction) get a generous window; the default timeout applies to
@@ -683,7 +691,7 @@ function extractMarkingSchemeSection(text) {
  * Generate a marking scheme for a single theory question.
  */
 async function generateTheoryScheme({ text, marks, difficulty }) {
-  const system = SYSTEM_BASE + `
+  const system = examinerPrompt(SYSTEM_BASE + `
 Create a marking scheme for a theory question. Return an object:
 {
   "model_answer": "complete model answer a top student would give",
@@ -695,7 +703,7 @@ Create a marking scheme for a theory question. Return an object:
 Rules:
 - Total scoring equals the question's marks (${marks || 5}). Adjust presentation/grammar marks to fit.
 - Rubric points are specific and checkable.
-`;
+`);
 
   return chatJSON([
     { role: 'system', content: system },
@@ -727,7 +735,7 @@ const ANSWER_MAX_TOKENS = 3000;
 
 async function answerObjectiveQuestions(questions) {
   if (!questions.length) return [];
-  const system = SYSTEM_BASE + `
+  const system = examinerPrompt(SYSTEM_BASE + `
 For each question, determine the single correct answer option. Return:
 {"answers":[{"index": 0, "correct_index": 2, "explanation": "short reason"}]}
 Rules:
@@ -737,7 +745,7 @@ Rules:
 - Pick the objectively correct answer only when exactly one option is clearly right.
 - Provide a one-sentence explanation for each.
 - COMPACT OUTPUT: keep explanations to a single short sentence. Output ONLY the JSON object.
-`;
+`);
 
   const chunks = [];
   for (let i = 0; i < questions.length; i += ANSWER_BATCH) chunks.push(questions.slice(i, i + ANSWER_BATCH));
@@ -823,7 +831,7 @@ const VERIFY_BATCH = 10;
 
 async function verifyObjectiveAnswers(questions, answers) {
   if (!answers.length) return [];
-  const system = SYSTEM_BASE + `
+  const system = examinerPrompt(SYSTEM_BASE + `
 You are verifying an exam answer key before it is used to grade students. For each question, confirm whether the proposed correct option is genuinely and unambiguously correct.
 Return:
 {"answers":[{"index": 0, "correct_index": 2, "confirmed": true}]}
@@ -831,7 +839,7 @@ Rules:
 - confirmed must be true ONLY when the proposed answer is certainly correct AND every other option is clearly wrong.
 - If the proposed answer is wrong, ambiguous, or you are not certain, set confirmed to false and correct_index to -1.
 - A wrong key marks innocent students wrong, so when in doubt, do NOT confirm.
-`;
+`);
 
   const chunks = [];
   for (let i = 0; i < answers.length; i += VERIFY_BATCH) chunks.push(answers.slice(i, i + VERIFY_BATCH));
@@ -937,7 +945,7 @@ Rules:
  * Mark a theory answer against the scheme + rubric using AI.
  */
 async function markTheory({ questionText, modelAnswer, keyPoints, rubric, presentationMarks, grammarMarks, maxMarks, studentAnswer }) {
-  const system = SYSTEM_BASE + `
+  const system = examinerPrompt(SYSTEM_BASE + `
 You are a strict but fair examiner. Mark a student's theory answer against the marking scheme.
 
 Return exactly:
@@ -956,7 +964,7 @@ Rules:
 - Presentation and grammar marks are awarded only if the writing is clear/organized and grammatically acceptable.
 - marks_awarded MUST be an integer or half-integer between 0 and max_marks.
 - AI-COPIED ANSWERS: Also assess whether the student answer was likely written or copied from an AI assistant (ChatGPT, Gemini, Claude). Set ai_generated=true ONLY when it is MORE LIKELY THAN NOT that it is AI-produced (suspiciously perfect, no errors, generic AI phrasing, no personal reasoning). When ai_generated is true, marks_awarded MUST be 0 and ai_reason must explain. When unsure, set ai_generated=false (benefit of the doubt).
-`;
+`);
 
   const rubricText = Array.isArray(rubric) && rubric.length
     ? rubric.map((r, i) => `${i + 1}. ${r.point} (${r.marks} marks) ${r.explanation ? '- ' + r.explanation : ''}`).join('\n')
@@ -1002,6 +1010,8 @@ module.exports = {
   aiConfigured,
   chatJSON,
   mapLimit,
+  EXAMINER_PERSONA,
+  examinerPrompt,
   generateQuestions,
   extractQuestionsFromText,
   answerObjectiveQuestions,
