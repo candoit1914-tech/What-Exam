@@ -301,3 +301,35 @@ test('sessionQuestionSequence resolves drawn pool order and ids match for wiring
     db.exec('ROLLBACK');
   }
 });
+
+test('nextInSequence advances across a deleted-question gap in q_order', () => {
+  const db = require('../src/db');
+  db.exec('BEGIN');
+  try {
+    const examId = db
+      .prepare('INSERT INTO exams (title, subject, duration_minutes) VALUES (?,?,?)')
+      .run('__gap_exam__', 'Test', 30).lastInsertRowid;
+    const q1 = db.prepare("INSERT INTO questions (exam_id, q_order, type, text, marks) VALUES (?,1,'objective','Q1',1)").run(examId).lastInsertRowid;
+    db.prepare("INSERT INTO questions (exam_id, q_order, type, text, marks) VALUES (?,2,'objective','Q2',1)").run(examId);
+    const q3 = db.prepare("INSERT INTO questions (exam_id, q_order, type, text, marks) VALUES (?,3,'objective','Q3',1)").run(examId).lastInsertRowid;
+    db.prepare('DELETE FROM questions WHERE id = ?').run(
+      db.prepare("SELECT id FROM questions WHERE exam_id = ? AND q_order = 2").get(examId).id
+    );
+    const studentId = db
+      .prepare('INSERT INTO students (phone) VALUES (?)')
+      .run('__gap_phone__' + Date.now()).lastInsertRowid;
+    const sessionId = db
+      .prepare('INSERT INTO sessions (exam_id, student_id) VALUES (?,?)')
+      .run(examId, studentId).lastInsertRowid;
+
+    const session = { id: sessionId };
+    const first = exam.getSessionQuestion(sessionId, 1);
+    assert.equal(first.q_order, 1, 'first question is Q1');
+    const next = exam.nextInSequence(session, first);
+    assert.ok(next, 'a next question exists despite the q_order=2 gap');
+    assert.equal(next.id, q3, 'advances to Q3, not a missing Q2');
+    assert.equal(exam.nextInSequence(session, next), null, 'final question has no successor');
+  } finally {
+    db.exec('ROLLBACK');
+  }
+});

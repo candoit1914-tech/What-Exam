@@ -139,6 +139,19 @@ function sessionQuestionSequence(session) {
   return db.prepare('SELECT * FROM questions WHERE exam_id = ? ORDER BY q_order').all(s.exam_id);
 }
 
+/**
+ * The question a session presents after `question`, in presentation order.
+ * Returns null when the current question is last. If the current question is
+ * not part of the sequence (should not happen), falls back to q_order + 1 so
+ * behavior degrades gracefully instead of finalizing early.
+ */
+function nextInSequence(session, question) {
+  const seq = sessionQuestionSequence(session);
+  const i = seq.findIndex((q) => q.id === question.id);
+  if (i === -1) return getSessionQuestion(session.id, question.q_order + 1);
+  return seq[i + 1] || null;
+}
+
 function deadline(session) {
   return new Date(new Date(session.started_at).getTime() + session.duration_minutes * 60000);
 }
@@ -452,14 +465,12 @@ async function processAnswer(session, student, body, meta = {}) {
     .prepare('SELECT id FROM answers WHERE session_id = ? AND question_id = ?')
     .get(session.id, question.id);
   if (already) {
-    let qo = question.q_order + 1;
-    let nq = getSessionQuestion(session.id, qo);
+    let nq = nextInSequence(session, question);
     while (
       nq &&
       db.prepare('SELECT id FROM answers WHERE session_id = ? AND question_id = ?').get(session.id, nq.id)
     ) {
-      qo += 1;
-      nq = getSessionQuestion(session.id, qo);
+      nq = nextInSequence(session, nq);
     }
     if (nq) {
       db.prepare('UPDATE sessions SET current_q_order = ? WHERE id = ?').run(nq.q_order, session.id);
@@ -474,7 +485,7 @@ async function processAnswer(session, student, body, meta = {}) {
   if (next === false) return; // invalid input, question re-sent
 
   // advance
-  const nextQ = getSessionQuestion(session.id, question.q_order + 1);
+  const nextQ = nextInSequence(session, question);
   if (nextQ) {
     db.prepare(
       `UPDATE sessions SET current_q_order = ?, last_active_at = datetime('now') WHERE id = ?`
@@ -790,6 +801,7 @@ module.exports = {
   getSessionQuestionCount,
   sessionQuestionSequence,
   drawSessionQuestions,
+  nextInSequence,
   deadline,
   markAllPendingTheory,
   formatQuestion,
