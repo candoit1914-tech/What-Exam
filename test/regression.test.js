@@ -791,3 +791,29 @@ test('extractQuestionsFromText warns when a block still fails after the serial r
     ai.chatJSON = orig;
   }
 });
+
+test('extractQuestionsFromText caps concurrent extraction blocks at BLOCK_CONCURRENCY', async () => {
+  const orig = ai.chatJSON;
+  const state = { inFlight: 0, max: 0 };
+  ai.chatJSON = async () => {
+    state.inFlight++;
+    state.max = Math.max(state.max, state.inFlight);
+    await new Promise((r) => setTimeout(r, 10));
+    state.inFlight--;
+    return { questions: [{ type: 'objective', text: 'Guard Q', options: ['A. X', 'B. Y', 'C. Z', 'D. W'], correct_answer: 'A', correct_index: 0 }] };
+  };
+  try {
+    // 50 numbered questions split into 10 blocks (perBlock 5) — enough to
+    // exceed BLOCK_CONCURRENCY (8) so the cap is actually exercised. This
+    // couples the test to the current cap value on purpose: it is a
+    // deliberate performance tuning constant, so the test is updated when
+    // the cap is tuned.
+    const lines = [];
+    for (let i = 1; i <= 50; i++) lines.push(`${i}. Guard question ${i}?`, 'A. X', 'B. Y', 'C. Z', 'D. W');
+    const out = await ai.extractQuestionsFromText(lines.join('\n'));
+    assert.equal(state.max, 8, `extraction fires no more than 8 blocks at once (saw ${state.max})`);
+    assert.ok(out.length >= 1, 'capped extraction still parses questions');
+  } finally {
+    ai.chatJSON = orig;
+  }
+});

@@ -240,7 +240,10 @@ async function startJob(jobId, buffer) {
       updateJob(jobId, { progress: Math.min(pct, 98) });
       return marking.buildMarkingScheme(q);
     });
-    await ai.mapLimit(tasks, 5, (run) => run());
+    // Theory scheme generation is one AI call per question; run up to 8 in
+    // parallel (capped like the other bulk AI phases so a shared endpoint is
+    // not flooded) instead of one at a time.
+    await ai.mapLimit(tasks, 8, (run) => run());
 
     marking.recomputeExamTotal(job.exam_id);
     updateJob(jobId, { status: 'done', stage: 'Done', progress: 100, count: created.length });
