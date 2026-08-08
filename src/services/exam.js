@@ -247,6 +247,10 @@ const SECTION_INSTRUCTION = [
   /in\s+this\s+section/i,
 ];
 
+// An essay prompt that starts with "write" (e.g. "Write about the importance
+// of education.") is deliberately classified as an instruction, not passage —
+// the prompt is what the student must produce, so it belongs in the section
+// instructions.
 function isInstructionLine(line) {
   return INSTRUCTION_START.test(line) || INSTRUCTION_PHRASE.test(line) ||
     SECTION_INSTRUCTION.some((re) => re.test(line));
@@ -295,7 +299,7 @@ function buildQuestionBubbles(exam, question, sequence, index) {
 
   const clean = (p) => stripPaperOnlyInstructions(stripSourceWatermarks(p)).trim();
   const { instructions, passage } = splitSectionMeta(clean(question.passage));
-  if (firstOfType && instructions) {
+  if (instructions && !prev.some((q) => splitSectionMeta(clean(q.passage)).instructions === instructions)) {
     bubbles.push(formatSectionInstructions(instructions));
   }
   if (passage && !prev.some((q) => splitSectionMeta(clean(q.passage)).passage === passage)) {

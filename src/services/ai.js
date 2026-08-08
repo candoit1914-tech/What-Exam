@@ -473,8 +473,8 @@ Rules:
   let completed = 0;
   // A single block runs on its own shorter clock with a couple of retries. If
   // it still fails (timeout, HTTP error, bad JSON) the block is re-run
-  // serially after the wave (Task: flaky shared endpoints usually succeed once
-  // they are no longer flooded); only then is it dropped and reported.
+  // serially after the wave (flaky shared endpoints usually succeed once they
+  // are no longer flooded); only then is it dropped and reported.
   const runBlock = async (bp) => {
     for (let attempt = 0; attempt <= BLOCK_RETRIES; attempt++) {
       try {

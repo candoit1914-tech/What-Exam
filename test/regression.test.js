@@ -471,6 +471,23 @@ test('buildQuestionBubbles does not duplicate a shared instruction-laden passage
   assert.equal(out.filter((b) => b.startsWith('*THEORY*')).length, 1, 'header emitted exactly once');
 });
 
+test("buildQuestionBubbles keeps a later question's own instruction lines", () => {
+  const q1 = { id: 1, q_order: 1, type: 'objective', text: 'Q1', passage: 'Read the first passage.\nAma went to the market.' };
+  const q2 = { id: 2, q_order: 2, type: 'objective', text: 'Q2', passage: 'Read the second passage.\nKofi stayed home.' };
+  const seq = [q1, q2];
+  assert.deepEqual(exam.buildQuestionBubbles({}, q1, seq, 0), [
+    `*OBJECTIVE*\n\n${SECTION_DIVIDER}`,
+    '*Instructions*\n\nRead the first passage.',
+    'Ama went to the market.',
+    '*QUESTION 1*\n\nQ1',
+  ]);
+  assert.deepEqual(exam.buildQuestionBubbles({}, q2, seq, 1), [
+    '*Instructions*\n\nRead the second passage.',
+    'Kofi stayed home.',
+    '*QUESTION 2*\n\nQ2',
+  ]);
+});
+
 test('EXAMINER_PERSONA is a real persona and examinerPrompt prepends it', () => {
   assert.match(ai.EXAMINER_PERSONA, /40 years of experience/i, 'persona carries the examiner experience');
   const out = ai.examinerPrompt('BASE');
