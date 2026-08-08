@@ -433,3 +433,28 @@ test('stripSourceWatermarks never drops a line just for containing the word "pap
   const out = stripSourceWatermarks('The examiner collects the papers after the exam.');
   assert.match(out, /papers/, '"papers" in prose survives');
 });
+
+test('buildQuestionBubbles strips watermark lines from a passage before sending', () => {
+  const dirtyPassage = 'Read the passage below.\nDOWNLOADED FROM SRONU\npapers.sronu.com';
+  const q1 = { id: 1, q_order: 1, type: 'objective', text: 'Q1', passage: dirtyPassage };
+  const q2 = { id: 2, q_order: 2, type: 'objective', text: 'Q2', passage: dirtyPassage };
+  const seq = [q1, q2];
+  const bubbles = exam.buildQuestionBubbles({}, q1, seq, 0);
+  const joined = bubbles.join('\n');
+  assert.doesNotMatch(joined, /sronu/i, 'no watermark in any bubble');
+  assert.match(joined, /Read the passage below\./, 'real passage content kept');
+  assert.deepEqual(exam.buildQuestionBubbles({}, q2, seq, 1), ['*QUESTION 2*\n\nQ2'], 'passage-once: Q2 emits no passage bubble at all');
+});
+
+test('buildQuestionBubbles does not duplicate a shared instruction-laden passage', () => {
+  const passage = 'Read the following passage and answer questions 1 to 5.\nThe farmers rely on irrigation.';
+  const q1 = { id: 1, q_order: 1, type: 'theory', text: 'Q1', passage };
+  const q2 = { id: 2, q_order: 2, type: 'theory', text: 'Q2', passage };
+  const seq = [q1, q2];
+  const out = [
+    ...exam.buildQuestionBubbles({}, q1, seq, 0),
+    ...exam.buildQuestionBubbles({}, q2, seq, 1),
+  ];
+  assert.equal(out.filter((b) => b === passage).length, 1, 'passage emitted exactly once across both questions');
+  assert.equal(out.filter((b) => b.startsWith('*THEORY*')).length, 1, 'banner emitted exactly once');
+});

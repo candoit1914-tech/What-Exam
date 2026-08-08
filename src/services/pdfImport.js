@@ -2,6 +2,7 @@ const db = require('../db');
 const pdf = require('./pdf');
 const ai = require('./ai');
 const marking = require('./marking');
+const { stripSourceWatermarks } = require('./textClean');
 
 // ── Import helpers ─────────────────────────────────────────────────────
 
@@ -163,8 +164,9 @@ async function startJob(jobId, buffer) {
     let objIdx = 0;
     const theoryToScheme = [];
     for (const g of parsed) {
-      if (g.passage && String(g.passage).trim()) curPassage = String(g.passage).trim();
+      if (g.passage && String(g.passage).trim()) curPassage = stripSourceWatermarks(String(g.passage).trim());
       const passage = curPassage;
+      g.text = stripSourceWatermarks(g.text);
 
       if (g.type === 'objective') {
         const opts = buildOptions(g.options);

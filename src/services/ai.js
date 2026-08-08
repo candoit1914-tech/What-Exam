@@ -414,6 +414,7 @@ Rules:
 - MARKING SCHEME: If a marking scheme / model answer / suggested answers section for the questions is quoted in the prompt, use it VERBATIM to fill model_answer, key_points and rubric for the matching theory questions (do not regenerate or paraphrase it).
 - For theory questions with no rubric in the source, leave rubric/model_answer empty (the system will generate them).
 - Do NOT invent answer keys that are not in the document. Leave correct_answer as "" and correct_index as null when unknown.
+- WATERMARK LINES: Never copy watermark, source, or download footer/header lines (e.g. "Downloaded from sronu.com", "Source: www.example.com", "DOWNLOADED FROM SRONU") into text, passage, or instructions. Always drop such lines.
 - COMPACT OUTPUT: keep option text short, leave explanation and learning_objective empty, and do not repeat the passage for later questions. Output ONLY the JSON object.
 `;
 

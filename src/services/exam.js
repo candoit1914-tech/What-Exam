@@ -5,6 +5,7 @@ const marking = require('./marking');
 const results = require('./results');
 const certificate = require('./certificate');
 const ai = require('./ai');
+const { stripSourceWatermarks } = require('./textClean');
 
 // ── Students ───────────────────────────────────────────────────────────
 
@@ -251,8 +252,9 @@ function buildQuestionBubbles(exam, question, sequence, index) {
   if (!prev.some((q) => q.type === question.type)) {
     bubbles.push(`*${type}*`);
   }
-  const passage = stripPaperOnlyInstructions(question.passage).trim();
-  if (passage && !prev.some((q) => stripPaperOnlyInstructions(q.passage).trim() === passage)) {
+  const clean = (p) => stripPaperOnlyInstructions(stripSourceWatermarks(p)).trim();
+  const passage = clean(question.passage);
+  if (passage && !prev.some((q) => clean(q.passage) === passage)) {
     bubbles.push(passage);
   }
   bubbles.push(formatQuestion(exam, question));
