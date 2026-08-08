@@ -6,6 +6,7 @@ const ai = require('../src/services/ai');
 const marking = require('../src/services/marking');
 const pdfImport = require('../src/services/pdfImport');
 const exam = require('../src/services/exam');
+const { stripSourceWatermarks } = require('../src/services/textClean');
 
 // ── Bug 2 regression: reading passages must stay with the questions they belong to ──
 
@@ -392,4 +393,43 @@ test('completenessWarning is null when extraction is not far below the estimate 
   assert.equal(ai.completenessWarning(2, many(0)), null, 'tiny estimates never warn');
   const msg = ai.completenessWarning(60, many(5));
   assert.match(msg, /Extracted 5 questions, but the document appears to contain ~60\./, 'warning message text');
+});
+
+test('stripSourceWatermarks removes watermark and source footer lines', () => {
+  const input = [
+    'Read the passage below.',
+    'DOWNLOADED FROM SRONU',
+    'papers.sronu.com',
+    'www.example.edu.gh',
+    'Source: https://papers.sronu.com',
+    'Visit us at example.com for more.',
+    'The farmers rely on irrigation.',
+  ].join('\n');
+  const out = stripSourceWatermarks(input);
+  assert.doesNotMatch(out, /sronu/i, 'sronu line removed');
+  assert.doesNotMatch(out, /www\./, 'bare URL line removed');
+  assert.doesNotMatch(out, /Source:/i, 'source: line removed');
+  assert.doesNotMatch(out, /Visit us at/i, 'visit-us-at line removed');
+  assert.match(out, /Read the passage below\./, 'real content kept');
+  assert.match(out, /The farmers rely on irrigation\./, 'real content kept');
+});
+
+test('stripSourceWatermarks collapses the vertically-arranged one-word-per-line watermark', () => {
+  const input = 'Read the passage.\nDOWNLOADED\nFROM\nSRONU\npapers.sronu.com\n\n\n\nQuestion one?';
+  const out = stripSourceWatermarks(input);
+  assert.doesNotMatch(out, /DOWNLOADED/, 'first watermark word removed');
+  assert.doesNotMatch(out, /FROM/, 'watermark middle word removed');
+  assert.doesNotMatch(out, /sronu/i, 'site line removed');
+  assert.doesNotMatch(out, /\n\n\n/, 'newline runs collapsed');
+  assert.match(out, /Question one\?/, 'question text kept');
+});
+
+test('stripSourceWatermarks keeps legitimate prose that merely mentions a website', () => {
+  const out = stripSourceWatermarks('The school website www.ghschools.gov.gh published the timetable for this term.');
+  assert.match(out, /www\.ghschools\.gov\.gh/, 'mid-sentence URL survives');
+});
+
+test('stripSourceWatermarks never drops a line just for containing the word "papers"', () => {
+  const out = stripSourceWatermarks('The examiner collects the papers after the exam.');
+  assert.match(out, /papers/, '"papers" in prose survives');
 });
