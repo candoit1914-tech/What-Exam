@@ -960,7 +960,8 @@ function pollPdfJob(examId, div, jobId) {
       clearInterval(timer);
       invalidateCache(`/api/exams/${examId}`);
       div.remove();
-      toast(`Extracted ${job.count} questions (schemes generated automatically).`);
+      const base = `Extracted ${job.count} questions (schemes generated automatically).`;
+      toast(job.warning ? `${base} ${job.warning}` : base);
       renderExam(examId);
     } else if (job.status === 'error') {
       clearInterval(timer);
