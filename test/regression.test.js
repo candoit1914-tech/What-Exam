@@ -1290,3 +1290,226 @@ test('recoverStaleJobs marks interrupted imports as failed so they can never han
     db.exec('ROLLBACK');
   }
 });
+
+// ── WhatsApp outbound: 131056 pair rate limit + per-recipient pacing ──
+//
+// Production hit "400 (#131056) (Business Account, Consumer Account) pair rate
+// limit hit" on the Q34→Q35 burst; the send threw, the webhook aborted, and
+// the session stayed on the same question forever. The fix: retry 131056 with
+// backoff AND serialize per-recipient sends with a small gap so a question's
+// bubble burst never exhausts the pair window.
+
+const config = require('../src/config');
+
+function stubFetch(responses) {
+  const orig = global.fetch;
+  const calls = [];
+  global.fetch = async () => {
+    calls.push(Date.now());
+    const r = responses[Math.min(calls.length - 1, responses.length - 1)];
+    return {
+      ok: r.ok,
+      status: r.status,
+      headers: { get: () => (r.retryAfter != null ? String(r.retryAfter) : null) },
+      json: async () =>
+        r.ok
+          ? { messages: [{ id: 'wamid.retry' }] }
+          : { error: { code: r.code, message: r.message } },
+    };
+  };
+  return { orig, calls };
+}
+
+const okResp = { ok: true, status: 200 };
+const rateResp = { ok: false, status: 400, code: 131056, message: 'pair rate limit hit', retryAfter: 0 };
+
+function enableWa() {
+  const orig = { token: config.whatsapp.accessToken, id: config.whatsapp.phoneNumberId, interval: config.whatsapp.sendIntervalMs };
+  config.whatsapp.accessToken = 'test-token';
+  config.whatsapp.phoneNumberId = 'test-ph-id';
+  return orig;
+}
+function restoreWa(orig) {
+  config.whatsapp.accessToken = orig.token;
+  config.whatsapp.phoneNumberId = orig.id;
+  config.whatsapp.sendIntervalMs = orig.interval;
+}
+
+test('sendText retries the 131056 pair rate limit and succeeds on the next attempt', async () => {
+  const db = require('../src/db');
+  const orig = enableWa();
+  const stub = stubFetch([rateResp, okResp]);
+  db.exec('BEGIN');
+  try {
+    const out = await wa.sendText('233200000000', 'Hello');
+    assert.ok(out?.messages?.[0]?.id, 'message id returned after the retry');
+    assert.equal(stub.calls.length, 2, 'exactly one retry after the 131056 rejection');
+    const row = db
+      .prepare('SELECT * FROM outbound_messages WHERE recipient = ? ORDER BY id DESC LIMIT 1')
+      .get('233200000000');
+    assert.ok(row, 'successful send is recorded in outbound_messages');
+    assert.equal(row.status, 'sent');
+  } finally {
+    db.exec('ROLLBACK');
+    global.fetch = stub.orig;
+    restoreWa(orig);
+  }
+});
+
+test('sendText gives up after MAX_ATTEMPTS on persistent 131056 (no infinite retry)', async () => {
+  const db = require('../src/db');
+  const orig = enableWa();
+  const stub = stubFetch([rateResp]);
+  db.exec('BEGIN');
+  try {
+    await assert.rejects(
+      () => wa.sendText('233200000001', 'Hello'),
+      /131056/,
+      'surfaces the pair rate limit after retries are exhausted'
+    );
+    assert.equal(stub.calls.length, 4, 'retried MAX_ATTEMPTS times then threw');
+  } finally {
+    db.exec('ROLLBACK');
+    global.fetch = stub.orig;
+    restoreWa(orig);
+  }
+});
+
+test('outbound messages to the same phone are serialized with a pacing gap', async () => {
+  const db = require('../src/db');
+  const orig = enableWa();
+  config.whatsapp.sendIntervalMs = 5;
+  const oldFetch = global.fetch;
+  const started = [];
+  global.fetch = async () => {
+    started.push(Date.now());
+    await new Promise((r) => setTimeout(r, 40));
+    return { ok: true, status: 200, headers: { get: () => null }, json: async () => ({ messages: [{ id: 'wamid.pace' }] }) };
+  };
+  db.exec('BEGIN');
+  try {
+    const [a, b] = await Promise.all([
+      wa.sendText('233300000000', 'First'),
+      wa.sendText('233300000000', 'Second'),
+    ]);
+    assert.ok(a && b, 'both sends complete');
+    assert.equal(started.length, 2, 'two outbound calls');
+    assert.ok(
+      started[1] >= started[0] + 35,
+      `second send began at ${started[1]} vs first at ${started[0]} — must wait for the first send to settle`
+    );
+  } finally {
+    db.exec('ROLLBACK');
+    global.fetch = oldFetch;
+    restoreWa(orig);
+  }
+});
+
+// ── Dual-provider AI race (CLAUDE_* secondary vs primary) ──
+//
+// When a second OpenAI-compatible provider is configured, chatJSON fires both
+// in parallel and the first SUCCESSFUL response wins. A fast failure on one
+// side must never abort the race, and both-fail must surface an error.
+
+function fakeAIResponse(content, delayMs = 0) {
+  return async () => {
+    if (delayMs) await new Promise((r) => setTimeout(r, delayMs));
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => null },
+      json: async () => ({ choices: [{ message: { content } }] }),
+    };
+  };
+}
+function fakeAIError(status) {
+  return async () => ({
+    ok: false,
+    status,
+    headers: { get: () => null },
+    text: async () => 'provider down',
+    json: async () => ({}),
+  });
+}
+
+function saveAIState() {
+  const cfg = require('../src/config');
+  return {
+    ai: { ...cfg.ai },
+    claude: { ...cfg.claude },
+    fetch: global.fetch,
+  };
+}
+function restoreAIState(state) {
+  const cfg = require('../src/config');
+  Object.assign(cfg.ai, state.ai);
+  Object.assign(cfg.claude, state.claude);
+  global.fetch = state.fetch;
+}
+function configureDualProviders() {
+  const cfg = require('../src/config');
+  cfg.ai.baseUrl = 'https://nvidia.test/v1';
+  cfg.ai.apiKey = 'test-primary';
+  cfg.ai.model = 'nvidia/model';
+  cfg.claude.baseUrl = 'https://fable.test';
+  cfg.claude.apiKey = 'test-secondary';
+  cfg.claude.model = 'Fable 5';
+}
+
+test('chatJSON races both providers and returns the fastest successful answer', async () => {
+  const ai = require('../src/services/ai');
+  const state = saveAIState();
+  configureDualProviders();
+  const calls = [];
+  global.fetch = async (url) => {
+    const host = new URL(url).host;
+    calls.push(host);
+    if (host.includes('fable')) return fakeAIResponse('{"winner":"fable"}')();
+    return fakeAIResponse('{"winner":"nvidia"}', 60)();
+  };
+  try {
+    const out = await ai.chatJSON([{ role: 'user', content: 'hi' }], { timeoutMs: 1000 });
+    assert.equal(out.winner, 'fable', 'the faster (secondary) response wins');
+    assert.ok(
+      calls.includes('fable.test') && calls.includes('nvidia.test'),
+      'both providers were fired in parallel'
+    );
+  } finally {
+    restoreAIState(state);
+  }
+});
+
+test('chatJSON falls back to the secondary when the primary provider fails', async () => {
+  const ai = require('../src/services/ai');
+  const state = saveAIState();
+  configureDualProviders();
+  global.fetch = async (url) => {
+    if (new URL(url).host.includes('fable')) return fakeAIResponse('{"winner":"fable"}')();
+    return fakeAIError(500)();
+  };
+  try {
+    const out = await ai.chatJSON([{ role: 'user', content: 'hi' }], { timeoutMs: 1000, maxRetries: 0 });
+    assert.equal(out.winner, 'fable', 'secondary rescues the call when the primary errors');
+  } finally {
+    restoreAIState(state);
+  }
+});
+
+test('chatJSON surfaces the primary error when both providers fail', async () => {
+  const ai = require('../src/services/ai');
+  const state = saveAIState();
+  configureDualProviders();
+  global.fetch = async (url) => {
+    if (new URL(url).host.includes('fable')) return fakeAIError(503)();
+    return fakeAIError(500)();
+  };
+  try {
+    await assert.rejects(
+      () => ai.chatJSON([{ role: 'user', content: 'hi' }], { timeoutMs: 1000, maxRetries: 0 }),
+      /500/,
+      'the primary provider error surfaces when both sides fail'
+    );
+  } finally {
+    restoreAIState(state);
+  }
+});

@@ -39,6 +39,7 @@ const config = {
       .split(',')
       .map((s) => s.trim())
       .filter(Boolean),
+    sendIntervalMs: parseInt(process.env.WHATSAPP_SEND_INTERVAL_MS || '1200', 10),
   },
 
   ai: {
@@ -46,6 +47,17 @@ const config = {
     apiKey: valid(process.env.AI_API_KEY) ? process.env.AI_API_KEY : '',
     model: process.env.AI_MODEL || 'gpt-4o-mini',
     timeoutMs: parseInt(process.env.AI_TIMEOUT_MS || '120000', 10),
+  },
+
+  // Optional second OpenAI-compatible provider. When configured, every AI
+  // call is raced against the primary in `ai.chatJSON` and the first
+  // successful response wins. Leave CLAUDE_API_KEY/CLAUDE_BASE_URL empty to
+  // keep the primary as the sole provider.
+  claude: {
+    baseUrl: (process.env.CLAUDE_BASE_URL || '').replace(/\/$/, ''),
+    apiKey: valid(process.env.CLAUDE_API_KEY) ? process.env.CLAUDE_API_KEY : '',
+    model: process.env.CLAUDE_MODEL || '',
+    timeoutMs: parseInt(process.env.CLAUDE_TIMEOUT_MS || '0', 10),
   },
 
   exam: {

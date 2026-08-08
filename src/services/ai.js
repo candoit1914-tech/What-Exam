@@ -34,13 +34,15 @@ function withHardTimeout(promise, ms) {
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
-async function chatJSON(messages, { temperature = 0.4, maxRetries = 2, timeoutMs = config.ai.timeoutMs, maxTokens = 8192 } = {}) {
-  if (!aiConfigured()) {
-    throw new AIError('AI is not configured. Set AI_API_KEY and AI_BASE_URL in .env');
-  }
-
+/**
+ * POST one chat request to an OpenAI-compatible endpoint and parse the JSON
+ * content from the response. Retries transient failures with backoff; a hard
+ * timeout surfaces immediately (never retried) so a hanging endpoint can never
+ * stall a job forever.
+ */
+async function callEndpoint({ baseUrl, apiKey, model, messages, temperature, maxTokens, timeoutMs, maxRetries }) {
   const body = {
-    model: config.ai.model,
+    model,
     messages,
     temperature,
     max_tokens: maxTokens,
@@ -50,11 +52,11 @@ async function chatJSON(messages, { temperature = 0.4, maxRetries = 2, timeoutMs
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
       const res = await withHardTimeout(
-        fetch(`${config.ai.baseUrl}/chat/completions`, {
+        fetch(`${baseUrl}/chat/completions`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            Authorization: `Bearer ${config.ai.apiKey}`,
+            Authorization: `Bearer ${apiKey}`,
           },
           body: JSON.stringify(body),
         }),
@@ -89,6 +91,48 @@ async function chatJSON(messages, { temperature = 0.4, maxRetries = 2, timeoutMs
     }
   }
   throw lastErr;
+}
+
+/**
+ * Whether a second OpenAI-compatible provider (CLAUDE_*) is configured. When
+ * it is, `chatJSON` races it against the primary and the first successful
+ * response wins, so whichever endpoint answers faster drives the result.
+ */
+function secondaryConfigured() {
+  return !!(config.claude.apiKey && config.claude.baseUrl);
+}
+
+async function chatJSON(messages, { temperature = 0.4, maxRetries = 2, timeoutMs = config.ai.timeoutMs, maxTokens = 8192 } = {}) {
+  if (!aiConfigured()) {
+    throw new AIError('AI is not configured. Set AI_API_KEY and AI_BASE_URL in .env');
+  }
+
+  const common = { messages, temperature, maxRetries, maxTokens, timeoutMs };
+  const primary = () =>
+    callEndpoint({
+      baseUrl: config.ai.baseUrl,
+      apiKey: config.ai.apiKey,
+      model: config.ai.model,
+      ...common,
+    });
+
+  if (!secondaryConfigured()) return primary();
+
+  const secondary = () =>
+    callEndpoint({
+      baseUrl: config.claude.baseUrl,
+      apiKey: config.claude.apiKey,
+      model: config.claude.model || config.ai.model,
+      timeoutMs: config.claude.timeoutMs || timeoutMs,
+      ...common,
+    });
+
+  // First success wins; a fast failure on one side never aborts the race. When
+  // both fail, surface the primary provider's error (the first in the list).
+  return Promise.any([primary(), secondary()]).catch((agg) => {
+    const err = agg && agg.errors ? agg.errors[0] : agg;
+    throw err instanceof Error ? err : new AIError(`Both AI providers failed: ${String(agg && agg.message)}`);
+  });
 }
 
 /**

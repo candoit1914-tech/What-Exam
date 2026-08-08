@@ -489,6 +489,9 @@ function restartSession(session) {
 function friendlyError(err) {
   const msg = (err && (err.message || String(err))) || 'Unknown error';
   const code = err && err.code;
+  if (msg.includes('131056') || code === 131056) {
+    return 'WhatsApp briefly limited how fast this number can be messaged. Wait a few seconds and send your answer again.';
+  }
   if (msg.includes('131026') || code === 131026) {
     return 'No open 24h session for this number. The student must message your WhatsApp number once first, or set WHATSAPP_TEMPLATE_NAME to an approved template for first-contact delivery.';
   }

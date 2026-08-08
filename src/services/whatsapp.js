@@ -3,12 +3,44 @@ const db = require('../db');
 
 const GRAPH = 'https://graph.facebook.com';
 const REQUEST_TIMEOUT_MS = 15000;
-const MAX_ATTEMPTS = 3;
+const MAX_ATTEMPTS = 4;
 
 // WhatsApp rejects text messages longer than 4096 characters. Keep every
 // message comfortably under that cap and split longer bodies into multiple
 // messages with a continuation marker.
 const MAX_TEXT_LENGTH = 4000;
+
+// The (Business Account, Consumer Account) pair rate limit (error 131056)
+// drains on the order of tens of seconds, so it gets a much slower backoff
+// than generic 429/5xx retries. Meta sometimes returns a retry-after header
+// that is preferred when present.
+const PAIR_BACKOFF_MS = [5000, 15000, 30000, 30000];
+const MAX_WAIT_MS = 30000;
+
+// Default gap between consecutive outbound messages to the SAME phone number.
+// A question is delivered as several bubbles back-to-back, and a burst can
+// exhaust the per-pair message window (131056). Serializing per recipient with
+// a small gap keeps every burst under the limit while letting different
+// students proceed in parallel. Tune via WHATSAPP_SEND_INTERVAL_MS.
+const DEFAULT_SEND_INTERVAL_MS = 1200;
+
+// Per-recipient pacing gates: phone -> Promise that resolves MIN interval
+// after that phone's last outbound send settled.
+const pairSlots = new Map();
+
+function pacedSend(phone, task) {
+  const prev = (pairSlots.get(phone) || Promise.resolve()).catch(() => {});
+  const run = prev.then(() => task());
+  const slot = run.finally(() => sleep(config.whatsapp.sendIntervalMs || DEFAULT_SEND_INTERVAL_MS));
+  pairSlots.set(phone, slot);
+  // The gate promise may reject (a failed send propagates through `run`). A
+  // plain .then(f, f) both handles that rejection and cleans the map entry.
+  slot.then(
+    () => { if (pairSlots.get(phone) === slot) pairSlots.delete(phone); },
+    () => { if (pairSlots.get(phone) === slot) pairSlots.delete(phone); }
+  );
+  return run;
+}
 
 function splitTextChunks(text, maxLen = MAX_TEXT_LENGTH) {
   const t = String(text || '');
@@ -51,9 +83,9 @@ function backoff(attempt) {
 
 /**
  * Low-level POST to the Meta Graph API with a hard timeout, retry on
- * definitive failures (429 rate limit / 5xx), and exponential backoff.
- * Timeouts are NOT retried — the request may have been delivered server-side
- * and retrying could double-send a message.
+ * definitive failures (429 rate limit, the 131056 pair rate limit, 5xx), and
+ * exponential backoff. Timeouts are NOT retried — the request may have been
+ * delivered server-side and retrying could double-send a message.
  */
 async function request(url, { body, headers = {}, timeoutMs = REQUEST_TIMEOUT_MS, attempts = MAX_ATTEMPTS } = {}) {
   if (!waConfigured()) throw new Error('WhatsApp is not configured. Set WHATSAPP_* vars in .env');
@@ -88,13 +120,21 @@ async function request(url, { body, headers = {}, timeoutMs = REQUEST_TIMEOUT_MS
     const data = await res.json().catch(() => ({}));
     const status = res.status;
     const code = data?.error?.code;
+    const pairLimited = code === 131056;
     const rateLimited = status === 429 || code === 130429 || code === 131029;
-    const retriable = status >= 500 || rateLimited;
+    const retriable = status >= 500 || rateLimited || pairLimited;
 
     if (retriable && attempt < attempts) {
       const retryAfter = parseInt(res.headers.get('retry-after'), 10);
-      const waitMs = rateLimited && retryAfter ? retryAfter * 1000 : backoff(attempt);
-      await sleep(Math.min(waitMs, 10000));
+      const hasRetryAfter = Number.isFinite(retryAfter) && retryAfter >= 0;
+      const waitMs = pairLimited
+        ? hasRetryAfter
+          ? retryAfter * 1000
+          : PAIR_BACKOFF_MS[attempt - 1] || PAIR_BACKOFF_MS[PAIR_BACKOFF_MS.length - 1]
+        : rateLimited && hasRetryAfter
+          ? retryAfter * 1000
+          : backoff(attempt);
+      await sleep(Math.min(waitMs, MAX_WAIT_MS));
       continue;
     }
 
@@ -108,10 +148,13 @@ async function request(url, { body, headers = {}, timeoutMs = REQUEST_TIMEOUT_MS
 }
 
 async function api(method, body) {
-  return request(`${GRAPH}/v21.0/${config.whatsapp.phoneNumberId}/messages`, {
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
+  const task = () =>
+    request(`${GRAPH}/v21.0/${config.whatsapp.phoneNumberId}/messages`, {
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  const phone = body && body.to ? String(body.to) : '';
+  return phone ? pacedSend(phone, task) : task();
 }
 
 function logOutbound(recipient, messageId, type) {
