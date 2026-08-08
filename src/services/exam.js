@@ -275,23 +275,37 @@ function splitSectionMeta(text) {
   };
 }
 
+const SECTION_DIVIDER = '━━━━━━━━━━━━━━━━━━━━';
+
+function formatSectionHeader(type) {
+  return `*${type}*\n\n${SECTION_DIVIDER}`;
+}
+
+function formatSectionInstructions(instructions) {
+  return `*Instructions*\n\n${instructions}`;
+}
+
 /**
- * The chat bubbles to send for one question: a bold type banner (once per
- * type, before the first of its kind), the cleaned passage/instruction (once,
- * before the first question that uses it), then the question bubble. "Already
- * sent" is derived from the questions that precede this one in the sequence,
- * so resume/nudge re-sends never duplicate banners or passages.
+ * The chat bubbles to send for one question: a section header (once per type,
+ * before the first of its kind), the section instructions and reading passage
+ * as separate bubbles (once, before the first question that uses them), then
+ * the question bubble. "Already sent" is derived from the questions that
+ * precede this one in the sequence, so resume/nudge re-sends never duplicate
+ * headers, instructions, or passages.
  */
 function buildQuestionBubbles(exam, question, sequence, index) {
   const bubbles = [];
   const type = question.type === 'theory' ? 'THEORY' : 'OBJECTIVE';
   const prev = index > 0 ? sequence.slice(0, index) : [];
-  if (!prev.some((q) => q.type === question.type)) {
-    bubbles.push(`*${type}*`);
-  }
+  const firstOfType = !prev.some((q) => q.type === question.type);
+  if (firstOfType) bubbles.push(formatSectionHeader(type));
+
   const clean = (p) => stripPaperOnlyInstructions(stripSourceWatermarks(p)).trim();
-  const passage = clean(question.passage);
-  if (passage && !prev.some((q) => clean(q.passage) === passage)) {
+  const { instructions, passage } = splitSectionMeta(clean(question.passage));
+  if (firstOfType && instructions) {
+    bubbles.push(formatSectionInstructions(instructions));
+  }
+  if (passage && !prev.some((q) => splitSectionMeta(clean(q.passage)).passage === passage)) {
     bubbles.push(passage);
   }
   bubbles.push(formatQuestion(exam, question));

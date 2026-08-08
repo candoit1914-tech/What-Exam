@@ -235,35 +235,46 @@ test('sessionQuestionSequence uses template order when no pool is drawn', () => 
   assert.ok(Array.isArray(seq), 'returns an array');
 });
 
-test('buildQuestionBubbles sends OBJECTIVE banner once then each question', () => {
+const SECTION_DIVIDER = '━━━━━━━━━━━━━━━━━━━━';
+
+test('buildQuestionBubbles sends OBJECTIVE header once then each question', () => {
   const q1 = { id: 1, q_order: 1, type: 'objective', text: 'Q1', passage: '' };
   const q2 = { id: 2, q_order: 2, type: 'objective', text: 'Q2', passage: '' };
   const seq = [q1, q2];
-  assert.deepEqual(exam.buildQuestionBubbles({}, q1, seq, 0), ['*OBJECTIVE*', '*QUESTION 1*\n\nQ1']);
+  assert.deepEqual(exam.buildQuestionBubbles({}, q1, seq, 0), [`*OBJECTIVE*\n\n${SECTION_DIVIDER}`, '*QUESTION 1*\n\nQ1']);
   assert.deepEqual(exam.buildQuestionBubbles({}, q2, seq, 1), ['*QUESTION 2*\n\nQ2']);
 });
 
-test('buildQuestionBubbles sends THEORY banner once before theory questions', () => {
+test('buildQuestionBubbles sends THEORY header once before theory questions', () => {
   const q1 = { id: 1, q_order: 1, type: 'objective', text: 'Q1', passage: '' };
   const q2 = { id: 2, q_order: 2, type: 'theory', text: 'Q2', passage: '' };
   const q3 = { id: 3, q_order: 3, type: 'theory', text: 'Q3', passage: '' };
   const seq = [q1, q2, q3];
-  assert.deepEqual(exam.buildQuestionBubbles({}, q2, seq, 1), ['*THEORY*', '*QUESTION 2*\n\nQ2']);
+  assert.deepEqual(exam.buildQuestionBubbles({}, q2, seq, 1), [`*THEORY*\n\n${SECTION_DIVIDER}`, '*QUESTION 2*\n\nQ2']);
   assert.deepEqual(exam.buildQuestionBubbles({}, q3, seq, 2), ['*QUESTION 3*\n\nQ3']);
 });
 
-test('buildQuestionBubbles sends a shared passage once before the first question that uses it', () => {
+test('buildQuestionBubbles emits header, instructions, passage, then question', () => {
   const passage = 'Read the passage.\nAma lost her pencil on the way to school.';
   const q1 = { id: 1, q_order: 1, type: 'objective', text: 'Q1', passage };
   const q2 = { id: 2, q_order: 2, type: 'objective', text: 'Q2', passage };
   const seq = [q1, q2];
-  assert.deepEqual(exam.buildQuestionBubbles({}, q1, seq, 0), ['*OBJECTIVE*', passage, '*QUESTION 1*\n\nQ1']);
+  assert.deepEqual(exam.buildQuestionBubbles({}, q1, seq, 0), [
+    `*OBJECTIVE*\n\n${SECTION_DIVIDER}`,
+    '*Instructions*\n\nRead the passage.',
+    'Ama lost her pencil on the way to school.',
+    '*QUESTION 1*\n\nQ1',
+  ]);
   assert.deepEqual(exam.buildQuestionBubbles({}, q2, seq, 1), ['*QUESTION 2*\n\nQ2']);
 });
 
 test('buildQuestionBubbles treats an unknown index as the first question', () => {
   const q = { id: 7, q_order: 3, type: 'objective', text: 'Q3', passage: 'Read the passage.' };
-  assert.deepEqual(exam.buildQuestionBubbles({}, q, [], -1), ['*OBJECTIVE*', 'Read the passage.', '*QUESTION 3*\n\nQ3']);
+  assert.deepEqual(exam.buildQuestionBubbles({}, q, [], -1), [
+    `*OBJECTIVE*\n\n${SECTION_DIVIDER}`,
+    '*Instructions*\n\nRead the passage.',
+    '*QUESTION 3*\n\nQ3',
+  ]);
 });
 
 test('sessionQuestionSequence resolves drawn pool order and ids match for wiring', () => {
@@ -455,8 +466,9 @@ test('buildQuestionBubbles does not duplicate a shared instruction-laden passage
     ...exam.buildQuestionBubbles({}, q1, seq, 0),
     ...exam.buildQuestionBubbles({}, q2, seq, 1),
   ];
-  assert.equal(out.filter((b) => b === passage).length, 1, 'passage emitted exactly once across both questions');
-  assert.equal(out.filter((b) => b.startsWith('*THEORY*')).length, 1, 'banner emitted exactly once');
+  assert.equal(out.filter((b) => b === 'The farmers rely on irrigation.').length, 1, 'passage body emitted exactly once across both questions');
+  assert.equal(out.filter((b) => b === '*Instructions*\n\nRead the following passage and answer questions 1 to 5.').length, 1, 'instructions emitted exactly once');
+  assert.equal(out.filter((b) => b.startsWith('*THEORY*')).length, 1, 'header emitted exactly once');
 });
 
 test('EXAMINER_PERSONA is a real persona and examinerPrompt prepends it', () => {
