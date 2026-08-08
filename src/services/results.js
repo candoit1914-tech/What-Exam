@@ -197,7 +197,7 @@ function reportHTML(sessionId) {
             ${a.needs_review ? '<span class="chip chip-review">Needs review</span>' : ''}
             ${Number(a.ai_detected) === 1 ? '<span class="chip chip-cheat">AI-copied — 0 marks</span>' : ''}
           </div>
-          <details class="model">
+          <details class="model" open>
             <summary>Model answer &amp; key points</summary>
             <p class="model-text">${esc(sch?.model_answer || '(not available)')}</p>
             ${keyPts.length ? `<ul class="keypoints">${keyPts.map((k) => `<li>${esc(k)}</li>`).join('')}</ul>` : ''}

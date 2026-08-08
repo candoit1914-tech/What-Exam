@@ -112,15 +112,22 @@ async function startJob(jobId, buffer) {
     const text = await pdf.extractText(buffer);
     updateJob(jobId, { stage: 'Parsing questions…', progress: 10 });
 
-    const parsed = await ai.extractQuestionsFromText(text, (done, total) => {
-      const pct = 10 + Math.round((done / Math.max(1, total)) * 45);
-      updateJob(jobId, { stage: `Parsing questions… (${done}/${total})`, progress: pct });
-    });
+    let blockWarning = '';
+    const parsed = await ai.extractQuestionsFromText(
+      text,
+      (done, total) => {
+        const pct = 10 + Math.round((done / Math.max(1, total)) * 45);
+        updateJob(jobId, { stage: `Parsing questions… (${done}/${total})`, progress: pct });
+      },
+      (warning) => { blockWarning = warning; }
+    );
     if (!parsed.length) {
       throw new Error('No questions could be parsed from this PDF. Is the document text-based?');
     }
 
-    const warning = ai.completenessWarning(ai.estimateQuestionCount(text), parsed);
+    const warning = [ai.completenessWarning(ai.estimateQuestionCount(text), parsed), blockWarning]
+      .filter(Boolean)
+      .join(' ');
     if (warning) updateJob(jobId, { warning });
 
     // Objective questions missing an answer key are sent to AI for answers.
