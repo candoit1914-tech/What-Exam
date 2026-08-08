@@ -666,13 +666,24 @@ function schemeHTML(q, id) {
   if (q.type === 'objective') {
     summary = `<p><b>Correct answer:</b> ${esc(scheme?.correct_answer || q.correct_answer || '—')} &nbsp; <b>Marks:</b> ${q.marks}</p>`;
   } else if (scheme) {
-    summary = `
-      <p><b>Model answer:</b> ${esc(scheme.model_answer || '(empty)')}</p>
-      <p><b>Key points:</b></p><ul>${(scheme.key_points || []).map((k) => `<li>${esc(k)}</li>`).join('') || '<li>—</li>'}</ul>
-      <p><b>Rubric:</b></p>
+    const parts = [];
+    if (scheme.model_answer && String(scheme.model_answer).trim()) {
+      parts.push(`<p><b>Model answer:</b> ${esc(scheme.model_answer)}</p>`);
+    }
+    const points = scheme.key_points || [];
+    if (points.length) {
+      parts.push(`<p><b>Key points:</b></p><ul>${points.map((k) => `<li>${esc(k)}</li>`).join('')}</ul>`);
+    }
+    const rubric = scheme.rubric || [];
+    if (rubric.length) {
+      parts.push(`<p><b>Rubric:</b></p>
       <table><thead><tr><th>Point</th><th>Marks</th><th>Explanation</th></tr></thead>
-      <tbody>${(scheme.rubric || []).map((r) => `<tr><td>${esc(r.point)}</td><td>${r.marks}</td><td>${esc(r.explanation || '')}</td></tr>`).join('') || '<tr><td colspan="3" class="muted">—</td></tr>'}</tbody></table>
-      <p class="muted">Presentation: ${scheme.presentation_marks || 0} · Grammar: ${scheme.grammar_marks || 0}</p>`;
+      <tbody>${rubric.map((r) => `<tr><td>${esc(r.point)}</td><td>${r.marks}</td><td>${esc(r.explanation || '')}</td></tr>`).join('')}</tbody></table>`);
+    }
+    if (Number(scheme.presentation_marks) || Number(scheme.grammar_marks)) {
+      parts.push(`<p class="muted">Presentation: ${scheme.presentation_marks || 0} · Grammar: ${scheme.grammar_marks || 0}</p>`);
+    }
+    summary = parts.join('');
   }
   return `<div class="qitem">
     <div class="qhead">
@@ -682,7 +693,9 @@ function schemeHTML(q, id) {
         <button class="small ghost" onclick="editScheme(${id}, ${q.id}, ${q.type === 'theory'})">Edit JSON</button>
       </div>
     </div>
-    <div class="scheme">${summary || '<span class="muted">No scheme yet.</span>'}</div>
+    ${summary
+      ? `<div class="scheme">${summary}</div>`
+      : q.type === 'theory' ? '' : '<div class="scheme"><span class="muted">No scheme yet.</span></div>'}
   </div>`;
 }
 
