@@ -689,3 +689,36 @@ test('splitSectionMeta handles empty input', () => {
   assert.deepEqual(exam.splitSectionMeta(''), { instructions: '', passage: '' });
   assert.deepEqual(exam.splitSectionMeta('   '), { instructions: '', passage: '' });
 });
+
+test('drawSessionQuestions presents the pool in PDF (insertion) order, not shuffled', () => {
+  const db = require('../src/db');
+  db.exec('BEGIN');
+  try {
+    const examId = db
+      .prepare("INSERT INTO exams (title, subject, duration_minutes) VALUES ('__order_exam__','Test',30)")
+      .run().lastInsertRowid;
+    for (let i = 1; i <= 3; i++) {
+      db.prepare("INSERT INTO questions (exam_id, q_order, type, text, marks) VALUES (?,?,?,?,?)")
+        .run(examId, i, 'objective', 'TQ' + i, 1);
+    }
+    const ids = [];
+    for (let i = 1; i <= 3; i++) {
+      ids.push(db.prepare("INSERT INTO question_pool (exam_id, type, text) VALUES (?,'objective',?)")
+        .run(examId, 'PQ' + i).lastInsertRowid);
+    }
+    const studentId = db
+      .prepare('INSERT INTO students (phone) VALUES (?)')
+      .run('__order_phone__' + Date.now()).lastInsertRowid;
+    const sessionId = db
+      .prepare('INSERT INTO sessions (exam_id, student_id) VALUES (?,?)')
+      .run(examId, studentId).lastInsertRowid;
+
+    exam.drawSessionQuestions(sessionId, examId);
+    const drawn = db
+      .prepare('SELECT q_order, question_id FROM session_questions WHERE session_id = ? ORDER BY q_order')
+      .all(sessionId);
+    assert.deepEqual(drawn.map((d) => d.question_id), ids, 'presented in insertion (PDF) order');
+  } finally {
+    db.exec('ROLLBACK');
+  }
+});

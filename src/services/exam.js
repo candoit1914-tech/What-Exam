@@ -67,20 +67,11 @@ function createSession(examId, studentId) {
   return session;
 }
 
-function shuffle(arr) {
-  const a = arr.slice();
-  for (let i = a.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [a[i], a[j]] = [a[j], a[i]];
-  }
-  return a;
-}
-
 /**
- * Assign a fresh random question set for an attempt. When the exam has a
- * question pool, each session draws its own subset in a random order, so
- * different students (and retakes) see different questions. If the pool is
- * smaller than the exam's question count, missing template questions are
+ * Assign a fresh question set for an attempt. When the exam has a question
+ * pool, each session draws it in the uploaded PDF order (pool rows are
+ * inserted in that order). If the pool is smaller than the exam's question
+ * count, missing template questions are
  * COPIED into the pool first (with their marking scheme) so every session
  * presents the full exam. Copies keep session_questions.question_id pointing
  * at question_pool rows, which its FK constraint requires.
@@ -90,8 +81,10 @@ function drawSessionQuestions(sessionId, examId) {
   if (!n) return 0;
   const pool = db.prepare('SELECT id, text FROM question_pool WHERE exam_id = ?').all(examId);
   if (pool.length < n) topUpPool(examId, pool, n);
-  const ids = db.prepare('SELECT id FROM question_pool WHERE exam_id = ?').all(examId);
-  const chosen = shuffle(ids).slice(0, n);
+  // Present the paper in the uploaded PDF order (pool rows are inserted in that
+  // order), never shuffled.
+  const ids = db.prepare('SELECT id FROM question_pool WHERE exam_id = ? ORDER BY id').all(examId);
+  const chosen = ids.slice(0, n);
   const ins = db.prepare(
     'INSERT INTO session_questions (session_id, question_id, q_order) VALUES (?,?,?)'
   );
