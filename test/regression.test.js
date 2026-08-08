@@ -568,6 +568,44 @@ test('objective answer stays graded at 0 when the AI cannot determine a key', as
   }
 });
 
+test('processAnswer advances a pool-drawn session without throwing on the next question', async () => {
+  const db = require('../src/db');
+  const wa = require('../src/services/whatsapp');
+  db.exec('BEGIN');
+  try {
+    const examId = db
+      .prepare("INSERT INTO exams (title, subject, duration_minutes, status) VALUES (?,?,?,'published')")
+      .run('__advance_pool_exam__', 'Test', 30).lastInsertRowid;
+    const opts = JSON.stringify([
+      { key: 'A', text: 'Kumasi' },
+      { key: 'B', text: 'Accra' },
+      { key: 'C', text: 'Tamale' },
+      { key: 'D', text: 'Cape Coast' },
+    ]);
+    db.prepare("INSERT INTO questions (exam_id, q_order, type, text, options, correct_answer, marks) VALUES (?,1,'objective','Q1?',?,?,1)").run(examId, opts, 'B');
+    db.prepare("INSERT INTO questions (exam_id, q_order, type, text, options, correct_answer, marks) VALUES (?,2,'objective','Q2?',?,?,1)").run(examId, opts, 'C');
+
+    const studentId = db
+      .prepare('INSERT INTO students (phone) VALUES (?)')
+      .run('__advance_pool_phone__' + Date.now()).lastInsertRowid;
+    const session = exam.createSession(examId, studentId);
+
+    const real = wa.sendText;
+    wa.sendText = async () => ({ ok: true });
+    try {
+      // Regression: answering Q1 threw "Provided value cannot be bound to
+      // SQLite parameter 1" because the next pool question had no q_order.
+      await exam.processAnswer(session, { id: studentId, phone: '000' }, 'B', {});
+      const updated = db.prepare('SELECT current_q_order FROM sessions WHERE id = ?').get(session.id);
+      assert.equal(updated.current_q_order, 2, 'advances to question 2');
+    } finally {
+      wa.sendText = real;
+    }
+  } finally {
+    db.exec('ROLLBACK');
+  }
+});
+
 test('markAllPendingTheory records 0 marks, needs_review=0 after a final marking failure', async () => {
   const db = require('../src/db');
   db.exec('BEGIN');

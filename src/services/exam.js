@@ -163,7 +163,10 @@ function sessionQuestionSequence(session) {
     return drawn
       .map((m) => {
         const row = get.get(m.question_id);
-        if (row) row._pool = true;
+        if (row) {
+          row._pool = true;
+          row.q_order = m.q_order;
+        }
         return row;
       })
       .filter(Boolean);
