@@ -333,3 +333,41 @@ test('nextInSequence advances across a deleted-question gap in q_order', () => {
     db.exec('ROLLBACK');
   }
 });
+
+test('drawSessionQuestions tops up a small pool with template questions to reach the exam count', () => {
+  const db = require('../src/db');
+  db.exec('BEGIN');
+  try {
+    const examId = db
+      .prepare('INSERT INTO exams (title, subject, duration_minutes) VALUES (?,?,?)')
+      .run('__topup_exam__', 'Test', 30).lastInsertRowid;
+    for (let i = 1; i <= 5; i++) {
+      db.prepare("INSERT INTO questions (exam_id, q_order, type, text, marks) VALUES (?,?,?,?,1)").run(examId, i, 'objective', 'T' + i);
+    }
+    db.prepare("INSERT INTO question_pool (exam_id, type, text) VALUES (?,?,?)").run(examId, 'objective', 'P1');
+    db.prepare("INSERT INTO question_pool (exam_id, type, text) VALUES (?,?,?)").run(examId, 'objective', 'P2');
+    const studentId = db
+      .prepare('INSERT INTO students (phone) VALUES (?)')
+      .run('__topup_phone__' + Date.now()).lastInsertRowid;
+    const sessionId = db
+      .prepare('INSERT INTO sessions (exam_id, student_id) VALUES (?,?)')
+      .run(examId, studentId).lastInsertRowid;
+
+    const drawn = exam.drawSessionQuestions(sessionId, examId);
+    assert.equal(drawn, 5, 'session presents all 5 questions even though the pool started with 2');
+
+    const rows = db.prepare('SELECT q_order, question_id FROM session_questions WHERE session_id = ? ORDER BY q_order').all(sessionId);
+    assert.equal(rows.length, 5, 'five drawn rows are stored');
+    const orders = rows.map((r) => r.q_order);
+    assert.deepEqual(orders, [1, 2, 3, 4, 5], 'session order is contiguous');
+
+    for (const r of rows) {
+      const pooled = db.prepare('SELECT * FROM question_pool WHERE id = ?').get(r.question_id);
+      assert.ok(pooled, 'every drawn question_id resolves to a question_pool row (FK-safe)');
+    }
+    const texts = rows.map((r) => db.prepare('SELECT text FROM question_pool WHERE id = ?').get(r.question_id).text);
+    assert.ok(texts.includes('T3'), 'template question T3 was copied into the pool');
+  } finally {
+    db.exec('ROLLBACK');
+  }
+});

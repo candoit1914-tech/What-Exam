@@ -76,19 +76,48 @@ function shuffle(arr) {
 /**
  * Assign a fresh random question set for an attempt. When the exam has a
  * question pool, each session draws its own subset in a random order, so
- * different students (and retakes) see different questions.
+ * different students (and retakes) see different questions. If the pool is
+ * smaller than the exam's question count, missing template questions are
+ * COPIED into the pool first (with their marking scheme) so every session
+ * presents the full exam. Copies keep session_questions.question_id pointing
+ * at question_pool rows, which its FK constraint requires.
  */
 function drawSessionQuestions(sessionId, examId) {
   const n = db.prepare('SELECT COUNT(*) c FROM questions WHERE exam_id = ?').get(examId).c;
   if (!n) return 0;
-  const pool = db.prepare('SELECT id FROM question_pool WHERE exam_id = ?').all(examId);
-  if (!pool.length) return 0;
-  const chosen = shuffle(pool).slice(0, n);
+  const pool = db.prepare('SELECT id, text FROM question_pool WHERE exam_id = ?').all(examId);
+  if (pool.length < n) topUpPool(examId, pool, n);
+  const ids = db.prepare('SELECT id FROM question_pool WHERE exam_id = ?').all(examId);
+  const chosen = shuffle(ids).slice(0, n);
   const ins = db.prepare(
     'INSERT INTO session_questions (session_id, question_id, q_order) VALUES (?,?,?)'
   );
   chosen.forEach((p, i) => ins.run(sessionId, p.id, i + 1));
   return chosen.length;
+}
+
+/** Copy template questions into the pool until it holds at least `target` rows. */
+function topUpPool(examId, currentPool, target) {
+  const inPool = new Set(currentPool.map((r) => String(r.text || '').trim()));
+  const templates = db.prepare('SELECT * FROM questions WHERE exam_id = ? ORDER BY q_order').all(examId);
+  const insertPool = db.prepare(
+    `INSERT INTO question_pool (exam_id, type, text, passage, options, correct_answer, marks, difficulty, learning_objective, explanation, scheme_json, source)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`
+  );
+  let added = 0;
+  for (const t of templates) {
+    if (currentPool.length + added >= target) break;
+    const text = String(t.text || '').trim();
+    if (inPool.has(text)) continue; // already represented in the pool
+    const scheme = db.prepare('SELECT scheme FROM marking_schemes WHERE question_id = ?').get(t.id);
+    insertPool.run(
+      examId, t.type, t.text, t.passage || '', t.options || null, t.correct_answer || null,
+      t.marks, t.difficulty || 'medium', t.learning_objective || '', t.explanation || '',
+      scheme ? scheme.scheme : '', t.source || 'manual'
+    );
+    inPool.add(text);
+    added++;
+  }
 }
 
 /**
