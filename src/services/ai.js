@@ -164,7 +164,9 @@ const BULK_TIMEOUT_MS = 5 * 60 * 1000;
 
 // PDF/paper extraction runs in small question-aligned blocks so every AI call
 // stays fast on slow endpoints. Each block generates at most BLOCK_MAX_TOKENS
-// of output; the cap also keeps a single rambling block from burning the timeout.
+// of output; the cap also keeps a single rambling block from burning the timeout,
+// and is set high enough that theory model answers (rubric, key points, model
+// answer) fit inside one block and are not truncated.
 // Blocks are kept SMALL on purpose: a huge block forces a slow (e.g. 100B+)
 // model to generate a very long JSON payload, which can take minutes and hang
 // the whole import. Small blocks finish quickly even on slow endpoints.
@@ -173,7 +175,7 @@ const BLOCK_MAX_CHARS = 3500;
 // Blocks run a few at a time: enough parallelism to collapse a long paper's
 // wall-clock time, capped so a flaky shared endpoint is not flooded.
 const BLOCK_CONCURRENCY = 4;
-const BLOCK_MAX_TOKENS = 3000;
+const BLOCK_MAX_TOKENS = 6000;
 // A single extraction block runs on its own clock with a couple of retries
 // (flaky shared endpoints drop requests under concurrency). A block that still
 // fails is SKIPPED — never fails the whole paper — so this only bounds how
@@ -372,7 +374,9 @@ function textSimilarity(a, b) {
  * exceeds the bulk timeout on slow models (e.g. huge 100B+ endpoints), which
  * is what made PDF uploads time out. Small blocks keep every call fast.
  */
-async function extractQuestionsFromText(rawText, onProgress) {
+async function extractQuestionsFromText(rawText, onProgress, onWarning) {
+  // Read the export so tests can stub it.
+  const chatJSON = module.exports.chatJSON;
   const text = String(rawText || '').trim();
   if (!text) return [];
 
@@ -467,19 +471,17 @@ Rules:
   });
 
   let completed = 0;
-  // A single block runs on its own shorter clock with a single retry. If it
-  // still fails (timeout, HTTP error, bad JSON), the block is SKIPPED — the
-  // paper is saved with the blocks that did succeed instead of failing the
-  // whole import on one stubborn block.
-  const tasks = blockPrompts.map(({ block, shared }) => async () => {
-    completed++;
-    if (onProgress) onProgress(completed, blocks.length);
+  // A single block runs on its own shorter clock with a couple of retries. If
+  // it still fails (timeout, HTTP error, bad JSON) the block is re-run
+  // serially after the wave (Task: flaky shared endpoints usually succeed once
+  // they are no longer flooded); only then is it dropped and reported.
+  const runBlock = async (bp) => {
     for (let attempt = 0; attempt <= BLOCK_RETRIES; attempt++) {
       try {
         return await chatJSON(
           [
             { role: 'system', content: system },
-            { role: 'user', content: user(block, shared) },
+            { role: 'user', content: user(bp.block, bp.shared) },
           ],
           // Internal retries are disabled: the block wrapper owns retries, and
           // the hard timeout guarantees a stuck fetch cannot stall the import.
@@ -496,9 +498,30 @@ Rules:
       }
     }
     return null;
+  };
+
+  const tasks = blockPrompts.map((bp) => async () => {
+    completed++;
+    if (onProgress) onProgress(completed, blocks.length);
+    return runBlock(bp);
   });
 
   const settled = await mapLimit(tasks, BLOCK_CONCURRENCY, (run) => run());
+
+  // Re-run every failed block serially (concurrency 1). This recovers most
+  // transient failures and is what stops a whole theory section disappearing.
+  const failed = [];
+  for (let i = 0; i < settled.length; i++) if (!settled[i]) failed.push(i);
+  if (failed.length) {
+    const rerun = await mapLimit(failed.map((i) => blockPrompts[i]), 1, runBlock);
+    for (let k = 0; k < rerun.length; k++) if (rerun[k]) settled[failed[k]] = rerun[k];
+    const stillFailed = failed.filter((_, k) => !rerun[k]);
+    if (stillFailed.length && onWarning) {
+      onWarning(
+        `${stillFailed.length} question block(s) could not be parsed — some questions may be missing. Retry the upload to recover them.`
+      );
+    }
+  }
 
   const seen = new Set();
   const all = [];

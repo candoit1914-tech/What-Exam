@@ -742,3 +742,35 @@ test('splitTextChunks splits a single over-long line', () => {
   assert.ok(chunks.length >= 3);
   for (const c of chunks) assert.ok(c.length <= 4000);
 });
+
+test('extractQuestionsFromText serially retries a block that failed in the wave', async () => {
+  const orig = ai.chatJSON;
+  const calls = { n: 0 };
+  ai.chatJSON = async () => {
+    calls.n++;
+    if (calls.n <= 4) throw new Error('fetch failed');
+    return { questions: [{ type: 'objective', text: 'Retry Q', options: ['A. X', 'B. Y'], correct_answer: 'A', correct_index: 0 }] };
+  };
+  try {
+    const out = await ai.extractQuestionsFromText('1. Retry Q?\nA. X\nB. Y');
+    assert.equal(out.length, 1, 'question survives the failed wave via the serial re-run');
+    assert.equal(out[0].text, 'Retry Q');
+    assert.ok(calls.n >= 5, 'wave retries exhausted before the serial re-run succeeded');
+  } finally {
+    ai.chatJSON = orig;
+  }
+});
+
+test('extractQuestionsFromText warns when a block still fails after the serial retry', async () => {
+  const orig = ai.chatJSON;
+  ai.chatJSON = async () => { throw new Error('fetch failed'); };
+  const warnings = [];
+  try {
+    const out = await ai.extractQuestionsFromText('1. Retry Q?\nA. X\nB. Y', null, (w) => warnings.push(w));
+    assert.equal(out.length, 0, 'no questions parsed');
+    assert.equal(warnings.length, 1, 'warning fired once');
+    assert.match(warnings[0], /could not be parsed/);
+  } finally {
+    ai.chatJSON = orig;
+  }
+});
