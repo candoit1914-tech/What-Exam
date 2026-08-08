@@ -644,3 +644,36 @@ test('markAllPendingTheory records 0 marks, needs_review=0 after a final marking
     db.exec('ROLLBACK');
   }
 });
+
+test('splitSectionMeta pulls leading instruction lines out of a passage', () => {
+  const r = exam.splitSectionMeta(
+    'Answer ONE question in this section.\n' +
+    'Your answer should be between 250 and 300 words.\n' +
+    'Write about the importance of education.'
+  );
+  assert.equal(
+    r.instructions,
+    'Answer ONE question in this section.\nYour answer should be between 250 and 300 words.\nWrite about the importance of education.'
+  );
+  assert.equal(r.passage, '');
+});
+
+test('splitSectionMeta keeps comprehension prose in passage, not instructions', () => {
+  const r = exam.splitSectionMeta(
+    'Read the following passage carefully and answer questions 1 to 5.\n' +
+    'The farmers of the valley rely on irrigation channels that carry water from the mountain.\n' +
+    'Every dry season the council dredges the channels so the fields stay productive.'
+  );
+  assert.match(r.instructions, /^Read the following passage carefully/);
+  assert.match(r.passage, /^The farmers of the valley/);
+  assert.match(r.passage, /fields stay productive/);
+});
+
+test('splitSectionMeta returns no instructions when none lead the text', () => {
+  assert.deepEqual(exam.splitSectionMeta('What is the capital of Ghana?'), { instructions: '', passage: 'What is the capital of Ghana?' });
+});
+
+test('splitSectionMeta handles empty input', () => {
+  assert.deepEqual(exam.splitSectionMeta(''), { instructions: '', passage: '' });
+  assert.deepEqual(exam.splitSectionMeta('   '), { instructions: '', passage: '' });
+});

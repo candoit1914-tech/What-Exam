@@ -243,6 +243,38 @@ function stripPaperOnlyInstructions(text) {
     .join('\n');
 }
 
+// Section instructions live in the first question's passage field. Pull the
+// leading instruction-like lines ("Read the passage…", "Answer ONE question…")
+// into their own bubble so they are not jammed against the header, and leave
+// the reading passage itself separate.
+const SECTION_INSTRUCTION = [
+  /^read\b/i,
+  /between\s+\d+\s+and\s+\d+\s+words/i,
+  /question(s)?\s+(\d+\s*(-|to)\s+)?\d+/i,
+  /in\s+this\s+section/i,
+];
+
+function isInstructionLine(line) {
+  return INSTRUCTION_START.test(line) || INSTRUCTION_PHRASE.test(line) ||
+    SECTION_INSTRUCTION.some((re) => re.test(line));
+}
+
+function splitSectionMeta(text) {
+  const lines = String(text || '')
+    .split(/\n+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const instructions = [];
+  for (const line of lines) {
+    if (isInstructionLine(line)) instructions.push(line);
+    else break; // real prose starts here; never strip mid-passage
+  }
+  return {
+    instructions: instructions.join('\n'),
+    passage: lines.slice(instructions.length).join('\n'),
+  };
+}
+
 /**
  * The chat bubbles to send for one question: a bold type banner (once per
  * type, before the first of its kind), the cleaned passage/instruction (once,
@@ -895,4 +927,5 @@ module.exports = {
   formatQuestion,
   buildQuestionBubbles,
   stripPaperOnlyInstructions,
+  splitSectionMeta,
 };
