@@ -5,6 +5,38 @@ const GRAPH = 'https://graph.facebook.com';
 const REQUEST_TIMEOUT_MS = 15000;
 const MAX_ATTEMPTS = 3;
 
+// WhatsApp rejects text messages longer than 4096 characters. Keep every
+// message comfortably under that cap and split longer bodies into multiple
+// messages with a continuation marker.
+const MAX_TEXT_LENGTH = 4000;
+
+function splitTextChunks(text, maxLen = MAX_TEXT_LENGTH) {
+  const t = String(text || '');
+  if (t.length <= maxLen) return [t];
+  const hard = (s) => {
+    const parts = [];
+    while (s.length > maxLen) { parts.push(s.slice(0, maxLen)); s = s.slice(maxLen); }
+    if (s) parts.push(s);
+    return parts;
+  };
+  const chunks = [];
+  let cur = '';
+  for (const line of t.split('\n')) {
+    for (const piece of hard(line)) {
+      if (cur && cur.length + 1 + piece.length > maxLen) { chunks.push(cur); cur = ''; }
+      cur = cur ? cur + '\n' + piece : piece;
+      if (cur.length >= maxLen) { chunks.push(cur); cur = ''; }
+    }
+  }
+  if (cur) chunks.push(cur);
+  if (chunks.length === 0) chunks.push('');
+  const marker = ' …';
+  return chunks.map((c, i) => {
+    if (i === chunks.length - 1) return c;
+    return c.length + marker.length <= maxLen ? c + marker : c.slice(0, maxLen - marker.length) + marker;
+  });
+}
+
 function waConfigured() {
   return !!(config.whatsapp.accessToken && config.whatsapp.phoneNumberId);
 }
@@ -89,13 +121,16 @@ function logOutbound(recipient, messageId, type) {
 }
 
 async function sendText(to, text) {
-  const data = await api('messages', {
-    messaging_product: 'whatsapp',
-    to,
-    type: 'text',
-    text: { body: text },
-  });
-  logOutbound(to, data?.messages?.[0]?.id, 'text');
+  let data;
+  for (const chunk of splitTextChunks(text)) {
+    data = await api('messages', {
+      messaging_product: 'whatsapp',
+      to,
+      type: 'text',
+      text: { body: chunk },
+    });
+    logOutbound(to, data?.messages?.[0]?.id, 'text');
+  }
   return data;
 }
 
@@ -213,6 +248,7 @@ function parseWebhook(body) {
 
 module.exports = {
   waConfigured,
+  splitTextChunks,
   sendText,
   sendImage,
   sendInteractiveButtons,

@@ -722,3 +722,23 @@ test('drawSessionQuestions presents the pool in PDF (insertion) order, not shuff
     db.exec('ROLLBACK');
   }
 });
+
+const wa = require('../src/services/whatsapp');
+
+test('splitTextChunks leaves short text as one chunk', () => {
+  assert.deepEqual(wa.splitTextChunks('Hello world'), ['Hello world']);
+});
+
+test('splitTextChunks splits long text into capped chunks with continuation markers', () => {
+  const chunks = wa.splitTextChunks('x'.repeat(9000), 4000);
+  assert.ok(chunks.length >= 3, '9000 chars becomes at least 3 chunks');
+  for (const c of chunks) assert.ok(c.length <= 4000, `chunk under cap (${c.length})`);
+  assert.ok(chunks.slice(0, -1).every((c) => c.endsWith(' …')), 'non-final chunks carry the marker');
+  assert.equal(chunks[chunks.length - 1].endsWith(' …'), false, 'final chunk has no marker');
+});
+
+test('splitTextChunks splits a single over-long line', () => {
+  const chunks = wa.splitTextChunks('y'.repeat(8500), 4000);
+  assert.ok(chunks.length >= 3);
+  for (const c of chunks) assert.ok(c.length <= 4000);
+});
