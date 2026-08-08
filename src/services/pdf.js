@@ -29,11 +29,26 @@ async function extractText(buffer) {
         parts.push(line);
         line = '';
       }
-      line += item.str;
+      const s = item.str || '';
+      // Adjacent PDF text items on the same line are often separate spans
+      // ("throughout." + "Now", "the" + "sentences") that must be joined with a
+      // space, or words run together ("throughout.Now"). Only insert when both
+      // sides are non-whitespace so existing spaces/indentation are preserved.
+      if (
+        line &&
+        s &&
+        line.trim() &&
+        s.trim() &&
+        !/\s$/.test(line) &&
+        !/^\s/.test(s)
+      ) {
+        line += ' ';
+      }
+      line += s;
     }
     if (line) parts.push(line);
   }
-  const text = parts.join('\n');
+  const text = parts.join('\n').replace(/[ \t]+/g, ' ');
   if (!text.trim()) throw new Error('No readable text found in PDF (scanned/image PDFs are not supported yet).');
   return text;
 }

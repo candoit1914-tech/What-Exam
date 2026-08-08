@@ -147,9 +147,13 @@ async function startJob(jobId, buffer) {
       throw new Error('No questions could be parsed from this PDF. Is the document text-based?');
     }
 
-    const warning = [ai.completenessWarning(ai.estimateQuestionCount(text), parsed), blockWarning]
-      .filter(Boolean)
-      .join(' ');
+    // Estimate from the parseable (cleaned) text — the raw text still contains
+    // the solutions/answer-key section, whose "1. B." lines would inflate the
+    // count and produce a false "questions missing" warning.
+    const warning = [
+      ai.completenessWarning(ai.estimateQuestionCount(ai.cleanExamText(text)), parsed),
+      blockWarning,
+    ].filter(Boolean).join(' ');
     if (warning) updateJob(jobId, { warning });
 
     // Objective questions missing an answer key are sent to AI for answers.

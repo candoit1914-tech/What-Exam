@@ -1,4 +1,5 @@
 const config = require('../config');
+const { stripSourceWatermarks } = require('./textClean');
 
 class AIError extends Error {
   constructor(message) {
@@ -383,9 +384,9 @@ async function extractQuestionsFromText(rawText, onProgress, onWarning) {
   const text = String(rawText || '').trim();
   if (!text) return [];
 
-  const answerKey = extractAnswerKeySection(text);
-  const markingScheme = extractMarkingSchemeSection(text);
-  const blocks = splitIntoBlocks(text);
+  const { cleanText, answerMap, answerKey, modelSolutions: markingScheme } =
+    splitSolutionSections(text);
+  const blocks = splitIntoBlocks(cleanText);
 
   const system = SYSTEM_BASE + `
 You are given the raw text of an examination document. Extract every question.
@@ -395,6 +396,7 @@ Return: {"questions": [...]}. Each question is one of:
 Objective:
 {
   "type": "objective",
+  "number": 12,            // original question number from the paper, as an integer
   "text": "stem (options already removed)",
   "options": ["A. Kumasi", "B. Accra", ...]  // KEEP the original letter prefixes (A., B., C., D.) exactly as written on the paper
   "correct_answer": "B",   // the option LETTER if the document has an answer key, else "" (empty string)
@@ -409,6 +411,7 @@ Objective:
 Theory:
 {
   "type": "theory",
+  "number": 1,            // original question number from the paper, as an integer
   "text": "stem",
   "passage": "",     // full passage/context this question is based on, else ""
   "marks": 5,
@@ -422,7 +425,7 @@ Theory:
 }
 
 Rules:
-- Preserve question numbers, drop them from the text. Keep any instruction that is part of the question stem (e.g. "Read the passage below and answer questions 1 to 5.") inside text when it belongs to a single question, otherwise it stays as context.
+- Preserve each question's original number from the paper in the "number" field (as an integer, e.g. "number": 1) and DROP the number from the text. Keep any instruction that is part of the question stem (e.g. "Read the passage below and answer questions 1 to 5.") inside text when it belongs to a single question, otherwise it stays as context.
 - If the document contains an answer key (e.g. "Answers: 1-B, 2-C" or similar), use it to fill correct_answer (the option LETTER) AND correct_index (the 0-based position of that option in the options array you return).
 - If options are numbered 1-4 with possible answers, infer the letter as A-D.
 - KEEP the options in the exact order and with the exact letters they have on the paper.
@@ -451,27 +454,37 @@ Rules:
 
   // A block's leading context is the passage and/or section instructions that
   // sit in front of its first question (the splitter breaks blocks at
-  // instruction lines precisely so this is the group's own context). Leading
-  // title lines ("ENGLISH LANGUAGE", "BIG EXAM PAPER") are dropped so they are
-  // not attached to every question. If a block has no context of its own, the
-  // most recent one is carried forward so questions never lose context.
-  const sharedFor = (block) => {
-    const lines = leadingContext(block.split(/\r?\n/));
+  // instruction lines precisely so this is the group's own context). A leading
+  // section header ("SECTION C", "PART B ORAL LANGUAGE", "UNIT II") is lifted
+  // out and prepended to the first question of the block, so each group keeps
+  // its section name even when the AI would otherwise drop it. Leading title
+  // lines ("ENGLISH LANGUAGE", "BIG EXAM PAPER") are dropped so they are not
+  // attached to every question.
+  //
+  // Context is carried block-to-block ONLY when the block has no context of
+  // its own (e.g. a reading passage split across two size-limited blocks). A
+  // block that opens with its own section header resets the carry, so a
+  // previous section's instructions never bleed into the next section.
+  const blockPrompts = [];
+  let lastPassage = '';
+  for (const block of blocks) {
+    const lead = leadingContext(block.split(/\r?\n/));
+    const header = leadingSectionHeader(lead);
     let start = 0;
-    while (start < lines.length) {
-      const l = lines[start].trim();
+    while (start < lead.length) {
+      const l = lead[start].trim();
+      if (header && l === header) {
+        start++;
+        break;
+      }
       if (CONTEXT_START.test(l) || l.length >= 40) break;
       start++; // skip title-like lines
     }
-    return lines.slice(start).join('\n').trim();
-  };
-  let lastPassage = '';
-  const blockPrompts = blocks.map((block) => {
-    const lead = sharedFor(block);
-    const isContext = lead.length > 0;
-    if (isContext) lastPassage = lead;
-    return { block, shared: isContext ? lead : lastPassage };
-  });
+    const own = lead.slice(start).join('\n').trim();
+    const shared = own || (header ? '' : lastPassage);
+    if (own || header) lastPassage = own || '';
+    blockPrompts.push({ block, shared, header });
+  }
 
   let completed = 0;
   // A single block runs on its own shorter clock with a couple of retries. If
@@ -538,9 +551,10 @@ Rules:
   for (let i = 0; i < settled.length; i++) {
     const result = settled[i];
     if (!result) continue; // skipped block (timed out / failed) — keep the rest
-    const shared = blockPrompts[i].shared;
+    const bp = blockPrompts[i];
     const list = Array.isArray(result) ? result : result.questions;
-    let cur = '';
+    let cur = bp.shared;
+    let headerDone = false;
     for (const q of list || []) {
       if (q && typeof q === 'object') {
         // Attach passage/instructions to every question. Prefer the passage the
@@ -550,8 +564,25 @@ Rules:
         // them. This is authoritative: students always see what they need.
         const p = q.passage && String(q.passage).trim();
         if (p) cur = p;
-        if (!cur && shared) cur = shared;
+        if (!cur && bp.shared) cur = bp.shared;
         if (!q.passage || !String(q.passage).trim()) q.passage = cur;
+        // The block's leading section header is prepended to its first
+        // question, so each group keeps its section name.
+        if (bp.header && !headerDone) {
+          q.passage = q.passage ? bp.header + '\n' + q.passage : bp.header;
+          headerDone = true;
+        }
+        // Splice deterministic answers from the paper's answer key onto the
+        // matching question. The AI may already have used the key; this
+        // overrides with the paper's own answer, which is authoritative.
+        if (q.type === 'objective' && q.number != null) {
+          const letter = answerMap[Number(q.number)];
+          if (letter) {
+            q.correct_answer = letter;
+            const idx = optionLetterIndex(q.options, letter);
+            if (idx >= 0) q.correct_index = idx;
+          }
+        }
       }
       const t = String((q && q.text) || '')
         .replace(/\s+/g, ' ')
@@ -566,9 +597,13 @@ Rules:
   return all;
 }
 
-// A numbered question line, e.g. "1. What is..." or "12) State...". Option
-// lines ("A. ...") and section headers do not match.
-const QUESTION_START = /^\s*\d{1,3}\s*[.)]\s+\S/;
+// A numbered question line, e.g. "1. What is..." or "12) State...". Also
+// matches a bare number on its own line (essay stems like "1." followed by a
+// blank line then the prompt) and lettered sub-questions ("(a) According...",
+// "(i) the mode of dressing"). Option lines ("A. ...") and section headers do
+// not match.
+const QUESTION_START =
+  /^\s*(?:\d{1,3}\s*[.)](?:\s+\S|\s*$)|\(\s*[a-j]\s*\)(?:\s+\S|\s*$))/;
 
 // An answer-option line, e.g. "A. Accra", "B) Gold", "(C) Yes". Requires a
 // real separator after the letter so a prose word like "Accra" or "Cape
@@ -610,7 +645,7 @@ function trailingContext(lines) {
  */
 function estimateQuestionCount(text) {
   const lines = String(text || '').split(/\r?\n/);
-  return lines.filter((l) => /^\s*\d{1,3}\s*[.)]\s/.test(l)).length;
+  return lines.filter((l) => QUESTION_START.test(l)).length;
 }
 
 /** Human-readable warning, or null when the extraction looks complete. */
@@ -625,6 +660,37 @@ function leadingContext(lines) {
   let i = 0;
   while (i < lines.length && !QUESTION_START.test(lines[i])) i++;
   return lines.slice(0, i);
+}
+
+/**
+ * The first section/part/unit header line ("SECTION C", "PART B ORAL
+ * LANGUAGE", "UNIT II") in a block's leading context, or '' if there is none.
+ * Lifted out of the context and prepended to the block's first question so
+ * each section keeps its name.
+ */
+function leadingSectionHeader(lines) {
+  for (const line of lines) {
+    const l = String(line || '').trim();
+    if (/^\s*(?:part\s+[A-Za-z]|section\s+[A-Za-z0-9]|unit\s+[ivxIVX0-9]+)\b.*$/i.test(l)) {
+      return l;
+    }
+  }
+  return '';
+}
+
+/**
+ * Find the 0-based index of the option whose letter prefix matches `letter`,
+ * or -1 when none does. Options look like "A. Kumasi" / "(C) Yes" / "B) Gold".
+ */
+function optionLetterIndex(options, letter) {
+  const want = String(letter || '').toUpperCase();
+  const list = Array.isArray(options) ? options : [];
+  for (let i = 0; i < list.length; i++) {
+    const o = String(list[i] || '').trim();
+    const m = o.match(/^\s*\(?\s*([A-Da-d])\s*[).:\-]\s*/);
+    if (m && m[1].toUpperCase() === want) return i;
+  }
+  return -1;
 }
 
 /**
@@ -684,21 +750,95 @@ function splitIntoBlocks(text, perBlock = BLOCK_QUESTIONS, maxChars = BLOCK_MAX_
   return blocks;
 }
 
+// ── Solutions / answer-key section handling ─────────────────────────────
+//
+// Papers routinely end with a solutions section ("Part A Solutions", "Part B
+// — Model Solutions", "ANSWERS", "MARKING SCHEME", ...). Its lines match the
+// question-start pattern ("1. B. with"), so if it is left in the parseable
+// text it is parsed as fake questions, inflates the completeness estimate, and
+// forces the AI to re-answer questions that the paper already answered — the
+// main cause of slow, bloated PDF imports. The section is split OUT of the
+// parseable text, the objective answers ("1. B", "2. D", ...) are spliced back
+// onto their questions deterministically, and the model-solutions prose is
+// offered to the AI as marking-scheme context.
+
+// A solutions-section header line ("Part A Solutions", "Part B — Model
+// Solutions", "ANSWER KEY", "ANSWERS", "MARKING SCHEME", ...). Anything from
+// this line until the next "PAPER n" header (or the end of the document) is
+// treated as solution content and removed from the parseable text.
+const SOLUTION_HEADER =
+  /^\s*(?:part\s+[a-z]+(?:\s+[a-z]+)*\s*(?:[-–—]\s*)?(?:model\s+)?(?:solutions?|answers?)|(?:model\s+)?solutions?|(?:answer\s*key|key)|answers?|marking\s+(?:scheme|guide)|suggested\s+answers?)\s*[:.\-]?\s*$/i;
+
+// An objective answer line inside a solutions section, e.g. "1. B. with",
+// "14. B. him then but would call him later", "21. B." → number 1 → letter B.
+const ANSWER_KEY_LINE = /^\s*(\d{1,3})\s*[.)\-]\s+([A-Da-d])\s*(?:\.|\b)/;
+
+// A "PAPER 2"-style boundary. A solutions section never swallows a following
+// paper in a multi-paper document (e.g. a Paper 1 that ends with solutions and
+// is followed by Paper 2 in the same upload).
+const PAPER_HEADER = /^\s*paper\s+\d+\s*$/i;
+
+/**
+ * Split the answer-key / model-solutions sections out of a raw exam document.
+ * Returns { cleanText, answerMap, answerKey, modelSolutions }:
+ *  - cleanText: the document with every solutions section removed
+ *  - answerMap: {questionNumber: 'A'|'B'|'C'|'D'} parsed from answer lines
+ *  - answerKey: compact "1. B / 2. D / ..." text for the AI prompt
+ *  - modelSolutions: the paper's own model answers / marking guidance (cleaned)
+ */
+function splitSolutionSections(text) {
+  const lines = String(text || '').split(/\r?\n/);
+  const answerMap = {};
+  const modelParts = [];
+  let inRun = false;
+  let runIsModel = false;
+  const kept = [];
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (inRun) {
+      // A new paper starts fresh content; the solutions section ends there.
+      if (PAPER_HEADER.test(line)) {
+        inRun = false;
+        kept.push(raw);
+        continue;
+      }
+      const m = line.match(ANSWER_KEY_LINE);
+      if (m) {
+        answerMap[Number(m[1])] = m[2].toUpperCase();
+        continue; // answer lines are never parseable text
+      }
+      // Model-solutions prose is kept for the marking-scheme prompt; everything
+      // else in a run (answer continuations, vertical watermark letters, bare
+      // artifact numbers) is dropped.
+      if (runIsModel && !/^[A-Za-z.]{1,3}$/.test(line) && !/^\d{1,3}\s*\.?\s*$/.test(line)) {
+        modelParts.push(line);
+      }
+      continue;
+    }
+    if (SOLUTION_HEADER.test(line)) {
+      inRun = true;
+      runIsModel = /model\s+solutions?|marking\s+(?:scheme|guide)|suggested\s+answers?/i.test(line);
+      continue; // the header line itself is dropped
+    }
+    kept.push(raw);
+  }
+  const cleanText = stripSourceWatermarks(kept.join('\n'));
+  const modelSolutions = stripSourceWatermarks(modelParts.join('\n')).slice(0, 6000);
+  const answerKey = Object.keys(answerMap)
+    .sort((a, b) => Number(a) - Number(b))
+    .map((n) => `${n}. ${answerMap[n]}`)
+    .join('\n');
+  return { cleanText, answerMap, answerKey, modelSolutions };
+}
+
+/** The parseable text of an exam document with watermark and solutions sections removed. */
+function cleanExamText(text) {
+  return splitSolutionSections(text).cleanText;
+}
+
 /** Find the answer-key section ("Answers: 1-B, 2-C ...") near the end of the doc. */
 function extractAnswerKeySection(text) {
-  const lines = text.split(/\r?\n/);
-  let start = -1;
-  for (let i = 0; i < lines.length; i++) {
-    if (
-      /^\s*(?:answers?|answer\s*key|key)\s*[:.\-]?\s*$/i.test(lines[i]) ||
-      /^\s*(?:answers?|answer\s*key|key)\s*[:.\-]\s*\d+\s*[.)\-]\s*[A-Da-d]/i.test(lines[i])
-    ) {
-      start = i;
-      break;
-    }
-  }
-  if (start === -1) return '';
-  return lines.slice(start).join('\n').slice(0, 4000);
+  return splitSolutionSections(text).answerKey;
 }
 
 /**
@@ -707,19 +847,7 @@ function extractAnswerKeySection(text) {
  * reuse the paper's own rubric/model answers instead of regenerating them.
  */
 function extractMarkingSchemeSection(text) {
-  const lines = text.split(/\r?\n/);
-  let start = -1;
-  for (let i = 0; i < lines.length; i++) {
-    if (
-      /^\s*(?:marking\s*(?:scheme|guide)|(?:suggested|model|sample)\s*answers?|solutions?)\s*[:.\-]?\s*$/i.test(lines[i]) ||
-      /^\s*(?:marking\s*(?:scheme|guide))\s*[:.\-]\s*\d+\s*[.)\-]/i.test(lines[i])
-    ) {
-      start = i;
-      break;
-    }
-  }
-  if (start === -1) return '';
-  return lines.slice(start).join('\n').slice(0, 6000);
+  return splitSolutionSections(text).modelSolutions;
 }
 
 /**
@@ -1107,9 +1235,12 @@ module.exports = {
   markTheory,
   splitIntoBlocks,
   leadingContext,
+  leadingSectionHeader,
   trailingContext,
   estimateQuestionCount,
   completenessWarning,
+  splitSolutionSections,
+  cleanExamText,
   extractAnswerKeySection,
   extractMarkingSchemeSection,
   parseJSON,

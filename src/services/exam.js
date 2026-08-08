@@ -365,13 +365,16 @@ function buildQuestionBubbles(exam, question, sequence, index) {
   if (firstOfType) bubbles.push(formatSectionHeader(type));
 
   const clean = (p) => stripPaperOnlyInstructions(stripSourceWatermarks(p)).trim();
+  // Dedupe keys are normalized (case + whitespace) so the same instruction or
+  // passage is never sent twice just because extraction differed in spacing.
+  const norm = (s) => String(s || '').toLowerCase().replace(/\s+/g, ' ').trim();
   const seen = { instructions: new Set(), passages: new Set(), headings: new Set() };
   for (const q of prev) {
     const pClean = clean(q.passage);
     const pRest = splitQuestionHeadings(pClean).body;
     const { instructions: pIns, passage: pPas } = splitSectionMeta(pRest);
-    seen.instructions.add(pIns);
-    seen.passages.add(pPas);
+    seen.instructions.add(norm(pIns));
+    seen.passages.add(norm(pPas));
     splitQuestionHeadings(pClean).headings.forEach((h) => seen.headings.add(h));
     splitQuestionHeadings(String(q.text || '').trim()).headings.forEach((h) => seen.headings.add(h));
   }
@@ -387,13 +390,15 @@ function buildQuestionBubbles(exam, question, sequence, index) {
       seen.headings.add(h);
     }
   }
-  if (instructions && !seen.instructions.has(instructions)) {
+  const insKey = norm(instructions);
+  if (instructions && !seen.instructions.has(insKey)) {
     bubbles.push(formatSectionInstructions(instructions));
-    seen.instructions.add(instructions);
+    seen.instructions.add(insKey);
   }
-  if (passage && !seen.passages.has(passage)) {
+  const pasKey = norm(passage);
+  if (passage && !seen.passages.has(pasKey)) {
     bubbles.push(passage);
-    seen.passages.add(passage);
+    seen.passages.add(pasKey);
   }
 
   const textClean = String(question.text || '').trim();

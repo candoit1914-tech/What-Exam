@@ -404,6 +404,65 @@ test('completenessWarning is null when extraction is not far below the estimate 
   assert.match(msg, /Extracted 5 questions, but the document appears to contain ~60\./, 'warning message text');
 });
 
+test('splitSolutionSections strips the answer-key section and returns a per-number answer map', () => {
+  const doc = [
+    'PAPER 1',
+    'PART A LEXIS AND STRUCTURE',
+    '1. The officer acted bravely.',
+    'A. one B. two C. three D. four',
+    '2. Second stem?',
+    'A. one B. two C. three D. four',
+    '',
+    'PART A SOLUTIONS',
+    '1. B. with',
+    '2. D. when',
+    '',
+    'PAPER 2',
+    'Part A WRITING [30 marks]',
+    '1.',
+    'Write a letter to your father.',
+  ].join('\n');
+  const { cleanText, answerMap, answerKey } = ai.splitSolutionSections(doc);
+  assert.match(cleanText, /PART A LEXIS AND STRUCTURE/, 'question section kept');
+  assert.match(cleanText, /Write a letter to your father\./, 'following paper kept');
+  assert.doesNotMatch(cleanText, /SOLUTIONS/i, 'solutions header dropped');
+  assert.doesNotMatch(cleanText, /1\. B\. with/, 'answer lines dropped');
+  assert.deepEqual(answerMap, { 1: 'B', 2: 'D' }, 'answers parsed by question number');
+  assert.match(answerKey, /1\. B\n2\. D/, 'compact key text for the AI prompt');
+});
+
+test('cleanExamText also strips watermark lines from the parseable text', () => {
+  const doc = 'Q1 text\npapers.sronu.com\nPART B — Model Solutions\nPreamble\nAccept any valid expression.';
+  const out = ai.cleanExamText(doc);
+  assert.doesNotMatch(out, /sronu/i, 'watermark stripped');
+  assert.doesNotMatch(out, /Model Solutions/i, 'model-solutions header stripped');
+  assert.doesNotMatch(out, /Preamble/, 'model-solutions prose stripped');
+  assert.match(out, /Q1 text/, 'question kept');
+});
+
+test('estimateQuestionCount counts lone-number stems and lettered sub-questions', () => {
+  const text = [
+    'PAPER 2',
+    'Part A — Writing',
+    '1.',
+    'Write a letter to your father.',
+    '(a) According to the passage, the boy was lonely.',
+    '2.',
+    'Write a story.',
+  ].join('\n');
+  assert.equal(ai.estimateQuestionCount(text), 3);
+});
+
+test('leadingSectionHeader returns the first section/part/unit line or empty', () => {
+  assert.equal(
+    ai.leadingSectionHeader(['PAPER 1', 'PART A LEXIS AND STRUCTURE', 'Answer ALL questions']),
+    'PART A LEXIS AND STRUCTURE'
+  );
+  assert.equal(ai.leadingSectionHeader(['SECTION C', 'Choose from the alternatives lettered A to D.']), 'SECTION C');
+  assert.equal(ai.leadingSectionHeader(['UNIT II', 'Oral language drills.']), 'UNIT II');
+  assert.equal(ai.leadingSectionHeader(['Answer ALL questions', '1. Q?']), '', 'no header in a plain instruction block');
+});
+
 test('stripSourceWatermarks removes watermark and source footer lines', () => {
   const input = [
     'Read the passage below.',
@@ -552,6 +611,35 @@ test('buildQuestionBubbles dedupes the same heading across questions', () => {
   const seq = [q1, q2];
   const out = [...exam.buildQuestionBubbles({}, q1, seq, 0), ...exam.buildQuestionBubbles({}, q2, seq, 1)];
   assert.equal(out.filter((b) => b === '*PART A*').length, 1, 'heading emitted once across the sequence');
+});
+
+test('buildQuestionBubbles dedupes instructions and passage that differ only in whitespace', () => {
+  const q1 = {
+    id: 1,
+    q_order: 1,
+    type: 'theory',
+    text: 'Q1',
+    passage: 'Read the following passage and answer questions 1 to 5.\nThe farmers rely on irrigation.',
+  };
+  const q2 = {
+    id: 2,
+    q_order: 2,
+    type: 'theory',
+    text: 'Q2',
+    passage: 'Read   the following\npassage and answer questions 1 to 5.\nThe   farmers rely on irrigation.',
+  };
+  const seq = [q1, q2];
+  const out = [...exam.buildQuestionBubbles({}, q1, seq, 0), ...exam.buildQuestionBubbles({}, q2, seq, 1)];
+  assert.equal(
+    out.filter((b) => b === '*Instructions*\n\nRead the following passage and answer questions 1 to 5.').length,
+    1,
+    'instructions deduped across whitespace differences'
+  );
+  assert.equal(
+    out.filter((b) => b === 'The farmers rely on irrigation.').length,
+    1,
+    'passage deduped across whitespace differences'
+  );
 });
 
 test('EXAMINER_PERSONA is a real persona and examinerPrompt prepends it', () => {
@@ -1099,6 +1187,39 @@ test('extractQuestionsFromText caps concurrent extraction blocks at BLOCK_CONCUR
     const out = await ai.extractQuestionsFromText(lines.join('\n'));
     assert.equal(state.max, 8, `extraction fires no more than 8 blocks at once (saw ${state.max})`);
     assert.ok(out.length >= 1, 'capped extraction still parses questions');
+  } finally {
+    ai.chatJSON = orig;
+  }
+});
+
+test('extractQuestionsFromText splices paper answers and prepends the section header', async () => {
+  const orig = ai.chatJSON;
+  ai.chatJSON = async () => ({
+    questions: [
+      { type: 'objective', number: 1, text: 'The officer acted bravely.', options: ['A. one', 'B. two', 'C. three', 'D. four'] },
+      { type: 'objective', number: 2, text: 'Second stem?', options: ['A. one', 'B. two', 'C. three', 'D. four'] },
+    ],
+  });
+  try {
+    const out = await ai.extractQuestionsFromText(
+      [
+        'PART A LEXIS AND STRUCTURE',
+        '1. The officer acted bravely.',
+        'A. one B. two C. three D. four',
+        '2. Second stem?',
+        'A. one B. two C. three D. four',
+        '',
+        'PART A SOLUTIONS',
+        '1. B. with',
+        '2. D. when',
+      ].join('\n')
+    );
+    assert.equal(out.length, 2);
+    assert.equal(out[0].correct_answer, 'B', 'paper answer spliced for Q1');
+    assert.equal(out[0].correct_index, 1, 'correct_index matches option B');
+    assert.equal(out[1].correct_answer, 'D', 'paper answer spliced for Q2');
+    assert.equal(out[1].correct_index, 3, 'correct_index matches option D');
+    assert.match(out[0].passage || '', /PART A LEXIS AND STRUCTURE/, 'section header prepended to the first question');
   } finally {
     ai.chatJSON = orig;
   }
