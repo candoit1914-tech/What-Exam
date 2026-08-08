@@ -190,6 +190,7 @@ function ensureColumn(table, column, ddl) {
 ensureColumn('questions', 'passage', "TEXT DEFAULT ''");
 ensureColumn('question_pool', 'passage', "TEXT DEFAULT ''");
 ensureColumn('answers', 'ai_detected', "INTEGER NOT NULL DEFAULT 0");
+ensureColumn('jobs', 'warning', "TEXT DEFAULT ''");
 
 // Migration: answers.question_id used to be FK-constrained to questions().
 // Attempts may now answer pool-variant questions, so the constraint must go.

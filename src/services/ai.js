@@ -559,6 +559,23 @@ function trailingContext(lines) {
   return lines.slice(i);
 }
 
+/**
+ * Rough count of how many questions a document contains, based on question
+ * numbers ("1." / "2)" style) at line starts. Used to warn when an import
+ * extracts far fewer questions than the paper clearly holds.
+ */
+function estimateQuestionCount(text) {
+  const lines = String(text || '').split(/\r?\n/);
+  return lines.filter((l) => /^\s*\d{1,3}\s*[.)]\s/.test(l)).length;
+}
+
+/** Human-readable warning, or null when the extraction looks complete. */
+function completenessWarning(estimate, extracted) {
+  const count = Array.isArray(extracted) ? extracted.length : 0;
+  if (estimate < 3 || count * 2 >= estimate) return null;
+  return `Extracted ${count} questions, but the document appears to contain ~${estimate}. Some questions (often the theory section) may have been missed.`;
+}
+
 /** Detect a leading passage/context run at the start of a block. */
 function leadingContext(lines) {
   let i = 0;
@@ -994,6 +1011,8 @@ module.exports = {
   splitIntoBlocks,
   leadingContext,
   trailingContext,
+  estimateQuestionCount,
+  completenessWarning,
   extractAnswerKeySection,
   extractMarkingSchemeSection,
   parseJSON,

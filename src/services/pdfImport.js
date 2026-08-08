@@ -119,6 +119,9 @@ async function startJob(jobId, buffer) {
       throw new Error('No questions could be parsed from this PDF. Is the document text-based?');
     }
 
+    const warning = ai.completenessWarning(ai.estimateQuestionCount(text), parsed);
+    if (warning) updateJob(jobId, { warning });
+
     // Objective questions missing an answer key are sent to AI for answers.
     // This step is best-effort: a failure must not fail the whole import.
     const objQuestions = [];

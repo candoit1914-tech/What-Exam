@@ -371,3 +371,25 @@ test('drawSessionQuestions tops up a small pool with template questions to reach
     db.exec('ROLLBACK');
   }
 });
+
+test('estimateQuestionCount counts question-numbered lines', () => {
+  const text = [
+    '1. One plus one?',
+    'A. 1 B. 2',
+    '2. Two plus two?',
+    'A. 2 B. 4',
+    'Section B',
+    '3. Write an essay.',
+    '4. Write a story.',
+  ].join('\n');
+  assert.equal(ai.estimateQuestionCount(text), 4);
+});
+
+test('completenessWarning is null when extraction is not far below the estimate and a message when it is', () => {
+  const many = (n) => Array(n).fill({});
+  assert.equal(ai.completenessWarning(60, many(35)), null, '35 of ~60 is more than half → no warning');
+  assert.equal(ai.completenessWarning(10, many(10)), null, 'complete extraction never warns');
+  assert.equal(ai.completenessWarning(2, many(0)), null, 'tiny estimates never warn');
+  const msg = ai.completenessWarning(60, many(5));
+  assert.match(msg, /Extracted 5 questions, but the document appears to contain ~60\./, 'warning message text');
+});
