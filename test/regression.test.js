@@ -567,3 +567,42 @@ test('objective answer stays graded at 0 when the AI cannot determine a key', as
     db.exec('ROLLBACK');
   }
 });
+
+test('markAllPendingTheory records 0 marks, needs_review=0 after a final marking failure', async () => {
+  const db = require('../src/db');
+  db.exec('BEGIN');
+  try {
+    const examId = db
+      .prepare('INSERT INTO exams (title, subject, duration_minutes) VALUES (?,?,?)')
+      .run('__theory_fail_exam__', 'Test', 30).lastInsertRowid;
+    const qid = db
+      .prepare("INSERT INTO questions (exam_id, q_order, type, text, marks) VALUES (?,1,'theory','Explain.',5)")
+      .run(examId).lastInsertRowid;
+    const studentId = db
+      .prepare('INSERT INTO students (phone) VALUES (?)')
+      .run('__theory_fail_phone__' + Date.now()).lastInsertRowid;
+    const sessionId = db
+      .prepare('INSERT INTO sessions (exam_id, student_id) VALUES (?,?)')
+      .run(examId, studentId).lastInsertRowid;
+    db.prepare(
+      `INSERT INTO answers (session_id, question_id, q_order, answer_text, marks_awarded, max_marks, marked_by, needs_review)
+       VALUES (?,?,1,'Student explanation',0,5,'pending',0)`
+    ).run(sessionId, qid);
+
+    const real = marking.markTheoryAnswer;
+    marking.markTheoryAnswer = async () => { throw new Error('examiner down'); };
+    try {
+      await exam.markAllPendingTheory(sessionId);
+    } finally {
+      marking.markTheoryAnswer = real;
+    }
+
+    const row = db.prepare('SELECT * FROM answers WHERE session_id = ?').get(sessionId);
+    assert.equal(row.marked_by, 'ai', 'AI marked even on failure');
+    assert.equal(row.marks_awarded, 0, 'zero marks on final failure');
+    assert.equal(row.needs_review, 0, 'never pending admin review');
+    assert.match(row.ai_feedback, /could not mark this answer/, 'explanatory note');
+  } finally {
+    db.exec('ROLLBACK');
+  }
+});

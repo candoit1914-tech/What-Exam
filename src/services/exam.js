@@ -7,6 +7,8 @@ const certificate = require('./certificate');
 const ai = require('./ai');
 const { stripSourceWatermarks } = require('./textClean');
 
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 // ── Students ───────────────────────────────────────────────────────────
 
 function normalizePhone(raw) {
@@ -650,7 +652,8 @@ async function handleAnswer(exam, session, student, question, body, meta = {}) {
  * AI-mark every pending theory answer for a session at the end of the exam.
  * Runs together (concurrency-capped) so the student gets one complete result.
  * - Answers flagged as AI-copied (inline or by the marker) are capped at 0.
- * - Marking failures never block results — the answer is flagged for review.
+ * - A marking failure retries once, then records 0 marks with a note — it
+ *   never blocks results or leaves an answer pending admin review.
  */
 async function markAllPendingTheory(sessionId) {
   const pending = db
@@ -669,20 +672,27 @@ async function markAllPendingTheory(sessionId) {
         scheme = null;
       }
     }
+    let marked;
     try {
-      const marked = await marking.markTheoryAnswer(question, a.answer_text, scheme);
-      const detected = !!marked.aiGenerated || Number(a.ai_detected) === 1;
-      const feedback = detected
-        ? `⚠️ AI-written answer detected — 0 marks awarded (copying AI answers is cheating). ${marked.feedback || marked.aiReason}`.trim()
-        : marked.feedback;
-      db.prepare(
-        `UPDATE answers SET marked_by='ai', marks_awarded=?, ai_feedback=?, needs_review=?, ai_detected=?, marked_at=datetime('now') WHERE id=?`
-      ).run(detected ? 0 : marked.marksAwarded, feedback, detected ? 1 : 0, detected ? 1 : 0, a.id);
+      marked = await marking.markTheoryAnswer(question, a.answer_text, scheme);
     } catch (err) {
-      db.prepare(
-        `UPDATE answers SET marked_by='manual', marks_awarded=0, needs_review=1, ai_feedback='This answer needs manual review by your administrator.', marked_at=datetime('now') WHERE id=?`
-      ).run(a.id);
+      await delay(1000);
+      try {
+        marked = await marking.markTheoryAnswer(question, a.answer_text, scheme);
+      } catch (err2) {
+        db.prepare(
+          `UPDATE answers SET marked_by='ai', marks_awarded=0, needs_review=0, ai_feedback='The examiner could not mark this answer; 0 marks were recorded.', marked_at=datetime('now') WHERE id=?`
+        ).run(a.id);
+        return;
+      }
     }
+    const detected = !!marked.aiGenerated || Number(a.ai_detected) === 1;
+    const feedback = detected
+      ? `⚠️ AI-written answer detected — 0 marks awarded (copying AI answers is cheating). ${marked.feedback || marked.aiReason}`.trim()
+      : marked.feedback;
+    db.prepare(
+      `UPDATE answers SET marked_by='ai', marks_awarded=?, ai_feedback=?, needs_review=?, ai_detected=?, marked_at=datetime('now') WHERE id=?`
+    ).run(detected ? 0 : marked.marksAwarded, feedback, detected ? 1 : 0, detected ? 1 : 0, a.id);
   });
 
   await ai.mapLimit(tasks, 3, (run) => run());
