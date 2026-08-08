@@ -561,7 +561,11 @@ async function renderTab() {
         <button class="btn btn-ghost" onclick="pdfUploadForm(${id})">${I.doc} Upload PDF</button>
       </div>
       ${questions.length === 0 ? `<div class="empty-state">${I.empty}<p>No questions yet. Add manually, generate with AI, or upload a PDF.</p></div>` : ''}
-      ${questions.map(q => qitemHTML(q, id)).join('')}`;
+      ${questions.map((q, i) => {
+        const prev = i > 0 ? questions[i - 1] : null;
+        const same = !!q.passage && !!prev && prev.passage === q.passage;
+        return qitemHTML(q, id, same);
+      }).join('')}`;
   } else if (tab === 'schemes') {
     bodyEl.innerHTML = questions.length === 0
       ? `<div class="empty-state">${I.empty}<p>No questions yet.</p></div>`
@@ -633,13 +637,15 @@ async function renderTab() {
   }
 }
 
-function qitemHTML(q, id) {
+function qitemHTML(q, id, samePassageAsPrev = false) {
   const opts = q.options || [];
   return `<div class="qitem">
     <div class="qhead">
       <div>
         <div class="muted" style="font-size:12px">Q${q.q_order} · ${q.type} · ${q.marks} mark(s) · ${q.difficulty} · ${badge(q.source)}</div>
-        ${q.passage ? `<div class="qpassage">${esc(q.passage)}</div>` : ''}
+        ${q.passage && samePassageAsPrev
+          ? `<div class="qpassage-same">↳ same passage as above</div>`
+          : q.passage ? `<div class="qpassage">${esc(q.passage)}</div>` : ''}
         <div class="qtext">${esc(q.text)}</div>
         <div class="opts-list">
           ${opts.map((o) => `<div class="${o.key === q.correct_answer ? 'correct' : ''}">${o.key}. ${esc(o.text)}${o.key === q.correct_answer ? ' ✓' : ''}</div>`).join('')}
