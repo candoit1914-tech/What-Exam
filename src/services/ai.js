@@ -819,6 +819,56 @@ Rules:
 }
 
 /**
+ * Determine the correct answer for a SINGLE objective question at answer time.
+ * Used when a question reached a student with no stored answer key. One
+ * question per call keeps latency low mid-exam. Returns correct_index: -1
+ * when the examiner is not certain or the AI call fails — callers must never
+ * store a guess that would mark innocent students wrong.
+ */
+async function resolveObjectiveAnswer({ questionText, passage, options = [] }) {
+  const system = examinerPrompt(SYSTEM_BASE + `
+For the single question below, determine the single correct answer option. Return:
+{"correct_index": 2, "explanation": "one short sentence"}
+Rules:
+- correct_index is the 0-based index into the options array.
+- CORRECTNESS IS NON-NEGOTIABLE: only pick an answer you are CERTAIN is correct.
+- If the question is ambiguous, has more than one defensible answer, or you are not certain, set correct_index to -1 and explain why. NEVER guess.
+- COMPACT OUTPUT: Output ONLY the JSON object.
+`);
+  const opts = options.map((o, j) => {
+    const text = typeof o === 'string' ? o : (o && (o.text ?? o.key)) || '';
+    return `  ${j}. ${text}`;
+  });
+  const user = [
+    passage ? `PASSAGE:\n${passage}` : '',
+    `QUESTION:\n${questionText}`,
+    `Options:\n${opts.join('\n')}`,
+  ].filter(Boolean).join('\n\n');
+
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const result = await chatJSON(
+        [
+          { role: 'system', content: system },
+          { role: 'user', content: user },
+        ],
+        { timeoutMs: ANSWER_TIMEOUT_MS, maxTokens: ANSWER_MAX_TOKENS, maxRetries: 0, temperature: 0.1 }
+      );
+      const idx = Number(result.correct_index);
+      const valid = Number.isInteger(idx) && idx >= 0 && idx < options.length;
+      return { correct_index: valid ? idx : -1, explanation: result.explanation || '' };
+    } catch (err) {
+      if (attempt === 0) {
+        await delay(1000);
+        continue;
+      }
+      console.error('[ai] resolveObjectiveAnswer failed:', err.message);
+      return { correct_index: -1, explanation: '' };
+    }
+  }
+}
+
+/**
  * Second-pass verification of AI-generated objective answers. Confirms each
  * answer against its question and options. Answers that cannot be confirmed
  * are returned with correct_index: -1 (never guessed).
@@ -1015,6 +1065,7 @@ module.exports = {
   generateQuestions,
   extractQuestionsFromText,
   answerObjectiveQuestions,
+  resolveObjectiveAnswer,
   verifyObjectiveAnswers,
   detectAiGeneratedAnswer,
   generateTheoryScheme,

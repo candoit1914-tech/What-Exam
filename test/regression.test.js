@@ -465,3 +465,19 @@ test('EXAMINER_PERSONA is a real persona and examinerPrompt prepends it', () => 
   assert.ok(out.startsWith(ai.EXAMINER_PERSONA), 'persona leads the prompt');
   assert.match(out, /BASE/, 'base content follows the persona');
 });
+
+test('resolveObjectiveAnswer exists and maps options to 0-based lines', async () => {
+  assert.equal(typeof ai.resolveObjectiveAnswer, 'function');
+  const result = await ai.resolveObjectiveAnswer({
+    questionText: 'Capital of Ghana?',
+    passage: '',
+    options: [
+      { key: 'A', text: 'Kumasi' },
+      { key: 'B', text: 'Accra' },
+      { key: 'C', text: 'Tamale' },
+    ],
+  });
+  assert.ok(Number.isInteger(result.correct_index), 'correct_index is an integer');
+  assert.ok(result.correct_index >= -1 && result.correct_index <= 2, 'correct_index in range');
+  assert.equal(typeof result.explanation, 'string');
+});
