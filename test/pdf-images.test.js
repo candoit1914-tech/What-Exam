@@ -297,7 +297,7 @@ test('WhatsApp question delivery sends the diagram image before text when presen
   try {
     db.exec('BEGIN');
     const examId = db.prepare("INSERT INTO exams (title, duration_minutes, status) VALUES ('x', '1', 'live')").run().lastInsertRowid;
-    db.prepare("INSERT INTO questions (exam_id, q_order, type, text, image) VALUES (?,1,'theory','q stem',5,'f.png')").run(examId).lastInsertRowid;
+    db.prepare("INSERT INTO questions (exam_id, q_order, type, text, image) VALUES (?,1,'theory','q stem','f.png')").run(examId).lastInsertRowid;
     const stud = db.prepare("INSERT INTO students (phone) VALUES ('233000000000')").run().lastInsertRowid;
     const sid = db.prepare("INSERT INTO sessions (exam_id, student_id, current_q_order, status) VALUES (?, ?, '1','in_progress')").run(examId, stud).lastInsertRowid;
     const session = db.prepare('SELECT * FROM sessions WHERE id = ?').get(sid);
