@@ -1,6 +1,9 @@
 const fs = require('fs');
 const path = require('path');
 const config = require('../config');
+const { stripMarkers } = require('./textClean');
+
+const IMG_MARKER = /^\[IMG:\d+\]\s*\n?/gm;
 
 let pdfjs = null;
 function loadPdfjs() {
@@ -25,7 +28,7 @@ function openDoc(buffer) {
 }
 
 async function extractText(buffer) {
-  return (await extractDocument(buffer)).text;
+  return stripMarkers((await extractDocument(buffer)).text);
 }
 
 // Helper: multiply 3x3-affine matrices [a,b,c,d,e,f]
@@ -193,23 +196,24 @@ const PAGE_AREA_MIN = 0.015;
 const PAGE_AREA_MAX = 0.20;
 
 /**
- * One pass over the whole document. Returns:
- *   { text, images }
- * where text is the same marker-free joined text as extractText and images
- * are the detected diagrams/figures: [{ page, x, y, w, h, kind, rasterId }]
- * in CANVAS space (top-left origin, y-down, scale 1).
+ * One pass over the whole document: joined text lines, per-page row geometry
+ * (user space), and the filtered image list. Shared by extractDocument and
+ * textWithMarkers so marker placement sees exactly the rows the text came from.
+ * Returns { textLines, rowsByPage, images } where images entries carry the
+ * public canvas-space box plus `userMid` (user-space vertical center) and
+ * `kind`/`rasterId` used by the renderers.
  */
-async function extractDocument(buffer) {
+async function analyzeDocument(buffer) {
   const doc = await openDoc(buffer);
-  const images = [];
-  const parts = [];
   const pageData = [];
   for (let p = 1; p <= doc.numPages; p++) {
-    const data = await analyzePage(doc, p);
-    pageData.push(data);
-    for (const row of data.rows) parts.push(row.line);
+    pageData.push(await analyzePage(doc, p));
   }
-  const text = parts.join('\n').replace(/[ \t]+/g, ' ');
+  const textLines = [];
+  for (const data of pageData) {
+    for (const row of data.rows) textLines.push(row.line);
+  }
+  const text = textLines.join('\n').replace(/[ \t]+/g, ' ');
   if (!text.trim()) throw new Error('No readable text found in PDF (scanned/image PDFs are not supported yet).');
 
   // Assemble images page by page with the size filters applied per page, then
@@ -241,6 +245,7 @@ async function extractDocument(buffer) {
         h: box.h,
         kind: q.kind,
         userBox: { x: box.x, y: box.y, w: box.w, h: box.h },
+        userMid: q.userMid,
         rasterId: q.rasterId ?? null,
       });
     }
@@ -259,6 +264,7 @@ async function extractDocument(buffer) {
     if (!seenBoxes.has(key)) seenBoxes.set(key, new Set());
     seenBoxes.get(key).add(q.page);
   }
+  const images = [];
   for (const q of filtered) {
     if (q.kind === 'vector') {
       const covered = rasters.some((r) => r.page === q.page && overlap(r, q) >= 0.5 * Math.min(r.w * r.h, q.w * q.h));
@@ -266,11 +272,71 @@ async function extractDocument(buffer) {
       const key = [Math.round(q.x / 2) * 2, Math.round(q.y / 2) * 2, Math.round(q.w / 2) * 2, Math.round(q.h / 2) * 2].join(',');
       if ((seenBoxes.get(key) || new Set()).size >= 2) continue; // repeating header/footer ornament
     }
-    delete q.userBox;
     images.push(q);
   }
 
-  return { text, images };
+  return { textLines, images, rowsByPage: pageData.map((d) => d.rows) };
+}
+
+/**
+ * Public extraction: marker-free joined text plus the detected figures
+ * [{ page, x, y, w, h, kind, rasterId }] in canvas space (top-left origin).
+ */
+async function extractDocument(buffer) {
+  const { textLines, images } = await analyzeDocument(buffer);
+  return {
+    text: textLines.join('\n').replace(/[ \t]+/g, ' '),
+    images: images.map((q) => {
+      const { userBox, userMid, ...pub } = q;
+      return pub;
+    }),
+  };
+}
+
+/**
+ * Marked text for the import pipeline: an [IMG:n] line is inserted after the
+ * nearest text row ABOVE each figure (or at the page start when the figure has
+ * no row above it). Returns { text, markers } with markers [{ idx, page }] and
+ * n = the figure's index into the extractDocument images array.
+ */
+async function textWithMarkers(buffer) {
+  const { textLines, images, rowsByPage } = await analyzeDocument(buffer);
+  const pageStarts = [];
+  {
+    let n = 0;
+    for (const rows of rowsByPage) {
+      pageStarts.push(n);
+      n += rows.length;
+    }
+  }
+  // Compute every insertion point against the ORIGINAL line array, then splice
+  // from the highest position down so no earlier splice shifts a later anchor.
+  const inserts = [];
+  for (let i = 0; i < images.length; i++) {
+    const img = images[i];
+    const pageRows = rowsByPage[img.page - 1] || [];
+    let anchor = null;
+    for (const row of pageRows) {
+      if (row.y > img.userMid && (!anchor || row.y - img.userMid < anchor.y - img.userMid)) anchor = row;
+    }
+    let at;
+    if (anchor) {
+      const anchorIndex = textLines.indexOf(anchor.line);
+      at = anchorIndex >= 0 ? anchorIndex + 1 : pageStarts[img.page - 1];
+    } else {
+      at = pageStarts[img.page - 1] || 0;
+    }
+    inserts.push({ at, marker: `[IMG:${i}]`, idx: i, page: img.page });
+  }
+  inserts.sort((a, b) => b.at - a.at);
+  const lines = textLines.slice();
+  const markers = [];
+  for (const ins of inserts) {
+    lines.splice(ins.at, 0, ins.marker);
+    markers.push({ idx: ins.idx, page: ins.page });
+  }
+  markers.sort((a, b) => a.idx - b.idx);
+  return { text: lines.join('\n'), markers };
 }
 
 function saveUpload(buffer, originalName) {
@@ -280,4 +346,4 @@ function saveUpload(buffer, originalName) {
   return filePath;
 }
 
-module.exports = { extractText, extractDocument, saveUpload, loadPdfjs, openDoc };
+module.exports = { extractText, extractDocument, textWithMarkers, stripMarkers, saveUpload, loadPdfjs, openDoc };

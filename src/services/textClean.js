@@ -11,6 +11,10 @@ const WATERMARK = /sronu|downloaded\s+(from|by)|source\s*[:=]|visit\s+(us\s+)?at
 const FRAGMENT = /^(downloaded|from)$/i;
 const URL_LINE =
   /^(?:https?:\/\/)?(?:www\.)?[a-z0-9][a-z0-9.-]*\.(?:com|org|net|gh|edu|co)(?:\/[\w./-]*)?$/i;
+// Whole marker lines [IMG:n] inserted at figure positions by the PDF
+// extraction pipeline. They are payload for question attachment, never
+// content, so they are stripped everywhere the text is stored or shown.
+const IMG_MARKER = /^\[IMG:\d+\]\s*\n?/gm;
 
 function stripSourceWatermarks(text) {
   const lines = String(text || '').split(/\r?\n/);
@@ -22,4 +26,10 @@ function stripSourceWatermarks(text) {
   return kept.join('\n').replace(/\n{2,}/g, '\n').trim();
 }
 
-module.exports = { stripSourceWatermarks };
+// Whole marker lines [IMG:n] inserted at figure positions are payload for the
+// attachment pipeline, never content: strip every one.
+function stripMarkers(text) {
+  return String(text || '').replace(IMG_MARKER, '');
+}
+
+module.exports = { stripSourceWatermarks, stripMarkers };
