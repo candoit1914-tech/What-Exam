@@ -265,12 +265,17 @@ async function analyzeDocument(buffer) {
     seenBoxes.get(key).add(q.page);
   }
   const images = [];
-  for (const q of filtered) {
+  for (let p = 0; p < filtered.length; p++) {
+    const q = filtered[p];
     if (q.kind === 'vector') {
       const covered = rasters.some((r) => r.page === q.page && overlap(r, q) >= 0.5 * Math.min(r.w * r.h, q.w * q.h));
       if (covered) continue; // frame/outline around a raster figure
       const key = [Math.round(q.x / 2) * 2, Math.round(q.y / 2) * 2, Math.round(q.w / 2) * 2, Math.round(q.h / 2) * 2].join(',');
       if ((seenBoxes.get(key) || new Set()).size >= 2) continue; // repeating header/footer ornament
+      // Text-in-box exclusion: a region containing text rows is a table /
+      // labelled graphic, not a figure the students must draw or read.
+      const qRows = pageData[q.page - 1].rows;
+      if (qRows.some((row) => row.y >= q.userBox.y && row.y <= q.userBox.y + q.userBox.h)) continue;
     }
     images.push(q);
   }
@@ -434,6 +439,186 @@ async function renderImage(buffer, image, outPath) {
   return outPath;
 }
 
+// Convert pdfjs color args ([r,g,b] 0..1 or gray or cmyk) to a css color
+// string usable by @napi-rs/canvas. Returns null when the args are not a
+// plain gray/rgb/cmyk array (e.g. pattern or device-n references).
+function cssColorFromArgs(args) {
+  if (!args || !args.every((v) => typeof v === 'number')) return null;
+  const toHex = (v) => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, '0');
+  if (args.length === 1) {
+    const g = toHex(args[0] * 255);
+    return `#${g}${g}${g}`;
+  }
+  if (args.length === 3 && args.every((v) => v >= 0 && v <= 1)) {
+    return `#${toHex(args[0] * 255)}${toHex(args[1] * 255)}${toHex(args[2] * 255)}`;
+  }
+  if (args.length === 4) {
+    const [c, m, y, k] = args;
+    return `#${toHex(255 * (1 - c) * (1 - k))}${toHex(255 * (1 - m) * (1 - k))}${toHex(255 * (1 - y) * (1 - k))}`;
+  }
+  return null;
+}
+
+/**
+ * Replay the page's operator list onto a real @napi-rs/canvas context,
+ * skipping the text ops (glyph paths are not consumable by the native
+ * canvas). Returns the full-page RGBA canvas mapped through the viewport
+ * transform (canvas space, y-down).
+ */
+async function replayPageOps(page, vp) {
+  const { createCanvas } = require('@napi-rs/canvas');
+  const { OPS } = loadPdfjs();
+  const ops = await page.getOperatorList();
+  const canvas = createCanvas(Math.ceil(vp.width), Math.ceil(vp.height));
+  const ctx = canvas.getContext('2d');
+  const [a, b, c, d, e, f] = vp.transform;
+  ctx.transform(a, b, c, d, e, f);
+
+  const colorOp = (args, target) => {
+    const col = cssColorFromArgs(args);
+    if (col) ctx[target] = col;
+  };
+  const fillOrStroke = (fn) => {
+    if (fn & 1) {
+      try { ctx.fill(); } catch { /* clip-only paths */ }
+    }
+    if (fn & 2) {
+      try { ctx.stroke(); } catch { /* clip-only paths */ }
+    }
+  };
+
+  const srcCache = new Map();
+  const drawRaster = (args) => {
+    const src = srcCache.get(args[0]);
+    if (src) {
+      ctx.drawImage(src, 0, 0, 1, 1);
+      return;
+    }
+    let img = null;
+    try { img = page.objs.get(String(args[0])); } catch { img = null; }
+    if (!img || !img.width) return;
+    const rgba = rgbaFromPixels(img);
+    if (!rgba) return;
+    const s = createCanvas(img.width, img.height);
+    const sctx = s.getContext('2d');
+    const id = sctx.createImageData(img.width, img.height);
+    id.data.set(rgba);
+    sctx.putImageData(id, 0, 0);
+    const srcCanvas = s;
+    srcCache.set(args[0], srcCanvas);
+    ctx.drawImage(srcCanvas, 0, 0, 1, 1);
+  };
+
+  for (let i = 0; i < ops.fnArray.length; i++) {
+    const fn = ops.fnArray[i];
+    const args = ops.argsArray[i] || [];
+    switch (fn) {
+      case OPS.save: ctx.save(); break;
+      case OPS.restore: ctx.restore(); break;
+      case OPS.transform: ctx.transform(...args); break;
+      case OPS.translate: ctx.translate(args[0], args[1]); break;
+      case OPS.scale: ctx.scale(args[0], args[1]); break;
+      case OPS.rotate: ctx.rotate(args[0]); break;
+      case OPS.setTransform: ctx.setTransform(...args); break;
+      case OPS.setLineWidth: ctx.lineWidth = args[0]; break;
+      case OPS.setLineCap: ctx.lineCap = ['butt', 'round', 'square'][args[0]] || 'butt'; break;
+      case OPS.setLineJoin: ctx.lineJoin = ['miter', 'round', 'bevel'][args[0]] || 'miter'; break;
+      case OPS.setMiterLimit: ctx.miterLimit = args[0]; break;
+      case OPS.setDash: ctx.setLineDash(args[0] || []); ctx.lineDashOffset = args[1] || 0; break;
+      case OPS.setGlobalAlpha: ctx.globalAlpha = args[0]; break;
+      case OPS.setFillRGBColor:
+      case OPS.setFillColorN:
+      case OPS.setFillColor:
+        colorOp(args, 'fillStyle'); break;
+      case OPS.setStrokeRGBColor:
+      case OPS.setStrokeColorN:
+      case OPS.setStrokeColor:
+        colorOp(args, 'strokeStyle'); break;
+      case OPS.beginPath: ctx.beginPath(); break;
+      case OPS.closePath: ctx.closePath(); break;
+      case OPS.moveTo: ctx.moveTo(args[0], args[1]); break;
+      case OPS.lineTo: ctx.lineTo(args[0], args[1]); break;
+      case OPS.curveTo: ctx.bezierCurveTo(...args); break;
+      case OPS.curveTo2: ctx.quadraticCurveTo(args[0], args[1], args[2], args[3]); break;
+      case OPS.curveTo3: ctx.quadraticCurveTo(args[0], args[1], args[2], args[3]); break;
+      case OPS.rectangle: ctx.rect(args[0], args[1], args[2], args[3]); break;
+      case OPS.ellipse: ctx.ellipse(args[0], args[1], args[2], args[3], 0, 0, Math.PI * 2); break;
+      case OPS.fill:
+      case OPS.eoFill:
+        if (args[0] === 2) { try { ctx.fill('evenodd'); } catch { /* opaque layers */ } }
+        else { try { ctx.fill(); } catch { /* clip-only */ } }
+        break;
+      case OPS.stroke:
+        try { ctx.stroke(); } catch { /* clip-only */ }
+        break;
+      case OPS.fillStroke:
+        fillOrStroke(3);
+        break;
+      case OPS.closeFillStroke:
+        ctx.closePath();
+        fillOrStroke(3);
+        break;
+      case OPS.closeStroke:
+        ctx.closePath();
+        try { ctx.stroke(); } catch { /* clip-only */ }
+        break;
+      case OPS.clip:
+        if (args[0] === 2) { try { ctx.clip('evenodd'); } catch { /* skip */ } }
+        else { try { ctx.clip(); } catch { /* skip */ } }
+        break;
+      case OPS.eoClip:
+        try { ctx.clip('evenodd'); } catch { /* skip */ }
+        break;
+      case OPS.endPath:
+        ctx.beginPath();
+        break;
+      case OPS.paintImageXObject:
+        drawRaster(args);
+        break;
+      case OPS.paintInlineImageXObject:
+        if (args[0] && args[0].width && args[0].data) {
+          const { width, height, data } = args[0];
+          const rgba = data.length >= width * height * 4 ? data : rgbaFromPixels({ width, height, kind: 2, data });
+          if (rgba) {
+            const s = createCanvas(width, height);
+            const sctx = s.getContext('2d');
+            const id = sctx.createImageData(width, height);
+            id.data.set(rgba.subarray ? rgba.subarray(0, width * height * 4) : rgba.slice(0, width * height * 4));
+            sctx.putImageData(id, 0, 0);
+            ctx.drawImage(s, 0, 0, 1, 1);
+          }
+        }
+        break;
+      // showText family and text-state ops are intentionally skipped — glyph
+      // paths cannot be replayed on the native canvas.
+      default:
+        break;
+    }
+  }
+  return canvas;
+}
+
+/**
+ * Render a vector region (lines, fills, strokes, curves — no text) to a PNG
+ * by replaying the page operator list cropped to the figure's box at 2x.
+ * Returns outPath (side effect: writes the file).
+ */
+async function renderVectorRegion(buffer, image, outPath) {
+  const { createCanvas } = require('@napi-rs/canvas');
+  const doc = await openDoc(buffer);
+  const page = await doc.getPage(image.page);
+  const vp = page.getViewport({ scale: 1 });
+  const full = await replayPageOps(page, vp);
+  const pad = 4;
+  const cw = Math.max(1, Math.round((image.w + pad * 2) * 2));
+  const ch = Math.max(1, Math.round((image.h + pad * 2) * 2));
+  const out = createCanvas(cw, ch);
+  const octx = out.getContext('2d');
+  octx.drawImage(full, image.x - pad, image.y - pad, image.w + pad * 2, image.h + pad * 2, 0, 0, cw, ch);
+  fs.writeFileSync(outPath, out.toBuffer('image/png'));
+  return outPath;
+}
+
 function saveUpload(buffer, originalName) {
   const name = `${Date.now()}-${path.basename(originalName || 'upload.pdf')}`;
   const filePath = path.join(config.uploadsDir, name);
@@ -441,4 +626,4 @@ function saveUpload(buffer, originalName) {
   return filePath;
 }
 
-module.exports = { extractText, extractDocument, textWithMarkers, stripMarkers, renderImage, saveUpload, loadPdfjs, openDoc };
+module.exports = { extractText, extractDocument, textWithMarkers, stripMarkers, renderImage, renderVectorRegion, saveUpload, loadPdfjs, openDoc };

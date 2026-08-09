@@ -149,3 +149,32 @@ test('renderImage on a vector image falls back to a placeholder without throwing
   assert.equal(meta.format, 'png');
   assert.equal(meta.width, Math.round(vec.w * 2), 'placeholder matches the vector box 2x');
 });
+
+test('vector regions render a non-blank PNG', async () => {
+  const { images } = await pdf.extractDocument(fixture);
+  const v = images.find((i) => i.kind === 'vector');
+  assert.ok(v, 'page-2 vector exists');
+  const dest = path.join(TMP, 'v.png');
+  await pdf.renderVectorRegion(fixture, v, dest);
+  const buf = fs.readFileSync(dest);
+  assert.equal(buf.slice(0, 8).toString('hex'), '89504e470d0a1a0a', 'PNG magic');
+  const sharp = require('sharp');
+  const { data } = await sharp(dest).raw().toBuffer({ resolveWithObject: true });
+  let dark = 0;
+  for (let i = 0; i < data.length; i += 4) {
+    if (data[i] < 128) dark++;
+  }
+  assert.ok(dark > 0, 'has non-white pixels (the black 300x250 box)');
+});
+
+test('vector regions with text inside are NOT listed as diagrams', async () => {
+  const doc = new PDFDocument();
+  doc.rect(50, 200, 400, 150).fill('#eeeeee');
+  doc.fontSize(10).text('pH table cell text 1', 55, 245);
+  doc.text('pH table cell text 2', 55, 260);
+  doc.end();
+  const buf2 = await collectPdf(doc);
+  const { images } = await pdf.extractDocument(buf2);
+  const r = images.find((i) => i.kind === 'vector');
+  assert.equal(r, undefined, 'vector with text inside is excluded');
+});
