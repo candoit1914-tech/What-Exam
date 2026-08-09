@@ -55,9 +55,12 @@ function verifyReportToken(token, sessionId) {
   return !!p && p.sub === 'report' && p.sid === String(sessionId);
 }
 
-function reportUrl(sessionId) {
-  const token = signToken({ sub: 'report', sid: String(sessionId) }, REPORT_TTL_MS);
-  return `/report/${sessionId}?token=${encodeURIComponent(token)}`;
+function reportToken(sessionId) {
+  return signToken({ sub: 'report', sid: String(sessionId) }, REPORT_TTL_MS);
 }
 
-module.exports = { verifyPassword, adminToken, verifyAdmin, verifyReportToken, reportUrl, ADMIN_TTL_MS };
+function reportUrl(sessionId) {
+  return `/report/${sessionId}?token=${encodeURIComponent(reportToken(sessionId))}`;
+}
+
+module.exports = { verifyPassword, adminToken, verifyAdmin, verifyReportToken, reportUrl, reportToken, ADMIN_TTL_MS };

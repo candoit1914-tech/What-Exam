@@ -270,3 +270,18 @@ test('import loop renders the marker image into uploads (smoke via helper path)'
   const { meta } = await pngStats(written);
   assert.equal(meta.format, 'png', 'rendered image usable by the import loop');
 });
+
+test('reportHTML renders an img tag for a question with an image', () => {
+  const results = require('../src/services/results');
+  const db = require('../src/db');
+  db.exec('BEGIN');
+  try {
+    const examId = db.prepare("INSERT INTO exams (title, duration_minutes) VALUES ('r', 1)").run().lastInsertRowid;
+    db.prepare("INSERT INTO students (id, phone) VALUES (0, '+233000000000')").run();
+    const sid = db.prepare("INSERT INTO sessions (exam_id, student_id, status) VALUES (?, 0, 'completed')").run(examId).lastInsertRowid;
+    const qid = db.prepare("INSERT INTO questions (exam_id, q_order, type, text, marks, image) VALUES (?,1,'theory','q',5,'x.png')").run(examId).lastInsertRowid;
+    db.prepare("INSERT INTO answers (session_id, question_id, q_order, answer_text, is_correct, marks_awarded, max_marks) VALUES (?,?,1,'x',0,0,5)").run(sid, qid);
+    const r = results.reportHTML(sid);
+    assert.match(r.html, /<img[^>]+src="[^"]*attachment\?file=/);
+  } finally { db.exec('ROLLBACK'); }
+});

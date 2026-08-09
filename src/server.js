@@ -1,4 +1,5 @@
 const express = require('express');
+const path = require('path');
 const config = require('./config');
 const api = require('./routes/api');
 const webhook = require('./routes/webhook');
@@ -34,6 +35,16 @@ app.use('/webhook/whatsapp', webhook);
 
 app.use(express.json());
 app.use('/api', api);
+app.get('/report/:sessionId/attachment', (req, res) => {
+  if (!auth.verifyReportToken(req.query.token, req.params.sessionId)) {
+    return res.status(403).send('Invalid or expired report link.');
+  }
+  const name = path.basename(String(req.query.file || ''));
+  if (!/^[\w-]+\.png$/i.test(name)) return res.status(400).send('Bad file name');
+  const full = path.join(config.uploadsDir, name);
+  res.type('image/png').sendFile(full).on('error', () => res.status(404).end());
+});
+
 app.get('/report/:sessionId', (req, res) => {
   if (!auth.verifyReportToken(req.query.token, req.params.sessionId)) {
     return res

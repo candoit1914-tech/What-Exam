@@ -130,6 +130,7 @@ function reportHTML(sessionId) {
               COALESCE(p.options, q.options) AS options,
               COALESCE(p.correct_answer, q.correct_answer) AS correct_answer,
               COALESCE(p.explanation, q.explanation) AS explanation,
+              COALESCE(p.image, q.image) AS image,
               COALESCE(p.scheme_json, m.scheme) AS scheme
        FROM answers a
        LEFT JOIN session_questions sq ON sq.session_id = a.session_id AND sq.q_order = a.q_order
@@ -214,6 +215,7 @@ function reportHTML(sessionId) {
           <span class="q-status ${isCorrect ? 's-pass' : 's-fail'}">${isCorrect ? 'Correct' : a.needs_review ? 'Review' : 'Incorrect'}</span>
         </header>
         <p class="q-text">${a.passage ? `<span class="q-passage">${esc(a.passage)}</span><br><br>` : ''}${esc(a.text)}</p>
+        ${a.image ? `<img class="qimg report-img" src="/report/${sessionId}/attachment?file=${encodeURIComponent(a.image)}&token=${encodeURIComponent(auth.reportToken(sessionId))}" alt="diagram">` : ''}
         ${body}
       </article>`;
     })
