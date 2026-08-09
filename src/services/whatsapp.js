@@ -177,8 +177,15 @@ async function sendText(to, text) {
   return data;
 }
 
-/** Upload a PNG buffer to the Media API, then send it as an image message. */
-async function sendImage(to, imageBuffer) {
+/** Upload a PNG (buffer or file path) to the Media API, then send it as an image message. */
+async function sendImage(to, image) {
+  let imageBuffer;
+  if (Buffer.isBuffer(image)) {
+    imageBuffer = image;
+  } else {
+    const fs = require('fs');
+    imageBuffer = fs.readFileSync(image);
+  }
   const form = new FormData();
   form.append('messaging_product', 'whatsapp');
   form.append('type', 'image/png');

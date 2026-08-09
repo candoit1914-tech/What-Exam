@@ -1,4 +1,5 @@
 const db = require('../db');
+const path = require('path');
 const config = require('../config');
 const wa = require('./whatsapp');
 const marking = require('./marking');
@@ -518,6 +519,14 @@ async function sendQuestionTo(session, student) {
   }
   const sequence = sessionQuestionSequence(session);
   const index = sequence.findIndex((q) => q.id === question.id);
+  // The question's diagram arrives first as its own image bubble; the text
+  // and options follow. Rendering/send failures must never stall delivery,
+  // so a diagram send error logs and continues.
+  if (question.image) {
+    await wa.sendImage(student.phone, path.join(config.uploadsDir, question.image)).catch((err) => {
+      console.error('[exam] image send failed (continued):', err.message);
+    });
+  }
   for (const bubble of buildQuestionBubbles(exam, question, sequence, index)) {
     await wa.sendText(student.phone, bubble);
   }

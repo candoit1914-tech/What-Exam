@@ -285,3 +285,27 @@ test('reportHTML renders an img tag for a question with an image', () => {
     assert.match(r.html, /<img[^>]+src="[^"]*attachment\?file=/);
   } finally { db.exec('ROLLBACK'); }
 });
+
+test('WhatsApp question delivery sends the diagram image before text when present', async () => {
+  const examMod = require('../src/services/exam');
+  const wa = require('../src/services/whatsapp');
+  const db = require('../src/db');
+  const origImg = wa.sendImage, origTxt = wa.sendText;
+  const calls = [];
+  wa.sendImage = async () => { calls.push('image'); };
+  wa.sendText = async () => { calls.push('text'); };
+  try {
+    db.exec('BEGIN');
+    const examId = db.prepare("INSERT INTO exams (title, duration_minutes, status) VALUES ('x', '1', 'live')").run().lastInsertRowid;
+    db.prepare("INSERT INTO questions (exam_id, q_order, type, text, image) VALUES (?,1,'theory','q stem',5,'f.png')").run(examId).lastInsertRowid;
+    const stud = db.prepare("INSERT INTO students (phone) VALUES ('233000000000')").run().lastInsertRowid;
+    const sid = db.prepare("INSERT INTO sessions (exam_id, student_id, current_q_order, status) VALUES (?, ?, '1','in_progress')").run(examId, stud).lastInsertRowid;
+    const session = db.prepare('SELECT * FROM sessions WHERE id = ?').get(sid);
+    await examMod.sendQuestionTo(session, { phone: '233000000000' });
+    assert.equal(calls[0], 'image', 'image is the first WhatsApp bubble');
+    assert.ok(calls.slice(1).includes('text'), 'question text follows the image');
+  } finally {
+    db.exec('ROLLBACK');
+    wa.sendImage = origImg; wa.sendText = origTxt;
+  }
+});
