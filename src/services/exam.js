@@ -130,8 +130,8 @@ function topUpPool(examId, currentPool, target) {
   const inPool = new Set(currentPool.map((r) => String(r.text || '').trim()));
   const templates = db.prepare('SELECT * FROM questions WHERE exam_id = ? ORDER BY q_order').all(examId);
   const insertPool = db.prepare(
-    `INSERT INTO question_pool (exam_id, type, text, passage, options, correct_answer, marks, difficulty, learning_objective, explanation, scheme_json, source)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`
+    `INSERT INTO question_pool (exam_id, type, text, passage, options, correct_answer, marks, difficulty, learning_objective, explanation, scheme_json, source, image)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`
   );
   let added = 0;
   for (const t of templates) {
@@ -142,7 +142,7 @@ function topUpPool(examId, currentPool, target) {
     insertPool.run(
       examId, t.type, t.text, t.passage || '', t.options || null, t.correct_answer || null,
       t.marks, t.difficulty || 'medium', t.learning_objective || '', t.explanation || '',
-      scheme ? scheme.scheme : '', t.source || 'manual'
+      scheme ? scheme.scheme : '', t.source || 'manual', t.image || ''
     );
     inPool.add(text);
     added++;
@@ -1071,6 +1071,7 @@ module.exports = {
   getSessionQuestionCount,
   sessionQuestionSequence,
   drawSessionQuestions,
+  topUpPool,
   nextInSequence,
   deadline,
   markAllPendingTheory,

@@ -189,6 +189,8 @@ function ensureColumn(table, column, ddl) {
 }
 ensureColumn('questions', 'passage', "TEXT DEFAULT ''");
 ensureColumn('question_pool', 'passage', "TEXT DEFAULT ''");
+ensureColumn('questions', 'image', "TEXT DEFAULT ''");
+ensureColumn('question_pool', 'image', "TEXT DEFAULT ''");
 ensureColumn('answers', 'ai_detected', "INTEGER NOT NULL DEFAULT 0");
 ensureColumn('jobs', 'warning', "TEXT DEFAULT ''");
 

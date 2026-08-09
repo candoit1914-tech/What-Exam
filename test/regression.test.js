@@ -1513,3 +1513,24 @@ test('chatJSON surfaces the primary error when both providers fail', async () =>
     restoreAIState(state);
   }
 });
+
+// ── PDF diagram extraction: db migration ──
+
+test('db migration adds image columns to questions and question_pool', () => {
+  const db = require('../src/db');
+  const cols = (t) => db.prepare(`PRAGMA table_info(${t})`).all().map((c) => c.name);
+  assert.ok(cols('questions').includes('image'), 'questions.image exists');
+  assert.ok(cols('question_pool').includes('image'), 'question_pool.image exists');
+});
+
+test('topUpPool copies the image column into pool rows', () => {
+  const db = require('../src/db');
+  db.exec('BEGIN');
+  try {
+    const examId = db.prepare("INSERT INTO exams (title, duration_minutes) VALUES ('x', 1)").run().lastInsertRowid;
+    db.prepare("INSERT INTO questions (exam_id, q_order, type, text, image) VALUES (?,1,'objective','Q', 'diag-1.png')").run(examId);
+    exam.topUpPool(examId, [], 1);
+    const pool = db.prepare('SELECT image FROM question_pool WHERE exam_id = ?').all(examId);
+    assert.equal(pool[0].image, 'diag-1.png', 'pool copy keeps image file name');
+  } finally { db.exec('ROLLBACK'); }
+});
