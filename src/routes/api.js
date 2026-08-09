@@ -1,5 +1,7 @@
 const express = require('express');
 const multer = require('multer');
+const fs = require('fs');
+const path = require('path');
 const db = require('../db');
 const ai = require('../services/ai');
 const marking = require('../services/marking');
@@ -500,6 +502,15 @@ router.post('/exams/:id/pdf', upload.single('file'), asyncWrap(async (req, res) 
   });
   res.json({ jobId, message: 'Upload accepted. Extraction is running in the background.' });
 }));
+
+// Diagrams extracted from uploaded PDFs, saved as PNGs in uploadsDir.
+router.get('/exams/:id/images/:file', (req, res) => {
+  const name = path.basename(String(req.params.file || ''));
+  if (!/^[\w-]+\.png$/i.test(name)) return res.status(400).json({ error: 'Bad file name' });
+  const full = path.join(config.uploadsDir, name);
+  if (!fs.existsSync(full)) return res.status(404).json({ error: 'Image not found' });
+  res.type('image/png').sendFile(full);
+});
 
 // ── Background jobs ───────────────────────────────────────────────────
 

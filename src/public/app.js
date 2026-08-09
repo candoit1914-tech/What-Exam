@@ -646,7 +646,8 @@ function qitemHTML(q, id, samePassageAsPrev = false) {
         ${q.passage && samePassageAsPrev
           ? `<div class="qpassage-same">↳ same passage as above</div>`
           : q.passage ? `<div class="qpassage">${esc(q.passage)}</div>` : ''}
-        <div class="qtext">${esc(q.text)}</div>
+<div class="qtext">${esc(q.text)}</div>
+        ${q.image ? `<div class="qimg-wrap"><img class="qimg" src="${API_BASE}/api/exams/${id}/images/${encodeURIComponent(q.image)}" alt="diagram"></div>` : ''}
         <div class="opts-list">
           ${opts.map((o) => `<div class="${o.key === q.correct_answer ? 'correct' : ''}">${o.key}. ${esc(o.text)}${o.key === q.correct_answer ? ' ✓' : ''}</div>`).join('')}
         </div>
@@ -701,7 +702,7 @@ function schemeHTML(q, id) {
 
 // ── Question actions ─────────────────────────────────────────────
 
-function questionFormHTML(q) {
+function questionFormHTML(q, id) {
   const type = q?.type || 'objective';
   const opts = (q?.options || [{ key: 'A', text: '' }, { key: 'B', text: '' }, { key: 'C', text: '' }, { key: 'D', text: '' }]);
   return `
@@ -711,6 +712,7 @@ function questionFormHTML(q) {
       <label style="display:flex;gap:6px;align-items:center"><input type="radio" name="q_type" value="theory" ${type === 'theory' ? 'checked' : ''} onchange="toggleType()"> Theory</label>
     </div>
     <div class="field"><label>Question</label><textarea id="qf_text">${esc(q?.text || '')}</textarea></div>
+    ${q?.image && id ? `<div class="field"><label>Diagram</label><img class="qimg" style="max-width:320px" src="${API_BASE}/api/exams/${id}/images/${encodeURIComponent(q.image)}" alt="diagram"></div>` : ''}
     <div class="field"><label>Passage (reading comprehension) — optional</label><textarea id="qf_passage" placeholder="Text the question is based on...">${esc(q?.passage || '')}</textarea></div>
     <div id="qf_opts">
       ${opts.map((o) => `<div class="row" style="margin:4px 0">
@@ -793,7 +795,7 @@ async function addQuestionForm(id) {
 
 async function editQuestionForm(id, qid) {
   const q = examState.data.questions.find((x) => x.id === qid);
-  const div = await openModal('Edit Question', questionFormHTML(q));
+  const div = await openModal('Edit Question', questionFormHTML(q, id));
   if (!div) return;
   const addBtn = document.createElement('button');
   addBtn.textContent = 'Save Question';
