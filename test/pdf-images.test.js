@@ -178,3 +178,75 @@ test('vector regions with text inside are NOT listed as diagrams', async () => {
   const r = images.find((i) => i.kind === 'vector');
   assert.equal(r, undefined, 'vector with text inside is excluded');
 });
+
+// ── Task 6: marker attachment in the extraction pipeline ──────────────
+
+const aiMod = require('../src/services/ai');
+
+async function withStubChatJSON(questions, fn) {
+  const orig = aiMod.chatJSON;
+  aiMod.chatJSON = async () => ({ questions });
+  try {
+    return await fn();
+  } finally {
+    aiMod.chatJSON = orig;
+  }
+}
+
+test('extraction attaches markers that survived into a question and strips them from text', async () => {
+  await withStubChatJSON(
+    [{ type: 'theory', number: 1, text: 'Look at Figure 1. [IMG:0]', passage: 'Figure 1 - a map' }],
+    async () => {
+      const qs = await aiMod.extractQuestionsFromText(
+        '1. Look at Figure 1.\n[IMG:0]\nFigure 1 - a map\n\n',
+        null, null,
+        { markers: [{ idx: 0, page: 1 }] }
+      );
+      assert.equal(qs.length, 1);
+      assert.equal(qs[0].text, 'Look at Figure 1.', 'marker stripped from text');
+      assert.equal(qs[0].passage, 'Figure 1 - a map', 'marker stripped from passage');
+      assert.equal(qs[0].markerIndex, 0, 'marker attached to the question that kept it');
+    }
+  );
+});
+
+test('extraction falls back to the first question of the block when the AI dropped the marker', async () => {
+  await withStubChatJSON(
+    [{ type: 'objective', number: 7, text: 'Which instrument measures current?', options: ['A. Voltmeter', 'B. Ammeter', 'C. Ohmmeter', 'D. Galvanometer'] }],
+    async () => {
+      const qs = await aiMod.extractQuestionsFromText(
+        '7. Which instrument measures current?\n[IMG:2]\n',
+        null, null,
+        { markers: [{ idx: 2, page: 2 }] }
+      );
+      assert.equal(qs.length, 1);
+      assert.equal(qs[0].markerIndex, 2, 'fallback: marker attaches to the first question of the block');
+    }
+  );
+});
+
+test('extraction warns (once) when a marker block yielded no questions', async () => {
+  const warnings = [];
+  await withStubChatJSON([], async () => {
+    await aiMod.extractQuestionsFromText(
+      '9. State two uses of a thermometer.\n[IMG:4]\n',
+      null, (w) => warnings.push(w),
+      { markers: [{ idx: 4, page: 3 }] }
+    );
+  });
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /diagram/);
+});
+
+test('stripping does not fire when the document had no markers at all', async () => {
+  const warnings = [];
+  await withStubChatJSON(
+    [{ type: 'theory', number: 1, text: 'Explain photosynthesis.', passage: '' }],
+    async () => {
+      const qs = await aiMod.extractQuestionsFromText('1. Explain photosynthesis.\n', null, (w) => warnings.push(w));
+      assert.equal(qs[0].markerIndex, undefined, 'no marker attachment for marker-less documents');
+      assert.equal(qs[0].text, 'Explain photosynthesis.');
+    }
+  );
+  assert.equal(warnings.length, 0, 'no phantom-marker warnings for pasted text');
+});

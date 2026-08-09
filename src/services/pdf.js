@@ -3,8 +3,6 @@ const path = require('path');
 const config = require('../config');
 const { stripMarkers } = require('./textClean');
 
-const IMG_MARKER = /^\[IMG:\d+\]\s*\n?/gm;
-
 let pdfjs = null;
 function loadPdfjs() {
   if (!pdfjs) {

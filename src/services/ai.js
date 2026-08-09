@@ -1,5 +1,5 @@
 const config = require('../config');
-const { stripSourceWatermarks } = require('./textClean');
+const { stripSourceWatermarks, stripMarkers } = require('./textClean');
 
 class AIError extends Error {
   constructor(message) {
@@ -247,6 +247,42 @@ async function mapLimit(items, limit, fn) {
 }
 
 /**
+ * Attach figure markers to questions after extraction.
+ *
+ * `questionsByBlock[b]` is the list of questions parsed from block `b`;
+ * `markersByBlock[b]` is the list of `{idx}` markers that survived inside
+ * that block. A marker is gifted to the question whose `text`/`passage`
+ * contains its verbatim `[IMG:n]` line (the AI is told to preserve them);
+ * a marker that no question kept falls back to the block's FIRST question.
+ * Attach is recorded as `q.markerIndex` so pdfImport can turn it into a file
+ * name — never as a stored text field.
+ *
+ * Returns { used:Set, unused:[] } — `unused` holds markers whose block
+ * yielded no questions at all (skipped blocks), so the caller can warn.
+ */
+function attachMarkers(questionsByBlock, markersByBlock) {
+  const used = new Set();
+  const allMarkers = [];
+  for (let b = 0; b < markersByBlock.length; b++) {
+    const qs = questionsByBlock[b] || [];
+    for (const m of markersByBlock[b] || []) {
+      allMarkers.push(m);
+      let target = null;
+      for (const q of qs) {
+        const textQ = String(q.text || '') + ' ' + String(q.passage || '');
+        if (textQ.includes(`[IMG:${m.idx}]`)) { target = q; break; }
+      }
+      if (!target && qs.length) target = qs[0];
+      if (target) {
+        target.markerIndex = m.idx;
+        used.add(m.idx);
+      }
+    }
+  }
+  return { used, unused: allMarkers.filter((m) => !used.has(m.idx)) };
+}
+
+/**
  * Generate a full exam question set with automatic marking scheme.
  * When poolSize is greater than count, produces up to poolSize DISTINCT
  * questions over several calls so each attempt can draw a fresh set.
@@ -422,7 +458,7 @@ function textSimilarity(a, b) {
  * exceeds the bulk timeout on slow models (e.g. huge 100B+ endpoints), which
  * is what made PDF uploads time out. Small blocks keep every call fast.
  */
-async function extractQuestionsFromText(rawText, onProgress, onWarning) {
+async function extractQuestionsFromText(rawText, onProgress, onWarning, opts = {}) {
   // Read the export so tests can stub it.
   const chatJSON = module.exports.chatJSON;
   const text = String(rawText || '').trim();
@@ -431,6 +467,16 @@ async function extractQuestionsFromText(rawText, onProgress, onWarning) {
   const { cleanText, answerMap, answerKey, modelSolutions: markingScheme } =
     splitSolutionSections(text);
   const blocks = splitIntoBlocks(cleanText);
+  // [IMG:n] marker lines ride inside rawText, so the surviving markers are the
+  // ones still present per block after solutions/section splitting. opts.markers
+  // (array of {idx, page} from textWithMarkers) only tells us markers SHOULD
+  // exist — without it a pasted document is never warned about "missing"
+  // figures it never had.
+  const markersPresent = Array.isArray(opts.markers) && opts.markers.length > 0;
+  const markersByBlock = markersPresent
+    ? blocks.map((blk) => [...blk.matchAll(/\[IMG:(\d+)\]/g)].map((mm) => ({ idx: Number(mm[1]) })))
+    : null;
+  const questionsByBlock = blocks.map(() => []);
 
   const system = SYSTEM_BASE + `
 You are given the raw text of an examination document. Extract every question.
@@ -479,6 +525,7 @@ Rules:
 - For theory questions with no rubric in the source, leave rubric/model_answer empty (the system will generate them).
 - Do NOT invent answer keys that are not in the document. Leave correct_answer as "" and correct_index as null when unknown.
 - WATERMARK LINES: Never copy watermark, source, or download footer/header lines (e.g. "Downloaded from sronu.com", "Source: www.example.com", "DOWNLOADED FROM SRONU") into text, passage, or instructions. Always drop such lines.
+- FIGURE MARKERS: Raw text may contain lines like "[IMG:5]" — those are real figure markers from the paper. If a marker belongs to this question's stem or its figure caption, PRESERVE it verbatim in the "text" or "passage" field of that question (never invent or move markers).
 - COMPACT OUTPUT: keep option text short, leave explanation and learning_objective empty, and do not repeat the passage for later questions. Output ONLY the JSON object.
 `;
 
@@ -635,8 +682,25 @@ Rules:
       if (t && !seen.has(t)) {
         seen.add(t);
         all.push(q);
+        questionsByBlock[i].push(q);
       }
     }
+  }
+
+  // Hand every figure marker to the question that kept it, with a fallback to
+  // the first question of its block; then markers never leak into stored
+  // text/passage whether or not any were attached.
+  if (markersPresent) {
+    const { unused } = attachMarkers(questionsByBlock, markersByBlock);
+    if (unused.length && onWarning) {
+      onWarning(
+        `Detected ${unused.length} diagram(s) that could not be matched to a question - check them after import.`
+      );
+    }
+  }
+  for (const q of all) {
+    q.text = stripMarkers(q.text);
+    q.passage = stripMarkers(q.passage);
   }
   return all;
 }
@@ -1287,6 +1351,7 @@ module.exports = {
   cleanExamText,
   extractAnswerKeySection,
   extractMarkingSchemeSection,
+  attachMarkers,
   parseJSON,
   repairTruncatedJSON,
 };
