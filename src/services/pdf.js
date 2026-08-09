@@ -339,6 +339,101 @@ async function textWithMarkers(buffer) {
   return { text: lines.join('\n'), markers };
 }
 
+// A canvas 2D context that accepts every call pdfjs's renderer makes but
+// draws nothing. pdfjs decodes image XObjects into page.objs only while a
+// page render runs; the decode itself is what renderImage needs, so the
+// page pixels can be discarded. Drawing into a real @napi-rs/canvas context
+// is not an option — pdfjs feeds it glyph path objects that the native
+// canvas cannot consume, which aborts the render mid-page.
+function noopCanvasContext() {
+  const noop = () => {};
+  const matrix = () => ({
+    a: 1, b: 0, c: 0, d: 1, e: 0, f: 0,
+    invertSelf: () => matrix(), multiply: () => matrix(),
+    rotate: () => matrix(), scale: () => matrix(), translate: () => matrix(),
+    transformPoint: () => ({ x: 0, y: 0 }), isIdentity: () => true,
+  });
+  return {
+    canvas: { width: 0, height: 0 },
+    getTransform: () => matrix(),
+    measureText: (t) => ({ width: String(t).length * 4 }),
+    createImageData: (w, h) => ({ width: w, height: h, data: new Uint8ClampedArray(w * h * 4) }),
+    getImageData: (x, y, w, h) => ({ width: w, height: h, data: new Uint8ClampedArray(w * h * 4) }),
+    createLinearGradient: () => ({ addColorStop: noop }),
+    createRadialGradient: () => ({ addColorStop: noop }),
+    createPattern: () => ({ setTransform: noop }),
+    getLineDash: () => [],
+    save: noop, restore: noop, transform: noop, translate: noop, scale: noop, rotate: noop,
+    setTransform: noop, resetTransform: noop, beginPath: noop, closePath: noop, moveTo: noop,
+    lineTo: noop, bezierCurveTo: noop, quadraticCurveTo: noop, arc: noop, arcTo: noop,
+    rect: noop, ellipse: noop, fill: noop, stroke: noop, fillStroke: noop, clip: noop,
+    endPath: noop, setLineDash: noop, drawImage: noop, putImageData: noop, fillRect: noop,
+    strokeRect: noop, clearRect: noop, fillText: noop, strokeText: noop, setLineCap: noop,
+    setLineJoin: noop, setMiterLimit: noop, setGlobalAlpha: noop, addPath: noop,
+  };
+}
+
+// Expand pdfjs's decoded pixel buffer (RGBA or RGB) into an RGBA Uint8Clamped
+// array; returns null for unsupported kinds (1bpp masks etc).
+function rgbaFromPixels(img) {
+  const px = img.width * img.height;
+  const data = img.data;
+  if (img.kind === 3 && data.length >= px * 4) return data.subarray(0, px * 4);
+  if (img.kind === 2 && data.length >= px * 3) {
+    const rgba = new Uint8ClampedArray(px * 4);
+    for (let i = 0, j = 0; i < px * 3; i += 3, j += 4) {
+      rgba[j] = data[i];
+      rgba[j + 1] = data[i + 1];
+      rgba[j + 2] = data[i + 2];
+      rgba[j + 3] = 255;
+    }
+    return rgba;
+  }
+  return null;
+}
+
+/**
+ * Render one raster figure to a PNG file: decodes the raw bitmap through a
+ * no-op page render, then draws it stretched into the figure's box at 2x.
+ * Returns outPath (side effect: writes the file).
+ */
+async function renderImage(buffer, image, outPath) {
+  const doc = await openDoc(buffer);
+  const page = await doc.getPage(image.page);
+  const vp = page.getViewport({ scale: 1 });
+  await page.render({ canvasContext: noopCanvasContext(), viewport: vp }).promise.catch(() => {});
+  let img = null;
+  if (image.rasterId) {
+    try { img = page.objs.get(String(image.rasterId)); } catch { img = null; }
+  }
+  if (!img || !img.width) {
+    for (const [, v] of page.objs) {
+      if (v && v.width && v.height) { img = v; break; }
+    }
+  }
+  const { createCanvas } = require('@napi-rs/canvas');
+  const cw = Math.max(1, Math.round((image.w || 1) * 2));
+  const ch = Math.max(1, Math.round((image.h || 1) * 2));
+  const out = createCanvas(cw, ch);
+  const octx = out.getContext('2d');
+  const rgba = img && img.width ? rgbaFromPixels(img) : null;
+  if (rgba) {
+    const src = createCanvas(img.width, img.height);
+    const sctx = src.getContext('2d');
+    const id = sctx.createImageData(img.width, img.height);
+    id.data.set(rgba);
+    sctx.putImageData(id, 0, 0);
+    octx.drawImage(src, 0, 0, cw, ch);
+  } else {
+    // 1bpp mask / undecodable: a light box is better than a missing figure.
+    console.warn('[pdf] image kind unsupported, drawing placeholder:', img && img.kind);
+    octx.fillStyle = '#d9d9d9';
+    octx.fillRect(0, 0, cw, ch);
+  }
+  fs.writeFileSync(outPath, out.toBuffer('image/png'));
+  return outPath;
+}
+
 function saveUpload(buffer, originalName) {
   const name = `${Date.now()}-${path.basename(originalName || 'upload.pdf')}`;
   const filePath = path.join(config.uploadsDir, name);
@@ -346,4 +441,4 @@ function saveUpload(buffer, originalName) {
   return filePath;
 }
 
-module.exports = { extractText, extractDocument, textWithMarkers, stripMarkers, saveUpload, loadPdfjs, openDoc };
+module.exports = { extractText, extractDocument, textWithMarkers, stripMarkers, renderImage, saveUpload, loadPdfjs, openDoc };

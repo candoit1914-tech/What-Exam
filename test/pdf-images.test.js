@@ -103,3 +103,49 @@ test('stripMarkers removes marker lines fully', () => {
   assert.equal(pdf.stripMarkers('a\n[IMG:3]\nb\n'), 'a\nb\n');
   assert.equal(pdf.stripMarkers('no markers here'), 'no markers here');
 });
+
+async function pngStats(file) {
+  const sharp = require('sharp');
+  const meta = await sharp(file).metadata();
+  const stats = await sharp(file).stats();
+  return { meta, stats };
+}
+
+test('renderImage writes a decodable red PNG at 2x the detected box', async () => {
+  const { images } = await pdf.extractDocument(fixture);
+  const raster = images.filter((i) => i.kind === 'raster');
+  assert.ok(raster.length >= 1, 'need a raster image');
+  const outPath = path.join(TMP, 'raster-red.png');
+  await pdf.renderImage(fixture, raster[0], outPath);
+  const { meta, stats } = await pngStats(outPath);
+  assert.equal(meta.format, 'png');
+  assert.equal(meta.width, Math.round(raster[0].w * 2), '2x box width');
+  assert.equal(meta.height, Math.round(raster[0].h * 2), '2x box height');
+  const [r, g, b] = stats.channels;
+  assert.ok(r.mean > 200, `red channel is dominant, got ${r.mean}`);
+  assert.ok(g.mean < 60 && b.mean < 60, 'green and blue stay low');
+});
+
+test('renderImage on the solutions raster box renders at its box size', async () => {
+  const { images } = await pdf.extractDocument(fixture);
+  const p3 = images.find((i) => i.page === 3 && i.kind === 'raster');
+  assert.ok(p3, 'page-3 raster exists');
+  const outPath = path.join(TMP, 'raster-solutions.png');
+  await pdf.renderImage(fixture, p3, outPath);
+  const { meta } = await pngStats(outPath);
+  assert.equal(meta.width, Math.round(p3.w * 2));
+  assert.equal(meta.height, Math.round(p3.h * 2));
+  const { stats } = await pngStats(outPath);
+  assert.ok(stats.channels[0].mean > 200, 'still the red figure');
+});
+
+test('renderImage on a vector image falls back to a placeholder without throwing', async () => {
+  const { images } = await pdf.extractDocument(fixture);
+  const vec = images.find((i) => i.kind === 'vector');
+  assert.ok(vec, 'vector image exists');
+  const outPath = path.join(TMP, 'vector-placeholder.png');
+  await pdf.renderImage(fixture, vec, outPath);
+  const { meta } = await pngStats(outPath);
+  assert.equal(meta.format, 'png');
+  assert.equal(meta.width, Math.round(vec.w * 2), 'placeholder matches the vector box 2x');
+});
