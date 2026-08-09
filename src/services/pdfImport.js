@@ -2,6 +2,8 @@ const db = require('../db');
 const pdf = require('./pdf');
 const ai = require('./ai');
 const marking = require('./marking');
+const path = require('path');
+const config = require('../config');
 const { stripSourceWatermarks } = require('./textClean');
 
 // ── Import helpers ─────────────────────────────────────────────────────
@@ -47,6 +49,15 @@ function correctKeyFor(opts, aiAnswer, fallback) {
     if (k) return k;
   }
   return fallback || null;
+}
+
+/**
+ * Deterministic image file name for a rendered diagram:
+ * `<timestamp>-<examId>-q<qOrder>-<markerIndex>.png`. The timestamp prefix
+ * keeps re-uploads from colliding while the rest stays searchable.
+ */
+function imageFileNameFor(examId, qOrder, markerIndex, now = Date.now()) {
+  return `${now}-${examId}-q${qOrder}-${markerIndex}.png`;
 }
 
 // ── Job store ──────────────────────────────────────────────────────────
@@ -131,7 +142,9 @@ async function startJob(jobId, buffer) {
 
   const created = [];
   try {
-    const text = await pdf.extractText(buffer);
+    const sourceText = await pdf.textWithMarkers(buffer);
+    const { images } = await pdf.extractDocument(buffer);
+    const text = sourceText.text;
     updateJob(jobId, { stage: 'Parsing questions…', progress: 10 });
 
     let blockWarning = '';
@@ -141,7 +154,8 @@ async function startJob(jobId, buffer) {
         const pct = 10 + Math.round((done / Math.max(1, total)) * 45);
         updateJob(jobId, { stage: `Parsing questions… (${done}/${total})`, progress: pct });
       },
-      (warning) => { blockWarning = warning; }
+      (warning) => { blockWarning = warning; },
+      { markers: sourceText.markers }
     );
     if (!parsed.length) {
       throw new Error('No questions could be parsed from this PDF. Is the document text-based?');
@@ -183,8 +197,8 @@ async function startJob(jobId, buffer) {
     let nextOrder =
       (db.prepare('SELECT MAX(q_order) m FROM questions WHERE exam_id = ?').get(job.exam_id).m || 0) + 1;
     const insert = db.prepare(
-      `INSERT INTO questions (exam_id, q_order, type, text, passage, options, correct_answer, marks, difficulty, learning_objective, explanation, source)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`
+      `INSERT INTO questions (exam_id, q_order, type, text, passage, options, correct_answer, marks, difficulty, learning_objective, explanation, source, image)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`
     );
 
     // Reading-comprehension papers share one passage across a run of
@@ -201,6 +215,30 @@ async function startJob(jobId, buffer) {
       const passage = curPassage;
       g.text = stripSourceWatermarks(g.text);
 
+      // Diagrams: render the figure this question kept via its marker and
+      // store the file name (relative, served from uploads). Rendering is
+      // best-effort: a raster/vector decode failure must never fail the
+      // import — the question still exists, just without its figure.
+      let imageFile = '';
+      if (g.markerIndex != null && Number.isInteger(g.markerIndex)) {
+        const entry = images[g.markerIndex];
+        if (entry) {
+          try {
+            const dest = path.join(
+              config.uploadsDir,
+              imageFileNameFor(job.exam_id, nextOrder, g.markerIndex)
+            );
+            imageFile = path.basename(
+              await (entry.kind === 'vector'
+                ? pdf.renderVectorRegion(buffer, entry, dest)
+                : pdf.renderImage(buffer, entry, dest))
+            );
+          } catch (e) {
+            console.error('[pdfImport] image render failed:', e.message);
+          }
+        }
+      }
+
       if (g.type === 'objective') {
         const opts = buildOptions(g.options);
         const gi = objIdx++;
@@ -216,7 +254,7 @@ async function startJob(jobId, buffer) {
         const marks = parseFloat(g.marks) || 1;
         const info = insert.run(
           job.exam_id, nextOrder, 'objective', g.text, passage, JSON.stringify(opts),
-          correct, marks, g.difficulty || 'medium', g.learning_objective || '', explanation, 'pdf'
+          correct, marks, g.difficulty || 'medium', g.learning_objective || '', explanation, 'pdf', imageFile
         );
         created.push(info.lastInsertRowid);
         db.prepare(
@@ -231,7 +269,7 @@ async function startJob(jobId, buffer) {
       } else {
         const info = insert.run(
           job.exam_id, nextOrder, 'theory', g.text, passage, null, null,
-          parseFloat(g.marks) || 5, g.difficulty || 'medium', g.learning_objective || '', '', 'pdf'
+          parseFloat(g.marks) || 5, g.difficulty || 'medium', g.learning_objective || '', '', 'pdf', imageFile
         );
         const q = db.prepare('SELECT * FROM questions WHERE id = ?').get(info.lastInsertRowid);
         created.push(q.id);
@@ -304,4 +342,5 @@ module.exports = {
   recoverStaleJobs,
   buildOptions,
   correctKeyFor,
+  imageFileNameFor,
 };

@@ -47,6 +47,7 @@ function qWithScheme(row) {
     learning_objective: row.learning_objective,
     explanation: row.explanation,
     source: row.source,
+    image: row.image || '',
     scheme,
   };
 }

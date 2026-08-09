@@ -250,3 +250,23 @@ test('stripping does not fire when the document had no markers at all', async ()
   );
   assert.equal(warnings.length, 0, 'no phantom-marker warnings for pasted text');
 });
+
+// ── Task 7: pdfImport image saving ─────────────────────────────────────
+
+const pdfImport = require('../src/services/pdfImport');
+
+test('file name for an attached marker is deterministic', () => {
+  const p = pdfImport.imageFileNameFor(1739, 3, 1, 1739000000000);
+  assert.equal(p, '1739000000000-1739-q3-1.png');
+  assert.match(p, /^\d+-1739-q3-1\.png$/);
+});
+
+test('import loop renders the marker image into uploads (smoke via helper path)', async () => {
+  const { images } = await pdf.extractDocument(fixture);
+  const raster = images.find((i) => i.kind === 'raster');
+  const dest = path.join(TMP, 'upload-q1-0.png');
+  const written = await pdf.renderImage(fixture, raster, dest);
+  assert.equal(written, dest);
+  const { meta } = await pngStats(written);
+  assert.equal(meta.format, 'png', 'rendered image usable by the import loop');
+});
