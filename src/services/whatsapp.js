@@ -147,10 +147,17 @@ async function request(url, { body, headers = {}, timeoutMs = REQUEST_TIMEOUT_MS
   throw lastErr || new Error('WhatsApp API request failed');
 }
 
+function waHeaders() {
+  return {
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${config.whatsapp.accessToken}`,
+  };
+}
+
 async function api(method, body) {
   const task = () =>
     request(`${GRAPH}/v21.0/${config.whatsapp.phoneNumberId}/messages`, {
-      headers: { 'Content-Type': 'application/json' },
+      headers: waHeaders(),
       body: JSON.stringify(body),
     });
   const phone = body && body.to ? String(body.to) : '';
@@ -281,9 +288,12 @@ function parseWebhook(body) {
       replyId: isInteractive
         ? m.interactive?.button_reply?.id || m.interactive?.list_reply?.id || ''
         : '',
+      mediaType: m.type === 'image' ? 'image' : '',
+      mediaId: m.type === 'image' ? m.image?.id || '' : '',
       body:
         m.text?.body ||
-        (isInteractive ? m.interactive?.button_reply?.text || m.interactive?.list_reply?.title : ''),
+        (isInteractive ? m.interactive?.button_reply?.text || m.interactive?.list_reply?.title : '') ||
+        (m.type === 'image' ? m.image?.caption || '' : ''),
     };
   });
   const statuses = (changes.statuses || []).map((s) => ({
@@ -296,6 +306,27 @@ function parseWebhook(body) {
   return [...messages, ...statuses];
 }
 
+/**
+ * Download inbound WhatsApp media (a student photo answer) by Graph media id.
+ * GET /{mediaId} returns JSON with an expiring URL; the bytes come from the
+ * second request. The access token is attached to both.
+ */
+async function downloadMedia(mediaId) {
+  if (!mediaId) throw new Error('No media id');
+  const meta = await request(`${GRAPH}/v21.0/${mediaId}`, {
+    headers: waHeaders(),
+    timeoutMs: 60000,
+  });
+  const url = meta?.url;
+  if (!url) throw new Error(`WhatsApp media meta missing url: ${JSON.stringify(meta).slice(0, 200)}`);
+  const res = await fetch(url, { headers: waHeaders() });
+  if (!res.ok) throw new Error(`WhatsApp media download failed (${res.status})`);
+  return {
+    buffer: Buffer.from(await res.arrayBuffer()),
+    mimeType: meta.mime_type || '',
+  };
+}
+
 module.exports = {
   waConfigured,
   splitTextChunks,
@@ -305,4 +336,5 @@ module.exports = {
   sendInteractiveList,
   sendTemplate,
   parseWebhook,
+  downloadMedia,
 };
