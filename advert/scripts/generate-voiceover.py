@@ -21,7 +21,6 @@ VO_LINES = [
     {"id": "07-outro", "text": "Exam Bot. Start examining — for free.", "start_frame": 845},
 ]
 
-# Voice: en-GH-RhodesNeural (Ghana English, male — professional, clear)
 VOICE = "en-US-GuyNeural"
 RATE = "-5%"
 PITCH = "-2Hz"
@@ -54,7 +53,7 @@ async def generate():
     manifest_path = os.path.join(OUT, "vo-manifest.json")
     with open(manifest_path, 'w') as f:
         json.dump(VO_LINES, f, indent=2)
-    print(f"\n  ✓ Manifest: vo-manifest.json")
+    print(f"\n  OK Manifest: vo-manifest.json")
     print("\nDone!")
 
 
