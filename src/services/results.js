@@ -204,6 +204,9 @@ function reportHTML(sessionId) {
             ${keyPts.length ? `<ul class="keypoints">${keyPts.map((k) => `<li>${esc(k)}</li>`).join('')}</ul>` : ''}
           </details>
         </div>`;
+        if (a.answer_image) {
+          body += `<img class="report-img answer-photo" src="/report/${sessionId}/attachment?file=${encodeURIComponent(a.answer_image)}&token=${encodeURIComponent(auth.reportToken(sessionId))}" alt="student photo answer" style="max-width:340px;border:1px solid var(--line);border-radius:10px;margin-top:10px">`;
+        }
         if (a.ai_feedback) body += `<p class="feedback">${esc(a.ai_feedback)}</p>`;
       }
 

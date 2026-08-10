@@ -1180,7 +1180,7 @@ async function renderResultDetail(id) {
         ${r.answers.map((a) => `<tr>
           <td>${a.q_order}</td>
           <td style="max-width:280px">${esc(a.text)}</td>
-          <td>${esc(a.answer_text)}</td>
+          <td>${a.answer_image ? `<img src="${API_BASE}/api/results/${id}/image/${encodeURIComponent(a.answer_image)}" alt="photo answer" style="max-height:90px;border-radius:8px">` : esc(a.answer_text)}</td>
           <td>${a.type === 'objective' ? esc(a.correct_answer) : '—'}</td>
           <td><input type="number" data-aw="${a.id}" value="${a.marks_awarded}" step="0.5" style="width:70px"> / ${a.max_marks}</td>
           <td>${a.marked_by}${a.needs_review ? ' ' + badge('review') : ''}${Number(a.ai_detected) === 1 ? ' ' + badge('ai-copied') : ''}</td>

@@ -512,6 +512,17 @@ router.get('/exams/:id/images/:file', (req, res) => {
   res.type('image/png').sendFile(full);
 });
 
+// Photo answers uploaded via WhatsApp, saved as PNGs in uploadsDir.
+router.get('/results/:sessionId/image/:file', (req, res) => {
+  const session = db.prepare('SELECT * FROM sessions WHERE id = ?').get(req.params.sessionId);
+  if (!session) return res.status(404).json({ error: 'Session not found' });
+  const name = path.basename(String(req.params.file || ''));
+  if (!/^[\w-]+\.png$/i.test(name)) return res.status(400).json({ error: 'Bad file name' });
+  const full = path.join(config.uploadsDir, name);
+  if (!fs.existsSync(full)) return res.status(404).json({ error: 'Image not found' });
+  res.type('image/png').sendFile(full);
+});
+
 // ── Background jobs ───────────────────────────────────────────────────
 
 router.get('/jobs', (req, res) => {
@@ -568,7 +579,7 @@ router.get('/results/:sessionId', (req, res) => {
   const r = results.computeForSession(session.id);
   const answers = db
     .prepare(
-       `SELECT a.id, a.q_order, a.answer_text, a.is_correct, a.marks_awarded, a.max_marks,
+       `SELECT a.id, a.q_order, a.answer_text, a.answer_image, a.is_correct, a.marks_awarded, a.max_marks,
                a.marked_by, a.ai_feedback, a.needs_review, a.reviewed, a.ai_detected,
                q.type, q.text, q.correct_answer
        FROM answers a JOIN questions q ON q.id = a.question_id
