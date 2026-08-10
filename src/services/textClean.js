@@ -4,7 +4,8 @@
 // questions (e.g. "DOWNLOADED FROM SRONU papers.sronu.com") must never reach a
 // student. Only STANDALONE lines matching a precise, safe pattern are dropped:
 // a passage sentence that merely mentions a URL or "source" survives.
-const WATERMARK = /sronu|downloaded\s+(from|by)|source\s*[:=]|visit\s+(us\s+)?at\b/i;
+const WATERMARK =
+  /sronu|downloaded\s+(from|by)|source\s*[:=]|visit\s+(us\s+)?at\b|^mock\s+exam(?:ination)?|do\s+not\s+share|for\s+internal\s+use\b/i;
 // Vertically-arranged PDF watermarks put one word per line (DOWNLOADED / FROM /
 // SRONU / papers.sronu.com). A line that is exactly one of these fragment
 // words is a footer, never prose.

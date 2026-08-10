@@ -520,6 +520,26 @@ test('stripSourceWatermarks never drops a line just for containing the word "pap
   assert.match(out, /papers/, '"papers" in prose survives');
 });
 
+// ── Watermarks: ignore and proceed (strip, never block) ──
+
+test('stripSourceWatermarks drops common school/exam footer watermarks', () => {
+  assert.equal(
+    stripSourceWatermarks('MOCK EXAMINATION 2026\n1. Who is the president?\nDO NOT SHARE\n'),
+    '1. Who is the president?'
+  );
+  assert.equal(
+    stripSourceWatermarks('FOR INTERNAL USE ONLY\n2. Define osmosis.\n3. Define diffusion.\n'),
+    '2. Define osmosis.\n3. Define diffusion.'
+  );
+});
+
+test('stripSourceWatermarks keeps normal prose that merely mentions exams', () => {
+  assert.equal(
+    stripSourceWatermarks('The mock exam was written by the students of form three.'),
+    'The mock exam was written by the students of form three.'
+  );
+});
+
 test('buildQuestionBubbles strips watermark lines from a passage before sending', () => {
   const dirtyPassage = 'Read the passage below.\nDOWNLOADED FROM SRONU\npapers.sronu.com';
   const q1 = { id: 1, q_order: 1, type: 'objective', text: 'Q1', passage: dirtyPassage };
