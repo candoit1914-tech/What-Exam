@@ -47,6 +47,7 @@ const config = {
     apiKey: valid(process.env.AI_API_KEY) ? process.env.AI_API_KEY : '',
     model: process.env.AI_MODEL || 'gpt-4o-mini',
     timeoutMs: parseInt(process.env.AI_TIMEOUT_MS || '120000', 10),
+    vision: process.env.AI_VISION === 'true',
   },
 
   // Optional second OpenAI-compatible provider. When configured, every AI
