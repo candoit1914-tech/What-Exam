@@ -2,6 +2,8 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const db = require('../src/db');
+const marking = require('../src/services/marking');
+const config = require('../src/config');
 
 test('answers table has the answer_image column', () => {
   const cols = db.prepare("PRAGMA table_info('answers')").all().map((c) => c.name);
@@ -58,5 +60,41 @@ test('downloadMedia resolves buffer and mimeType through the Graph media URL', a
     assert.ok(/Bearer /.test(calls[0].opts.headers.Authorization), 'token attached to the media request');
   } finally {
     global.fetch = original;
+  }
+});
+
+test('markTheoryImageAnswer flags for manual review when vision is off', async () => {
+  const wasVision = config.ai.vision;
+  config.ai.vision = false;
+  try {
+    const out = await marking.markTheoryImageAnswer(
+      { id: 1, text: 'Draw the water cycle.', marks: 4, passage: '' },
+      '(photo answer)', 'nonexistent.png', { model_answer: '', key_points: [], rubric: [], presentation_marks: 0, grammar_marks: 0 }
+    );
+    assert.equal(out.needsReview, true);
+    assert.equal(out.marksAwarded, 0);
+  } finally {
+    config.ai.vision = wasVision;
+  }
+});
+
+test('markTheoryImageAnswer flags for manual review when the AI call fails', async () => {
+  const wasVision = config.ai.vision;
+  const wasRead = require('fs').readFileSync;
+  config.ai.vision = true;
+  require('fs').readFileSync = () => 'fake-base64';
+  const ai = require('../src/services/ai');
+  const orig = ai.markImageTheory;
+  ai.markImageTheory = async () => { throw new Error('vision endpoint exploded'); };
+  try {
+    const out = await marking.markTheoryImageAnswer(
+      { id: 1, text: 'Draw the water cycle.', marks: 4, passage: '' },
+      '(photo answer)', 'f.png', {}
+    );
+    assert.equal(out.needsReview, true, 'AI failure falls back to manual review');
+  } finally {
+    config.ai.vision = wasVision;
+    require('fs').readFileSync = wasRead;
+    ai.markImageTheory = orig;
   }
 });

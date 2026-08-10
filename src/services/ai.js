@@ -1263,6 +1263,49 @@ Rules:
 }
 
 /**
+ * Mark a theory answer delivered as a photo (written/drawn work). Vision
+ * endpoints accept the image as an image_url content item. Called only when
+ * config.ai.vision is enabled; text-only providers never reach this.
+ */
+async function markImageTheory({ questionText, passage, modelAnswer, keyPoints, rubric, presentationMarks, grammarMarks, maxMarks, studentAnswer, imageBase64 }) {
+  if (!aiConfigured()) {
+    throw new AIError('AI is not configured. Set AI_API_KEY and AI_BASE_URL in .env to mark theory questions.');
+  }
+  const user = [
+    'Grade the student attempt below against the model answer and rubric.',
+    '',
+    'QUESTION:',
+    [passage, questionText].filter(Boolean).join('\n\n'),
+    '',
+    `MODEL ANSWER: ${modelAnswer || '(not available)'}`,
+    keyPoints && keyPoints.length ? `KEY POINTS: ${keyPoints.join('; ')}` : 'KEY POINTS: (none)',
+    rubric && rubric.length ? `RUBRIC: ${rubric.join('; ')}` : 'RUBRIC: (none)',
+    `PRESENTATION MARKS: ${presentationMarks}`,
+    `GRAMMAR MARKS: ${grammarMarks}`,
+    `MAX MARKS: ${maxMarks}`,
+    '',
+    'STUDENT ATTEMPT (the attached photo of their written/drawn work):',
+    studentAnswer ? `Caption: ${studentAnswer}` : '',
+    '',
+    'Return JSON with: marksAwarded (number, 0..maxMarks), breakdown (array of {criterion, marks, comment}), feedback (string for the student), aiGenerated (true only if the photo clearly contains AI-produced text).',
+  ].filter((l) => typeof l === 'string').join('\n');
+
+  const messages = [
+    { role: 'system', content: SYSTEM_BASE + '\nYou grade written/drawn answers shown in photos, fairly and strictly per the rubric.' },
+    {
+      role: 'user',
+      content: [
+        { type: 'text', text: user },
+        imageBase64
+          ? { type: 'image_url', image_url: { url: `data:image/png;base64,${imageBase64}` } }
+          : null,
+      ].filter(Boolean),
+    },
+  ];
+  return chatJSON(messages, { temperature: 0.2 });
+}
+
+/**
  * Mark a theory answer against the scheme + rubric using AI.
  */
 async function markTheory({ questionText, modelAnswer, keyPoints, rubric, presentationMarks, grammarMarks, maxMarks, studentAnswer }) {
@@ -1340,6 +1383,7 @@ module.exports = {
   verifyObjectiveAnswers,
   detectAiGeneratedAnswer,
   generateTheoryScheme,
+  markImageTheory,
   markTheory,
   splitIntoBlocks,
   leadingContext,
