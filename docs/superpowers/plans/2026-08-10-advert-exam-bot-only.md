@@ -324,12 +324,12 @@ Verification:
 Steps:
 1. `npm run build` (cwd `advert/`; = `npx remotion render WhatExamAdvert out/advert.mp4`). Wait for "Rendered" summary, expect ~780 frames, no errors.
 2. Assert `advert/out/advert.mp4` exists and size ≥ 10 MB.
-3. Track the remaining advert scaffolding so the whole project is in git (their absence failed Task 1's untracked gate): stage `advert/package.json`, `advert/package-lock.json`, `advert/remotion.config.ts`, `advert/tsconfig.json`, `advert/src/Root.tsx`, `advert/src/index.ts` and commit `chore(ad): track advert project scaffolding`.
-4. Confirm `git status` in repo root: no untracked files inside `advert/`
+3. Track the remaining advert scaffolding so the whole project is in git (their absence failed Task 1's untracked gate): stage `advert/` broadly (`git add advert` — safe now that `.gitignore` covers node_modules/, out/, .remotion/) to also pick up package.json, package-lock.json, remotion.config.ts, tsconfig.json, src/Root.tsx, src/index.ts, scripts/, and the bgm/chime/ding/tick/whoosh wav files in public/audio/ — then commit `chore(ad): track advert project scaffolding`. (The first time this runs, the already-committed tsx/icon/.gitignore simply show no changes.)
+4. Fix the voiceover script exit-code bug (Task 2 concern): `advert/scripts/generate-voiceover.py` crashes on the final `✓` print under Windows cp1252 (writes files fine, exits 1). Replace the `✓`/`☐`-style non-ASCII glyphs inside the script's print statements with ASCII ("OK"), re-run `python scripts/generate-voiceover.py` once and confirm exit code 0 and all 7 mp3s + manifest re-verified. Commit `fix(ad): exit cleanly from voiceover script on Windows`.
+5. Confirm `git status` in repo root: no untracked files inside `advert/`
    except `out/` and `node_modules/`.
-5. If any fix was needed, make it in a new commit `fix(ad): …` — never amend.
-   If the render is clean and no code changed since the last commit, this
-   task's remaining commits are only the scaffolding commit above.
+6. If any other fix was needed, make it in a new commit `fix(ad): …` — never amend. If the render is clean and no code changed since the last commit, this
+   task's remaining commits are the scaffolding and script-fix commits above.
 
 ## Rollback
 
