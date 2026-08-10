@@ -324,11 +324,12 @@ Verification:
 Steps:
 1. `npm run build` (cwd `advert/`; = `npx remotion render WhatExamAdvert out/advert.mp4`). Wait for "Rendered" summary, expect ~780 frames, no errors.
 2. Assert `advert/out/advert.mp4` exists and size ≥ 10 MB.
-3. Confirm `git status` in repo root: no untracked files inside `advert/`
+3. Track the remaining advert scaffolding so the whole project is in git (their absence failed Task 1's untracked gate): stage `advert/package.json`, `advert/package-lock.json`, `advert/remotion.config.ts`, `advert/tsconfig.json`, `advert/src/Root.tsx`, `advert/src/index.ts` and commit `chore(ad): track advert project scaffolding`.
+4. Confirm `git status` in repo root: no untracked files inside `advert/`
    except `out/` and `node_modules/`.
-4. If any fix was needed, make it in a new commit `fix(ad): …` — never amend.
+5. If any fix was needed, make it in a new commit `fix(ad): …` — never amend.
    If the render is clean and no code changed since the last commit, this
-   task commits nothing.
+   task's remaining commits are only the scaffolding commit above.
 
 ## Rollback
 
