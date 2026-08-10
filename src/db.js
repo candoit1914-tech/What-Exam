@@ -192,6 +192,7 @@ ensureColumn('question_pool', 'passage', "TEXT DEFAULT ''");
 ensureColumn('questions', 'image', "TEXT DEFAULT ''");
 ensureColumn('question_pool', 'image', "TEXT DEFAULT ''");
 ensureColumn('answers', 'ai_detected', "INTEGER NOT NULL DEFAULT 0");
+ensureColumn('answers', 'answer_image', "TEXT DEFAULT ''");
 ensureColumn('jobs', 'warning', "TEXT DEFAULT ''");
 
 // Migration: answers.question_id used to be FK-constrained to questions().
@@ -211,6 +212,7 @@ if (answersDdl && /REFERENCES\s+questions/i.test(answersDdl.sql)) {
       question_id   INTEGER NOT NULL,
       q_order       INTEGER NOT NULL,
       answer_text   TEXT NOT NULL,
+      answer_image  TEXT DEFAULT '',
       is_correct    INTEGER,
       marks_awarded REAL DEFAULT 0,
       max_marks     REAL DEFAULT 0,
@@ -223,10 +225,10 @@ if (answersDdl && /REFERENCES\s+questions/i.test(answersDdl.sql)) {
       marked_at     TEXT
     );
     INSERT INTO answers
-      (id, session_id, question_id, q_order, answer_text, is_correct, marks_awarded,
+      (id, session_id, question_id, q_order, answer_text, answer_image, is_correct, marks_awarded,
        max_marks, marked_by, ai_feedback, needs_review, reviewed, ai_detected, received_at, marked_at)
     SELECT
-      id, session_id, question_id, q_order, answer_text, is_correct, marks_awarded,
+      id, session_id, question_id, q_order, answer_text, answer_image, is_correct, marks_awarded,
       max_marks, marked_by, ai_feedback, needs_review, reviewed, 0, received_at, marked_at
     FROM answers_legacy;
     DROP TABLE answers_legacy;
