@@ -1,0 +1,37 @@
+[
+  {
+    "id": "01-intro",
+    "text": "Exam Bot.",
+    "start_frame": 30
+  },
+  {
+    "id": "02-tagline",
+    "text": "Exams that mark themselves. Your bot delivers them \u2014 AI does the rest.",
+    "start_frame": 140
+  },
+  {
+    "id": "03-chat",
+    "text": "Students take exams right inside WhatsApp. One question at a time, with a live timer keeping things fair.",
+    "start_frame": 285
+  },
+  {
+    "id": "04-answers",
+    "text": "Answers arrive as text or photos. Theory, diagrams \u2014 whatever the question needs.",
+    "start_frame": 495
+  },
+  {
+    "id": "05-aimarking",
+    "text": "Every answer is graded by AI \u2014 instantly. Scored across correctness, completeness, and relevance. No waiting. No manual marking.",
+    "start_frame": 675
+  },
+  {
+    "id": "06-results",
+    "text": "Results the moment the exam ends.",
+    "start_frame": 785
+  },
+  {
+    "id": "07-outro",
+    "text": "Exam Bot. Start examining \u2014 for free.",
+    "start_frame": 845
+  }
+]
