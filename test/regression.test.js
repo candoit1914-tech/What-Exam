@@ -73,6 +73,24 @@ test('splitIntoBlocks breaks at section instructions so they lead the next block
   assert.match(blocks[1], /3\. Write an essay/, 'theory questions stay in the section block');
 });
 
+// ── Theory sections that open with a passage/lead-in from the paper ──
+
+test('a Section B lead-in passage stays with the theory questions that follow', () => {
+  const paper = [
+    'SECTION B: THEORY',
+    'Read the case study below and answer the questions that follow.',
+    'Mrs Adjei runs a small bakery. She hires three workers and bakes 200 loaves daily.',
+    '',
+    '1. State two fixed costs of the bakery.',
+    '2. Calculate the daily revenue if each loaf sells for 5 cedis.',
+  ].join('\n');
+  const blocks = ai.splitIntoBlocks(paper);
+  assert.equal(blocks.length, 1, 'one theory block');
+  assert.match(blocks[0], /^SECTION B: THEORY/m, 'section header leads the block');
+  assert.match(blocks[0], /Mrs Adjei runs a small bakery/, 'lead-in passage kept');
+  assert.match(blocks[0], /^1\. State two fixed costs/m, 'theory questions follow the lead-in');
+});
+
 // ── Bug 1 regression: stored correct answers that are NOT bare letters ──
 
 const OPTIONS = [
