@@ -1,0 +1,17 @@
+{
+  "name": "what-exam-advert",
+  "version": "1.0.0",
+  "description": "What Exam video advertisement built with Remotion",
+  "scripts": {
+    "start": "npx remotion studio",
+    "build": "npx remotion render WhatExamAdvert out/advert.mp4",
+    "preview": "npx remotion preview"
+  },
+  "dependencies": {
+    "@remotion/cli": "^4.0.507",
+    "@remotion/player": "^4.0.507",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "remotion": "^4.0.507"
+  }
+}
