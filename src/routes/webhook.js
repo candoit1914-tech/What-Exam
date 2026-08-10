@@ -66,7 +66,7 @@ router.post('/', express.raw({ type: () => true }), async (req, res) => {
     }
     if (ev.type !== 'message') continue;
     const bodyText = (ev.body || '').trim();
-    if (!bodyText) continue;
+    if (!bodyText && ev.mediaType !== 'image') continue;
 
     try {
       await examService.handleInbound(ev.phone, bodyText, ev);

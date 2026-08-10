@@ -98,3 +98,91 @@ test('markTheoryImageAnswer flags for manual review when the AI call fails', asy
     ai.markImageTheory = orig;
   }
 });
+
+const exam = require('../src/services/exam');
+
+// Real 2x2 PNG so downloadMedia stubs survive @napi-rs/canvas loadImage
+// (a hand-crafted 4-byte buffer would take the "cannot receive" error path).
+const { createCanvas } = require('@napi-rs/canvas');
+const photoCanvas = createCanvas(2, 2);
+const photoCtx = photoCanvas.getContext('2d');
+photoCtx.fillStyle = '#3366ff';
+photoCtx.fillRect(0, 0, 2, 2);
+const PHOTO_PNG = photoCanvas.toBuffer('image/png');
+
+function waStub(overrides = {}) {
+  const orig = {};
+  const target = require('../src/services/whatsapp');
+  for (const key of ['downloadMedia', 'sendText', 'sendImage', 'sendResultMessage']) {
+    orig[key] = target[key];
+    if (overrides[key]) target[key] = overrides[key];
+  }
+  const markingKey = 'markTheoryAnswer';
+  orig[markingKey] = marking[markingKey];
+  marking[markingKey] = async () => ({ marksAwarded: 0, maxMarks: 1, breakdown: [], feedback: 'stub', aiGenerated: false });
+  return () => {
+    for (const key of Object.keys(orig)) {
+      if (key === 'markTheoryAnswer') marking[key] = orig[key];
+      else target[key] = orig[key];
+    }
+  };
+}
+
+test('photo answer is recorded with answer_image and advances the session', async () => {
+  db.exec('BEGIN');
+  const restore = waStub({
+    downloadMedia: async () => ({ buffer: PHOTO_PNG, mimeType: 'image/png' }),
+    sendText: async () => {},
+    sendImage: async () => {},
+    sendResultMessage: async () => {},
+  });
+  require('../src/config').exam.sendCertificates = false;
+  try {
+    const examId = db.prepare("INSERT INTO exams (title, subject, duration_minutes, status) VALUES (?,?,?,'live')")
+      .run('__photo_exam__', 'Test', 30).lastInsertRowid;
+    const studentId = db.prepare("INSERT INTO students (phone) VALUES (?)")
+      .run('__photo_phone__' + Date.now()).lastInsertRowid;
+    db.prepare("INSERT INTO questions (exam_id, q_order, type, text, marks) VALUES (?,1,'theory','Draw and label the water cycle.',4)")
+      .run(examId);
+    const sessionId = db.prepare(
+      "INSERT INTO sessions (exam_id, student_id, status, current_q_order, started_at) VALUES (?,?,'in_progress',1,datetime('now'))"
+    ).run(examId, studentId).lastInsertRowid;
+
+    await exam.handleInbound(db.prepare('SELECT phone FROM students WHERE id = ?').get(studentId).phone, '', { mediaType: 'image', mediaId: 'M1' });
+
+    const row = db.prepare('SELECT * FROM answers WHERE session_id = ? AND q_order = 1').get(sessionId);
+    assert.ok(row, 'answer row created');
+    assert.equal(row.answer_text, '(photo answer)');
+    assert.match(row.answer_image, /^[\w-]+\.png$/, 'stored filename fits the attachment route regex');
+  } finally {
+    restore();
+    db.exec('ROLLBACK');
+  }
+});
+
+test('photo answer on an objective question is refused', async () => {
+  db.exec('BEGIN');
+  const sent = [];
+  const restore = waStub({ sendText: async (phone, text) => { sent.push(text); } });
+  try {
+    const examId = db.prepare("INSERT INTO exams (title, subject, duration_minutes, status) VALUES (?,?,?,'live')")
+      .run('__photo_obj_exam__', 'Test', 30).lastInsertRowid;
+    const studentId = db.prepare("INSERT INTO students (phone) VALUES (?)")
+      .run('__photo_obj_phone__' + Date.now()).lastInsertRowid;
+    db.prepare("INSERT INTO questions (exam_id, q_order, type, text, options, marks) VALUES (?,1,'objective','Pick A.',?,1)")
+      .run(examId, JSON.stringify([{ key: 'A', text: 'A' }, { key: 'B', text: 'B' }]));
+    const sessionId = db.prepare(
+      "INSERT INTO sessions (exam_id, student_id, status, current_q_order, started_at) VALUES (?,?,'in_progress',1,datetime('now'))"
+    ).run(examId, studentId).lastInsertRowid;
+
+    await exam.handleInbound(db.prepare('SELECT phone FROM students WHERE id = ?').get(studentId).phone, '', { mediaType: 'image', mediaId: 'M2' });
+
+    assert.equal(sent.length, 1, 'one warning message');
+    assert.match(sent[0], /letter/i);
+    const row = db.prepare('SELECT * FROM answers WHERE session_id = ? AND q_order = 1').get(sessionId);
+    assert.equal(row, undefined, 'no answer recorded for the objective question');
+  } finally {
+    restore();
+    db.exec('ROLLBACK');
+  }
+});

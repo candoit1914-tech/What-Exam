@@ -1,4 +1,5 @@
 const db = require('../db');
+const fs = require('fs');
 const path = require('path');
 const config = require('../config');
 const wa = require('./whatsapp');
@@ -705,6 +706,13 @@ async function processAnswer(session, student, body, meta = {}) {
 
 async function handleAnswer(exam, session, student, question, body, meta = {}) {
   if (question.type === 'objective') {
+    if (meta.mediaType === 'image') {
+      await wa.sendText(
+        student.phone,
+        '⚠️ For this question, please type the letter of your answer (e.g. *A*).'
+      );
+      return false;
+    }
     const letter = resolveObjectiveLetter(question, body, meta);
     if (!letter) {
       await wa.sendText(
@@ -795,17 +803,35 @@ async function handleAnswer(exam, session, student, question, body, meta = {}) {
     // runs in the BACKGROUND so it never delays the next question; a positive
     // result cautions the student right away and locks the answer to 0 marks.
     // The detection always finishes before the exam is finalized (drainSession).
-    const answerText = body;
+    let answerText = body;
+    let answerImage = '';
+    if (meta.mediaType === 'image') {
+      try {
+        const { buffer } = await wa.downloadMedia(meta.mediaId);
+        const { createCanvas, loadImage } = require('@napi-rs/canvas');
+        const img = await loadImage(buffer);
+        const canvas = createCanvas(img.width, img.height);
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0);
+        answerImage = `${session.id}-${question.q_order}-${Date.now()}.png`;
+        fs.writeFileSync(path.join(config.uploadsDir, answerImage), canvas.toBuffer('image/png'));
+        answerText = (body || '').trim() || '(photo answer)';
+      } catch (err) {
+        console.error('[exam] photo answer download/render failed:', err.message);
+        await wa.sendText(student.phone, 'Sorry, I could not receive your photo. Please try again.');
+        return false;
+      }
+    }
     const context = [question.passage, question.text].filter(Boolean).join('\n\n');
     db.prepare(
-      `INSERT INTO answers (session_id, question_id, q_order, answer_text, is_correct, marks_awarded, max_marks, marked_by, ai_feedback, needs_review, ai_detected)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?)`
+      `INSERT INTO answers (session_id, question_id, q_order, answer_text, answer_image, is_correct, marks_awarded, max_marks, marked_by, ai_feedback, needs_review, ai_detected)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`
     ).run(
-      session.id, question.id, question.q_order, answerText,
+      session.id, question.id, question.q_order, answerText, answerImage,
       null, 0, question.marks, 'pending', '', 0, 0
     );
 
-    if (ai.aiConfigured()) {
+    if (ai.aiConfigured() && !answerImage) {
       trackSessionTask(session.id, (async () => {
         let aiDetected = 0;
         let caution = '';
