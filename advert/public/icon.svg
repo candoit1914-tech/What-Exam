@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="body" x1="0.28" y1="0" x2="0.78" y2="1">
+      <stop offset="0" stop-color="#6BE89A"/>
+      <stop offset="0.3" stop-color="#2FCC63"/>
+      <stop offset="0.68" stop-color="#16AB52"/>
+      <stop offset="1" stop-color="#066F36"/>
+    </linearGradient>
+    <radialGradient id="gloss" cx="0.32" cy="0.22" r="0.95">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.6"/>
+      <stop offset="0.2" stop-color="#FFFFFF" stop-opacity="0.16"/>
+      <stop offset="0.48" stop-color="#FFFFFF" stop-opacity="0"/>
+      <stop offset="1" stop-color="#000000" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="rim" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.5"/>
+      <stop offset="0.14" stop-color="#FFFFFF" stop-opacity="0"/>
+      <stop offset="0.78" stop-color="#02180C" stop-opacity="0"/>
+      <stop offset="1" stop-color="#02180C" stop-opacity="0.5"/>
+    </linearGradient>
+    <radialGradient id="tailGrad" cx="0.4" cy="0.35" r="1.1">
+      <stop offset="0" stop-color="#3AD672"/>
+      <stop offset="1" stop-color="#0A8A45"/>
+    </radialGradient>
+    <linearGradient id="checkLine" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#F2FFF8"/>
+      <stop offset="0.45" stop-color="#9BEFB9"/>
+      <stop offset="1" stop-color="#0B5A30"/>
+    </linearGradient>
+    <clipPath id="bubbleClip">
+      <path d="M32 5C17.6 5 6 15.4 6 28.2c0 7.2 3.8 13.6 9.7 17.7-.4 2.8-1.7 5.6-3.8 7.6-.6.6-.1 1.7.7 1.5 6.6-1.2 10.8-3.6 13.3-5.8 2 .4 4.1.6 6.4.6 14.4 0 26-10.4 26-23.2S46.4 5 32 5z"/>
+    </clipPath>
+  </defs>
+
+  <!-- grounding drop shadow -->
+  <path d="M32 5C17.6 5 6 15.4 6 28.2c0 7.2 3.8 13.6 9.7 17.7-.4 2.8-1.7 5.6-3.8 7.6-.6.6-.1 1.7.7 1.5 6.6-1.2 10.8-3.6 13.3-5.8 2 .4 4.1.6 6.4.6 14.4 0 26-10.4 26-23.2S46.4 5 32 5z" fill="#03180C" opacity="0.55" transform="translate(0 3.2) scale(1 0.94)"/>
+
+  <!-- glossy 3D body -->
+  <g clip-path="url(#bubbleClip)">
+    <path d="M32 5C17.6 5 6 15.4 6 28.2c0 7.2 3.8 13.6 9.7 17.7-.4 2.8-1.7 5.6-3.8 7.6-.6.6-.1 1.7.7 1.5 6.6-1.2 10.8-3.6 13.3-5.8 2 .4 4.1.6 6.4.6 14.4 0 26-10.4 26-23.2S46.4 5 32 5z" fill="url(#body)"/>
+    <path d="M32 5C17.6 5 6 15.4 6 28.2c0 7.2 3.8 13.6 9.7 17.7-.4 2.8-1.7 5.6-3.8 7.6-.6.6-.1 1.7.7 1.5 6.6-1.2 10.8-3.6 13.3-5.8 2 .4 4.1.6 6.4.6 14.4 0 26-10.4 26-23.2S46.4 5 32 5z" fill="url(#gloss)"/>
+    <path d="M32 5C17.6 5 6 15.4 6 28.2c0 7.2 3.8 13.6 9.7 17.7-.4 2.8-1.7 5.6-3.8 7.6-.6.6-.1 1.7.7 1.5 6.6-1.2 10.8-3.6 13.3-5.8 2 .4 4.1.6 6.4.6 14.4 0 26-10.4 26-23.2S46.4 5 32 5z" fill="url(#rim)"/>
+    <!-- specular sheen streaks -->
+    <ellipse cx="21" cy="12.6" rx="10" ry="4.4" fill="#FFFFFF" opacity="0.4" transform="rotate(-18 21 12.6)"/>
+    <ellipse cx="16" cy="16.6" rx="3.4" ry="1.7" fill="#FFFFFF" opacity="0.55" transform="rotate(-18 16 16.6)"/>
+    <!-- droplet highlight -->
+    <circle cx="43.5" cy="14.5" r="1.7" fill="#FFFFFF" opacity="0.3"/>
+  </g>
+
+  <!-- outer edge light -->
+  <path d="M32 5C17.6 5 6 15.4 6 28.2c0 7.2 3.8 13.6 9.7 17.7-.4 2.8-1.7 5.6-3.8 7.6-.6.6-.1 1.7.7 1.5 6.6-1.2 10.8-3.6 13.3-5.8 2 .4 4.1.6 6.4.6 14.4 0 26-10.4 26-23.2S46.4 5 32 5z" fill="none" stroke="#0F8A4A" stroke-width="0.9"/>
+
+  <!-- beveled 3D checkmarks -->
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <g stroke="#04301A" stroke-width="4.8" opacity="0.9">
+      <path d="M21.5 27.5l5 5 9.5-11.5" transform="translate(0.6 1.3)"/>
+      <path d="M21.5 42.5l5 5 9.5-11.5" transform="translate(0.6 1.3)"/>
+    </g>
+    <g stroke="url(#checkLine)" stroke-width="3.4">
+      <path d="M21.5 27.5l5 5 9.5-11.5"/>
+      <path d="M21.5 42.5l5 5 9.5-11.5"/>
+    </g>
+    <g stroke="#F2FFF8" stroke-width="1.1" opacity="0.85">
+      <path d="M21.5 27.5l5 5 9.5-11.5" transform="translate(0 -1)"/>
+      <path d="M21.5 42.5l5 5 9.5-11.5" transform="translate(0 -1)"/>
+    </g>
+  </g>
+</svg>
