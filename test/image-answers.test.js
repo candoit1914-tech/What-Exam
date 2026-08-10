@@ -186,3 +186,74 @@ test('photo answer on an objective question is refused', async () => {
     db.exec('ROLLBACK');
   }
 });
+
+test('markAllPendingTheory grades a photo answer via vision when available', async () => {
+  db.exec('BEGIN');
+  const wasVision = config.ai.vision;
+  config.ai.vision = true;
+  const orig = marking.markTheoryImageAnswer;
+  const calls = [];
+  marking.markTheoryImageAnswer = async (q, a, f, s) => {
+    calls.push({ a, f });
+    return { marksAwarded: 3, maxMarks: 4, needsReview: false, feedback: 'good drawing', aiGenerated: false };
+  };
+  try {
+    const examId = db.prepare("INSERT INTO exams (title, subject, duration_minutes) VALUES (?,?,?)")
+      .run('__photo_grade_exam__', 'Test', 30).lastInsertRowid;
+    const studentId = db.prepare("INSERT INTO students (phone) VALUES (?)")
+      .run('__photo_grade_phone__' + Date.now()).lastInsertRowid;
+    const questionId = db.prepare("INSERT INTO questions (exam_id, q_order, type, text, marks) VALUES (?,1,'theory','Draw the water cycle.',4)")
+      .run(examId).lastInsertRowid;
+    const sessionId = db.prepare(
+      "INSERT INTO sessions (exam_id, student_id, status, current_q_order, started_at) VALUES (?,?,'in_progress',1,datetime('now'))"
+    ).run(examId, studentId).lastInsertRowid;
+    db.prepare(
+      `INSERT INTO answers (session_id, question_id, q_order, answer_text, answer_image, is_correct, marks_awarded, max_marks, marked_by, ai_feedback, needs_review)
+       VALUES (?,?,1,'(photo answer)','s-1-1.png',NULL,0,4,'pending','',0)`
+    ).run(sessionId, questionId);
+
+    await exam.markAllPendingTheory(sessionId);
+
+    const row = db.prepare('SELECT * FROM answers WHERE session_id = ? AND q_order = 1').get(sessionId);
+    assert.equal(row.marks_awarded, 3);
+    assert.equal(row.needs_review, 0);
+    assert.equal(row.marked_by, 'ai');
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].f, 's-1-1.png', 'image file passed to the vision marker');
+  } finally {
+    marking.markTheoryImageAnswer = orig;
+    config.ai.vision = wasVision;
+    db.exec('ROLLBACK');
+  }
+});
+
+test('markAllPendingTheory flags a photo answer for manual review without vision', async () => {
+  db.exec('BEGIN');
+  const wasVision = config.ai.vision;
+  config.ai.vision = false;
+  try {
+    const examId = db.prepare("INSERT INTO exams (title, subject, duration_minutes) VALUES (?,?,?)")
+      .run('__photo_review_exam__', 'Test', 30).lastInsertRowid;
+    const studentId = db.prepare("INSERT INTO students (phone) VALUES (?)")
+      .run('__photo_review_phone__' + Date.now()).lastInsertRowid;
+    const questionId = db.prepare("INSERT INTO questions (exam_id, q_order, type, text, marks) VALUES (?,1,'theory','Draw the water cycle.',4)")
+      .run(examId).lastInsertRowid;
+    const sessionId = db.prepare(
+      "INSERT INTO sessions (exam_id, student_id, status, current_q_order, started_at) VALUES (?,?,'in_progress',1,datetime('now'))"
+    ).run(examId, studentId).lastInsertRowid;
+    db.prepare(
+      `INSERT INTO answers (session_id, question_id, q_order, answer_text, answer_image, is_correct, marks_awarded, max_marks, marked_by, ai_feedback, needs_review)
+       VALUES (?,?,1,'(photo answer)','s-1-1.png',NULL,0,4,'pending','',0)`
+    ).run(sessionId, questionId);
+
+    await exam.markAllPendingTheory(sessionId);
+
+    const row = db.prepare('SELECT * FROM answers WHERE session_id = ? AND q_order = 1').get(sessionId);
+    assert.equal(row.needs_review, 1, 'flagged for manual review');
+    assert.equal(row.marked_by, 'pending');
+    assert.match(row.ai_feedback, /awaiting manual review/i);
+  } finally {
+    config.ai.vision = wasVision;
+    db.exec('ROLLBACK');
+  }
+});

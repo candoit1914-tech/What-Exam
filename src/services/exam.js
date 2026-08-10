@@ -891,6 +891,23 @@ async function markAllPendingTheory(sessionId) {
       }
     }
     let marked;
+    if (a.answer_image) {
+      try {
+        marked = await marking.markTheoryImageAnswer(question, a.answer_text, a.answer_image, scheme);
+      } catch {
+        marked = { marksAwarded: 0, maxMarks: question.marks, needsReview: true, feedback: 'Photo answer awaiting manual review.', aiGenerated: false };
+      }
+      if (marked.needsReview) {
+        db.prepare(
+          `UPDATE answers SET needs_review=1, marked_by='pending', ai_feedback=?, marked_at=datetime('now') WHERE id=?`
+        ).run(marked.feedback || 'Photo answer awaiting manual review.', a.id);
+        return;
+      }
+      db.prepare(
+        `UPDATE answers SET marked_by='ai', marks_awarded=?, ai_feedback=?, needs_review=0, ai_detected=?, marked_at=datetime('now') WHERE id=?`
+      ).run(marked.marksAwarded, marked.feedback, marked.aiGenerated ? 1 : 0, a.id);
+      return;
+    }
     try {
       marked = await marking.markTheoryAnswer(question, a.answer_text, scheme);
     } catch (err) {
