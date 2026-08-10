@@ -283,3 +283,68 @@ test('reportHTML embeds the photo answer img', () => {
     db.exec('ROLLBACK');
   }
 });
+
+test('finalizeStaleSessions finalizes overdue in_progress sessions and skips others', async () => {
+  const db = require('../src/db');
+  db.exec('BEGIN');
+  // finalize() calls wa.sendText / results.sendResultMessage / wa.sendImage
+  // and config.exam.sendCertificates — stub the module methods (exam reaches
+  // them through the module objects, so monkey-patching works).
+  const wasCert = require('../src/config').exam.sendCertificates;
+  require('../src/config').exam.sendCertificates = false;
+  const sentResults = [];
+  const origSendResult = results.sendResultMessage;
+  const origSendText = require('../src/services/whatsapp').sendText;
+  const origSendImage = require('../src/services/whatsapp').sendImage;
+  results.sendResultMessage = async (sessionId) => { sentResults.push(sessionId); };
+  require('../src/services/whatsapp').sendText = async () => {};
+  require('../src/services/whatsapp').sendImage = async () => {};
+  try {
+    const examId = db.prepare("INSERT INTO exams (title, subject, duration_minutes) VALUES (?,?,?)")
+      .run('__stale_exam__', 'Test', 30).lastInsertRowid;
+    const studentId = db.prepare("INSERT INTO students (phone) VALUES (?)")
+      .run('__stale_phone__' + Date.now()).lastInsertRowid;
+    db.prepare("INSERT INTO questions (exam_id, q_order, type, text, marks) VALUES (?,1,'objective','Q',1)")
+      .run(examId);
+    db.prepare('INSERT INTO exam_recipients (exam_id, student_id) VALUES (?,?)').run(examId, studentId);
+    const staleId = db.prepare(
+      "INSERT INTO sessions (exam_id, student_id, status, current_q_order, started_at) VALUES (?,?,'in_progress',1,datetime('now','-2 hours'))"
+    ).run(examId, studentId).lastInsertRowid;
+    const freshStudentId = db.prepare("INSERT INTO students (phone) VALUES (?)")
+      .run('__stale_fresh_phone__' + Date.now()).lastInsertRowid;
+    const freshId = db.prepare(
+      "INSERT INTO sessions (exam_id, student_id, status, current_q_order, started_at) VALUES (?,?,'in_progress',1,datetime('now'))"
+    ).run(examId, freshStudentId).lastInsertRowid;
+
+    // A crashed/redeployed dev DB may already hold genuinely stale in_progress
+// sessions (exactly what this recovery finalizes), so assert the DELTA the
+// test's own stale row causes rather than an absolute count.
+    const baseline = db.prepare(
+      `SELECT COUNT(*) c FROM sessions s
+       JOIN exams e ON e.id = s.exam_id
+       WHERE s.status = 'in_progress'
+         AND datetime(s.started_at, '+' || e.duration_minutes || ' minutes') < datetime('now')`
+    ).get().c;
+
+    const n = await exam.finalizeStaleSessions();
+
+    assert.equal(n, baseline, 'exactly the stale sessions are finalized (no more, no less)');
+    assert.ok(sentResults.includes(staleId), 'result message sent for the stale session');
+    assert.equal(
+      db.prepare('SELECT status FROM sessions WHERE id = ?').get(staleId).status,
+      'expired',
+      'stale session finalized as expired'
+    );
+    assert.equal(
+      db.prepare('SELECT status FROM sessions WHERE id = ?').get(freshId).status,
+      'in_progress',
+      'fresh session untouched'
+    );
+  } finally {
+    results.sendResultMessage = origSendResult;
+    require('../src/services/whatsapp').sendText = origSendText;
+    require('../src/services/whatsapp').sendImage = origSendImage;
+    require('../src/config').exam.sendCertificates = wasCert;
+    db.exec('ROLLBACK');
+  }
+});

@@ -247,6 +247,9 @@ if (require.main === module) {
     // Fail any import left mid-flight by a previous process (crash/redeploy)
     // so stale jobs can never hang the dashboard poll or block new uploads.
     require('./services/pdfImport').recoverStaleJobs();
+    // Finalize sessions left in_progress past their deadline by a crash or
+    // redeploy — each is closed and reported exactly like timer expiry.
+    await require('./services/exam').finalizeStaleSessions();
     if (config.seedOnBoot) {
       try {
         const s = seedIfEmpty(db);

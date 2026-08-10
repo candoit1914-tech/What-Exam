@@ -967,6 +967,38 @@ async function finalize(session, student, reason = 'completed') {
 
 // ── Admin: end an exam ─────────────────────────────────────────────────
 
+/**
+ * Recover sessions left in_progress past their deadline by a crash or
+ * redeploy: each is finalized exactly like timer expiry (report + WhatsApp
+ * result + certificate). One failing session never blocks the rest.
+ */
+async function finalizeStaleSessions() {
+  const stale = db.prepare(
+    `SELECT s.id, s.student_id FROM sessions s
+     JOIN exams e ON e.id = s.exam_id
+     WHERE s.status = 'in_progress'
+       AND datetime(s.started_at, '+' || e.duration_minutes || ' minutes') < datetime('now')`
+  ).all();
+  let n = 0;
+  for (const row of stale) {
+    try {
+      const session = db.prepare(
+        `SELECT s.*, e.duration_minutes, e.pass_percentage FROM sessions s
+         JOIN exams e ON e.id = s.exam_id WHERE s.id = ?`
+      ).get(row.id);
+      const student = db.prepare('SELECT * FROM students WHERE id = ?').get(row.student_id);
+      if (!session || !student) continue;
+      await finalize(session, student, 'expired');
+      console.log(`[startup] finalized stale session ${row.id} (${student.phone})`);
+      n++;
+    } catch (err) {
+      console.error(`[startup] failed to finalize stale session ${row.id}:`, err.message);
+    }
+  }
+  if (n) console.log(`[startup] finalized ${n} stale session(s) — reports, certificates and results were sent.`);
+  return n;
+}
+
 /** End an exam from the app: closes the exam and stops every active session immediately. */
 async function endExam(examId) {
   const exam = db.prepare('SELECT * FROM exams WHERE id = ?').get(examId);
@@ -1115,6 +1147,7 @@ module.exports = {
   processAnswer,
   handleAnswer,
   finalize,
+  finalizeStaleSessions,
   endExam,
   sendExamToRecipients,
   sendQuestionTo,
