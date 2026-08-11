@@ -61,6 +61,15 @@ const config = {
     timeoutMs: parseInt(process.env.CLAUDE_TIMEOUT_MS || '0', 10),
   },
 
+  // Optional third OpenAI-compatible provider (xAI / Grok). Raced against
+  // the primary and secondary for faster responses. Leave empty to skip.
+  xai: {
+    baseUrl: (process.env.XAI_BASE_URL || 'https://api.x.ai/v1').replace(/\/$/, ''),
+    apiKey: valid(process.env.XAI_API_KEY) ? process.env.XAI_API_KEY : '',
+    model: process.env.XAI_MODEL || 'grok-3',
+    timeoutMs: parseInt(process.env.XAI_TIMEOUT_MS || '0', 10),
+  },
+
   exam: {
     passPercentage: parseFloat(process.env.PASS_PERCENTAGE || '50'),
     defaultDurationMinutes: parseInt(process.env.DEFAULT_DURATION_MINUTES || '30', 10),

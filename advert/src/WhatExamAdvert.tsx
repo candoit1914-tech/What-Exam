@@ -973,6 +973,29 @@ export const WhatExamAdvert: React.FC = () => {
         <Audio src={staticFile("audio/chime.wav")} volume={0.4} />
       </Sequence>
 
+      {/* ── Voiceover clips (Edge TTS) ── */}
+      <Sequence from={30} durationInFrames={60}>
+        <Audio src={staticFile("audio/vo-01-intro.mp3")} volume={1} />
+      </Sequence>
+      <Sequence from={140} durationInFrames={120}>
+        <Audio src={staticFile("audio/vo-02-tagline.mp3")} volume={1} />
+      </Sequence>
+      <Sequence from={285} durationInFrames={180}>
+        <Audio src={staticFile("audio/vo-03-chat.mp3")} volume={1} />
+      </Sequence>
+      <Sequence from={495} durationInFrames={150}>
+        <Audio src={staticFile("audio/vo-04-answers.mp3")} volume={1} />
+      </Sequence>
+      <Sequence from={675} durationInFrames={120}>
+        <Audio src={staticFile("audio/vo-05-aimarking.mp3")} volume={1} />
+      </Sequence>
+      <Sequence from={785} durationInFrames={60}>
+        <Audio src={staticFile("audio/vo-06-results.mp3")} volume={1} />
+      </Sequence>
+      <Sequence from={845} durationInFrames={30}>
+        <Audio src={staticFile("audio/vo-07-outro.mp3")} volume={1} />
+      </Sequence>
+
       {/* ── Scene sequences with waterdrop transitions ── */}
       <Sequence from={0} durationInFrames={60}>
         <SceneIntro />

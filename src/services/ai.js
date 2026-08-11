@@ -102,6 +102,14 @@ function secondaryConfigured() {
   return !!(config.claude.apiKey && config.claude.baseUrl);
 }
 
+/**
+ * Whether a third OpenAI-compatible provider (XAI_*) is configured. When
+ * it's configured, `chatJSON` races it against the primary and secondary.
+ */
+function tertiaryConfigured() {
+  return !!(config.xai && config.xai.apiKey && config.xai.baseUrl);
+}
+
 async function chatJSON(messages, { temperature = 0.4, maxRetries = 2, timeoutMs = config.ai.timeoutMs, maxTokens = 8192 } = {}) {
   if (!aiConfigured()) {
     throw new AIError('AI is not configured. Set AI_API_KEY and AI_BASE_URL in .env');
@@ -116,7 +124,7 @@ async function chatJSON(messages, { temperature = 0.4, maxRetries = 2, timeoutMs
       ...common,
     });
 
-  if (!secondaryConfigured()) return primary();
+  if (!secondaryConfigured() && !tertiaryConfigured()) return primary();
 
   const secondary = () =>
     callEndpoint({
@@ -127,11 +135,24 @@ async function chatJSON(messages, { temperature = 0.4, maxRetries = 2, timeoutMs
       ...common,
     });
 
-  // First success wins; a fast failure on one side never aborts the race. When
-  // both fail, surface the primary provider's error (the first in the list).
-  return Promise.any([primary(), secondary()]).catch((agg) => {
+  const tertiary = () =>
+    callEndpoint({
+      baseUrl: config.xai.baseUrl,
+      apiKey: config.xai.apiKey,
+      model: config.xai.model,
+      timeoutMs: config.xai.timeoutMs || timeoutMs,
+      ...common,
+    });
+
+  // Race all configured providers; first success wins. When all fail,
+  // surface the primary provider's error.
+  const providers = [primary];
+  if (secondaryConfigured()) providers.push(secondary);
+  if (tertiaryConfigured()) providers.push(tertiary);
+
+  return Promise.any(providers.map((fn) => fn())).catch((agg) => {
     const err = agg && agg.errors ? agg.errors[0] : agg;
-    throw err instanceof Error ? err : new AIError(`Both AI providers failed: ${String(agg && agg.message)}`);
+    throw err instanceof Error ? err : new AIError(`All AI providers failed: ${String(agg && agg.message)}`);
   });
 }
 
@@ -220,15 +241,15 @@ const BLOCK_MAX_CHARS = 3500;
 // Blocks run several at a time: enough parallelism to collapse a long paper's
 // wall-clock time, so a slow block does not stall the whole wave. The cap is
 // still bounded so a single upload never floods a shared endpoint.
-const BLOCK_CONCURRENCY = 8;
+// Increased from 8 to 12 for faster extraction with Grok as fallback.
+const BLOCK_CONCURRENCY = 12;
 const BLOCK_MAX_TOKENS = 6000;
 // A single extraction block runs on its own clock with a couple of retries
 // (flaky shared endpoints drop requests under concurrency). A block that still
 // fails is SKIPPED — never fails the whole paper — so this only bounds how
-// long one stubborn block can stall the import. 150s is ~5x the healthy call
-// time (~20-30s) but caps a hung block at minutes, not the old 240s which
-// turned one stuck request into a ~24-minute stall across retries.
-const BLOCK_TIMEOUT_MS = 150 * 1000;
+// long one stubborn block can stall the import. Reduced from 150s to 90s
+// since Grok and Claude are much faster than the primary 100B+ model.
+const BLOCK_TIMEOUT_MS = 90 * 1000;
 const BLOCK_RETRIES = 2;
 
 /** Run fn over items with at most `limit` promises in flight (like a semaphore). */
