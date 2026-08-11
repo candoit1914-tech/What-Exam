@@ -109,24 +109,30 @@ function landingHTML(anon = false) {
           <p>Send your school, class, or industry and your contact details — the admin creates your exam and delivers it to you.</p>
         </div>
         <div class="features-grid">
-          <a class="feature-card reveal" style="--d:0ms" href="https://wa.me/233558126390?text=${encodeURIComponent('Hello Admin, I would like an exam created for my school, class, or industry. My details are:')}" target="_blank" rel="noopener">
-            <div class="f-icon">${I.wa}</div>
+          <div class="feature-card reveal" style="--d:0ms">
+            <a class="f-link" href="https://wa.me/233558126390?text=${encodeURIComponent('Hello Admin, I would like an exam created for my school, class, or industry. My details are:')}" target="_blank" rel="noopener" aria-label="Chat on WhatsApp — 0558126390">
+              <div class="f-icon">${I.wa}</div>
+            </a>
             <h3>Chat on WhatsApp</h3>
             <p>Message the admin with your school, class, or industry details.</p>
-            <span class="f-tag">WhatsApp · 0558126390</span>
-          </a>
-          <a class="feature-card reveal" style="--d:100ms" href="mailto:candoit1914@gmail.com?subject=${encodeURIComponent('Exam Creation Request')}&body=${encodeURIComponent('Hello Admin,\n\nI would like an exam created for my school, class, or industry.\n\nMy details:\nName:\nSchool / Class / Industry:\nContact:\n\nThank you.')}">
-            <div class="f-icon">${I.envelope}</div>
+            <span class="f-tag">0558126390</span>
+          </div>
+          <div class="feature-card reveal" style="--d:100ms">
+            <a class="f-link" href="mailto:candoit1914@gmail.com?subject=${encodeURIComponent('Exam Creation Request')}&body=${encodeURIComponent('Hello Admin,\n\nI would like an exam created for my school, class, or industry.\n\nMy details:\nName:\nSchool / Class / Industry:\nContact:\n\nThank you.')}" aria-label="Send an email to candoit1914@gmail.com">
+              <div class="f-icon">${I.envelope}</div>
+            </a>
             <h3>Send an email</h3>
-            <p>Write to the admin at candoit1914@gmail.com and we will set your exam up.</p>
-            <span class="f-tag">Email · candoit1914@gmail.com</span>
-          </a>
-          <a class="feature-card reveal" style="--d:200ms" href="sms:+233269200946?&body=${encodeURIComponent('Hello Admin, I would like an exam created for my school, class, or industry. My details are:')}">
-            <div class="f-icon">${I.phone}</div>
+            <p>Write to the admin and we will set your exam up.</p>
+            <span class="f-tag">candoit1914@gmail.com</span>
+          </div>
+          <div class="feature-card reveal" style="--d:200ms">
+            <a class="f-link" href="sms:+233558126390?&body=${encodeURIComponent('Hello Admin, I would like an exam created for my school, class, or industry. My details are:')}" aria-label="Send an SMS to 0558126390">
+              <div class="f-icon">${I.phone}</div>
+            </a>
             <h3>Send an SMS</h3>
-            <p>Text your details to either number and the admin will reply.</p>
-            <span class="f-tag">SMS · 0269200946 / 0558126390</span>
-          </a>
+            <p>Text your details and the admin will reply.</p>
+            <span class="f-tag">0558126390</span>
+          </div>
         </div>
       </section>` : ''}
 

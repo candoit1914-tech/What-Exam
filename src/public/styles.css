@@ -1500,15 +1500,23 @@ body.anon .topbar-actions .btn-primary { display: none; }
 }
 
 /* ── Contact the Admin (anonymous landing) ─────────────── */
-a.feature-card {
-  display: block;
-  text-decoration: none;
-  color: inherit;
-  cursor: pointer;
-  transition: transform 0.25s var(--ease-out), border-color 0.25s var(--ease-out), box-shadow 0.25s var(--ease-out);
+.f-link {
+  display: inline-block;
+  border-radius: 14px;
+  line-height: 0;
 }
-a.feature-card:hover {
-  transform: translateY(-3px);
-  border-color: rgba(37, 211, 102, 0.45);
-  box-shadow: var(--shadow-card-hover);
+.f-link .f-icon {
+  transition:
+    transform 0.2s var(--ease-out),
+    border-color 0.2s var(--ease-out),
+    box-shadow 0.2s var(--ease-out);
+}
+.f-link:hover .f-icon {
+  transform: scale(1.08);
+  border-color: rgba(110, 231, 183, 0.55);
+  box-shadow: 0 8px 22px rgba(37, 211, 102, 0.22);
+}
+.f-link:focus-visible {
+  outline: 2px solid var(--green);
+  outline-offset: 3px;
 }
