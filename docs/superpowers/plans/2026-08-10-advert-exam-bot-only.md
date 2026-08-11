@@ -337,6 +337,32 @@ Each task's commit reverts independently (`git revert <sha>`); tasks touch
 disjoint files (tsx vs script+audio vs out/). `out/advert.mp4` regenerates
 on demand via Task 3's command.
 
+## Execution record (ledger)
+
+- Task 1 (3665ce6) — Approved. Spec 24/24. Minors: review-diff mojibake
+  (pipeline), typescript/@types/react not devDeps (env gap; verification
+  used cache-only installs), missing trailing newlines (cosmetic).
+- Task 2 (f85db7a) — Approved. Minors: script exits 1 (cp1252 ✓ print —
+  fixed in Task 3 e51298e), stale comment (removed), manifest no trailing
+  newline (cosmetic).
+- Task 3 (e51298e, 14b682a) — Approved. Render 780/780, exit 0, h264
+  1920x1080@30, aac 26.048 s. Size heuristic (≥10 MB) wrong for a stable
+  UI: actual 2,213,306 B — intent (valid complete render) satisfied.
+  Minors: ding.wav report stat slip (committed blob 26,504 B correct),
+  3 vo mp3s content-equivalent churn inside scaffold commit.
+- Final review (d679603..14b682a) — **With fixes**: 6/7 VO lines exceeded
+  their fixed windows (up to 6.1 s cut; mp3s were long for the pre-existing
+  hardcoded timing); no Criticals. Decision (user): **remove the
+  voiceover** — commit 6a1d270 strips all vo Audio tracks (SFX/BGM kept;
+  compose is music-driven, 780 frames unchanged), re-render verified
+  (exit 0, 780/780, deterministic bytes across clean-cache rerun, speech
+  windows measured silent). vo-*.mp3 + vo-manifest.json + VO script remain
+  as the script record. Rendered mp4 audio = bgm + whoosh/ding/chime only.
+- Deferred to docs (accepted as-is): trailing newlines, package.json
+  branding, tick.wav unreferenced asset, dist/ not gitignored, stale
+  component names, manifest start_frames informational only.
+- Ledger closed; main pushed at 6a1d270.
+
 ## Out of scope
 
 The landing iOS restyle (own spec/plan, resumes after this plan's final
