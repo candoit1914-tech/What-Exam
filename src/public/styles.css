@@ -1465,3 +1465,32 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--green); width:
   }
   .reveal { opacity: 1; transform: none; }
 }
+
+/* ── Anonymous landing (public users) ──────────────────── */
+body.anon .topnav,
+body.anon .search,
+body.anon .logout-btn,
+body.anon .topbar-actions .btn-primary { display: none; }
+.landing .login-wrap {
+  min-height: 0;
+  margin: 30px auto 0;
+  padding: 0 16px;
+}
+.landing .login-wrap--hidden { display: none; }
+.landing .login-wrap--show { display: grid; }
+.anon-note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: -18px 0 30px;
+  font-size: 13.5px;
+  color: var(--text-secondary);
+}
+.anon-note::before {
+  content: '';
+  flex: none;
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--green);
+  box-shadow: 0 0 0 4px rgba(37, 211, 102, 0.15);
+}
