@@ -101,6 +101,35 @@ function landingHTML(anon = false) {
         </div>
       </section>
 
+      ${anon ? `
+      <section class="section reveal">
+        <div class="section-head">
+          <div class="eyebrow"><span class="dot"></span>Request an exam</div>
+          <h2>LET US BUILD<br><span class="grad">YOUR EXAM</span></h2>
+          <p>Send your school, class, or industry and your contact details — the admin creates your exam and delivers it to you.</p>
+        </div>
+        <div class="features-grid">
+          <a class="feature-card reveal" style="--d:0ms" href="https://wa.me/233558126390?text=${encodeURIComponent('Hello Admin, I would like an exam created for my school, class, or industry. My details are:')}" target="_blank" rel="noopener">
+            <div class="f-icon">${I.wa}</div>
+            <h3>Chat on WhatsApp</h3>
+            <p>Message the admin with your school, class, or industry details.</p>
+            <span class="f-tag">WhatsApp · 0558126390</span>
+          </a>
+          <a class="feature-card reveal" style="--d:100ms" href="mailto:candoit1914@gmail.com?subject=${encodeURIComponent('Exam Creation Request')}&body=${encodeURIComponent('Hello Admin,\n\nI would like an exam created for my school, class, or industry.\n\nMy details:\nName:\nSchool / Class / Industry:\nContact:\n\nThank you.')}">
+            <div class="f-icon">${I.envelope}</div>
+            <h3>Send an email</h3>
+            <p>Write to the admin at candoit1914@gmail.com and we will set your exam up.</p>
+            <span class="f-tag">Email · candoit1914@gmail.com</span>
+          </a>
+          <a class="feature-card reveal" style="--d:200ms" href="sms:+233269200946?&body=${encodeURIComponent('Hello Admin, I would like an exam created for my school, class, or industry. My details are:')}">
+            <div class="f-icon">${I.phone}</div>
+            <h3>Send an SMS</h3>
+            <p>Text your details to either number and the admin will reply.</p>
+            <span class="f-tag">SMS · 0269200946 / 0558126390</span>
+          </a>
+        </div>
+      </section>` : ''}
+
       <section class="section reveal">
         <div class="section-head">
           <div class="eyebrow"><span class="dot"></span>How it works</div>
@@ -128,35 +157,6 @@ function landingHTML(anon = false) {
           </div>
         </div>
       </section>
-
-      ${anon ? `
-      <section class="section reveal">
-        <div class="section-head">
-          <div class="eyebrow"><span class="dot"></span>Contact the Admin</div>
-          <h2>NEED AN EXAM FOR YOUR<br><span class="grad">SCHOOL, CLASS, OR INDUSTRY?</span></h2>
-          <p>Exams are created by the admin. Send your school, class, or industry and your contact details — the exam is created and delivered to you.</p>
-        </div>
-        <div class="features-grid">
-          <a class="feature-card reveal" style="--d:0ms" href="https://wa.me/233269200946?text=${encodeURIComponent('Hello Admin, I would like an exam created for my school, class, or industry. My details are:')}" target="_blank" rel="noopener">
-            <div class="f-icon">${I.wa}</div>
-            <h3>Chat on WhatsApp</h3>
-            <p>Message the admin directly — 0269200946 or 0558126390 — with your school, class, or industry.</p>
-            <span class="f-tag">WhatsApp · 0269200946</span>
-          </a>
-          <a class="feature-card reveal" style="--d:100ms" href="mailto:candoit1914@gmail.com?subject=${encodeURIComponent('Exam Creation Request')}&body=${encodeURIComponent('Hello Admin,\n\nI would like an exam created for my school, class, or industry.\n\nMy details:\nName:\nSchool / Class / Industry:\nContact:\n\nThank you.')}">
-            <div class="f-icon">${I.envelope}</div>
-            <h3>Send an email</h3>
-            <p>Write to the admin at candoit1914@gmail.com and we will set your exam up.</p>
-            <span class="f-tag">Email · candoit1914@gmail.com</span>
-          </a>
-          <a class="feature-card reveal" style="--d:200ms" href="sms:+233269200946?&body=${encodeURIComponent('Hello Admin, I would like an exam created for my school, class, or industry. My details are:')}">
-            <div class="f-icon">${I.phone}</div>
-            <h3>Send an SMS</h3>
-            <p>Text either number — 0269200946 or 0558126390 — with your details and the admin will reply.</p>
-            <span class="f-tag">SMS · 0269200946 / 0558126390</span>
-          </a>
-        </div>
-      </section>` : ''}
 
       <footer class="footer reveal">
         <div class="footer-brand"><img src="/icon.svg" alt=""> WHAT EXAM</div>

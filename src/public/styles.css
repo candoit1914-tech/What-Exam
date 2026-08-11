@@ -1504,6 +1504,7 @@ a.feature-card {
   display: block;
   text-decoration: none;
   color: inherit;
+  cursor: pointer;
   transition: transform 0.25s var(--ease-out), border-color 0.25s var(--ease-out), box-shadow 0.25s var(--ease-out);
 }
 a.feature-card:hover {
