@@ -115,7 +115,6 @@ function landingHTML(anon = false) {
             </a>
             <h3>Chat on WhatsApp</h3>
             <p>Message the admin with your school, class, or industry details.</p>
-            <span class="f-tag">0558126390</span>
           </div>
           <div class="feature-card reveal" style="--d:100ms">
             <a class="f-link" href="mailto:candoit1914@gmail.com?subject=${encodeURIComponent('Exam Creation Request')}&body=${encodeURIComponent('Hello Admin,\n\nI would like an exam created for my school, class, or industry.\n\nMy details:\nName:\nSchool / Class / Industry:\nContact:\n\nThank you.')}" aria-label="Send an email to candoit1914@gmail.com">
@@ -123,7 +122,6 @@ function landingHTML(anon = false) {
             </a>
             <h3>Send an email</h3>
             <p>Write to the admin and we will set your exam up.</p>
-            <span class="f-tag">candoit1914@gmail.com</span>
           </div>
           <div class="feature-card reveal" style="--d:200ms">
             <a class="f-link" href="sms:+233558126390?&body=${encodeURIComponent('Hello Admin, I would like an exam created for my school, class, or industry. My details are:')}" aria-label="Send an SMS to 0558126390">
@@ -131,7 +129,6 @@ function landingHTML(anon = false) {
             </a>
             <h3>Send an SMS</h3>
             <p>Text your details and the admin will reply.</p>
-            <span class="f-tag">0558126390</span>
           </div>
         </div>
       </section>` : ''}
