@@ -38,7 +38,7 @@ async function api(path, opts = {}) {
   const data = await res.json().catch(() => ({}));
   if (res.status === 401 && !path.startsWith('/auth/login')) {
     clearToken();
-    showLogin();
+    showLanding();
     throw new Error(data.error || 'Session expired — please sign in.');
   }
   if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
@@ -54,24 +54,118 @@ function invalidateCache(pattern) {
 }
 
 // ── Auth ────────────────────────────────────────────────────────
-function showLogin() {
-  clearToken();
-  $view.innerHTML = `
-    <div class="login-wrap">
-      <div class="login-card">
-        <div class="login-brand"><img src="/icon.svg" alt="What Exam"><span>WHAT&nbsp;EXAM</span></div>
-        <h1>Admin sign in</h1>
-        <p class="sub">This dashboard is protected. Enter the admin password to continue.</p>
-        <form id="login_form" onsubmit="event.preventDefault(); login();">
-          <div class="field"><label>Password</label>
-            <input type="password" id="login_pass" autocomplete="current-password" autofocus placeholder="••••••••">
+function landingHTML(anon = false) {
+  return `
+    <div class="landing">
+      <section class="hero">
+        <div class="hero-grid">
+          <div class="hero-copy reveal" style="--d:0ms">
+            <div class="eyebrow"><span class="dot"></span>WhatsApp Examination System</div>
+            <h1>EXAMS THAT<br><span class="grad">MARK THEMSELVES</span></h1>
+            <p>Create AI-marked exams, deliver them over WhatsApp, and let the bot run the whole session — question by question, live timer, instant results.</p>
+            <div class="hero-actions">
+              ${anon
+                ? `<button class="btn btn-primary" onclick="showLoginCard()">Admin Sign In ${I.arrow}</button>`
+                : `<button class="btn btn-primary" onclick="location.hash='#/exams'">Create an Exam ${I.arrow}</button>
+                   <button class="btn btn-ghost" onclick="location.hash='#/results'">View Results</button>`}
+            </div>
+            ${anon ? `<p class="anon-note">Exams are created by your school administrator. Students take exams directly on WhatsApp.</p>` : ''}
+            ${anon ? '' : `
+            <div class="hero-stats">
+              <div class="stat-chip reveal" style="--d:100ms"><b data-count="0">0</b><span>Exams</span></div>
+              <div class="stat-chip reveal" style="--d:200ms"><b data-count="0">0</b><span>Live</span></div>
+              <div class="stat-chip reveal" style="--d:300ms"><b data-count="0">0</b><span>Questions</span></div>
+              <div class="stat-chip reveal" style="--d:400ms"><b data-count="0">0</b><span>Students</span></div>
+            </div>`}
           </div>
-          <button class="btn btn-primary btn-block" type="submit" id="login_btn">Sign In</button>
-        </form>
-      </div>
+          <div class="hero-visual reveal" style="--d:150ms">
+            <div class="wapp">
+              <div class="wapp-head">
+                <button class="wa-icon" aria-label="Back">${I.back}</button>
+                <img class="wapp-ava" src="/icon.svg" alt="Exam Bot">
+                <div class="wapp-id"><b>Exam Bot</b><span>online</span></div>
+                <button class="wa-icon" aria-label="Search">${I.search}</button>
+                <button class="wa-icon" aria-label="Menu">${I.menu}</button>
+              </div>
+              <div class="wapp-chat"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section reveal">
+        <div class="section-head">
+          <div class="eyebrow"><span class="dot"></span>How it works</div>
+          <h2>PAPER IN. <span class="grad">GRADED</span> OUT.</h2>
+          <p>Results, printable reports, and live delivery activity roll into your dashboard in real time.</p>
+        </div>
+        <div class="features-grid">
+          <div class="feature-card reveal" style="--d:0ms">
+            <div class="f-icon">${I.pen}</div>
+            <h3>Create it your way</h3>
+            <p>Draft by hand, import a PDF, or let AI build the paper — every question ships with an editable marking scheme.</p>
+            <span class="f-tag">Hand · PDF · AI</span>
+          </div>
+          <div class="feature-card reveal" style="--d:100ms">
+            <div class="f-icon">${I.wa}</div>
+            <h3>Delivered in WhatsApp</h3>
+            <p>Exams land in the class chat and flow one question at a time against a live timer. Answers lock the moment they send.</p>
+            <span class="f-tag">One question · one answer</span>
+          </div>
+          <div class="feature-card reveal" style="--d:200ms">
+            <div class="f-icon">${I.spark}</div>
+            <h3>Marked as it lands</h3>
+            <p>AI scores objective and theory answers the moment they arrive — no waiting, no piles of scripts.</p>
+            <span class="f-tag">Instant AI marking</span>
+          </div>
+        </div>
+      </section>
+
+      <footer class="footer reveal">
+        <div class="footer-brand"><img src="/icon.svg" alt=""> WHAT EXAM</div>
+        <div class="footer-links">
+          <a href="#/exams">Exams</a>
+          <a href="#/results">Results</a>
+          <a href="${API_BASE}/privacy" target="_blank">Privacy</a>
+        </div>
+        <div class="footer-copy">WhatsApp Examination System · AI marking · © ${new Date().getFullYear()} What Exam</div>
+      </footer>
+
+      ${anon ? `
+      <div class="login-wrap login-wrap--hidden">
+        <div class="login-card">
+          <div class="login-brand"><img src="/icon.svg" alt="What Exam"><span>WHAT&nbsp;EXAM</span></div>
+          <h1>Admin sign in</h1>
+          <p class="sub">This dashboard is protected. Enter the admin password to continue.</p>
+          <form id="login_form" onsubmit="event.preventDefault(); login();">
+            <div class="field"><label>Password</label>
+              <input type="password" id="login_pass" autocomplete="current-password" placeholder="••••••••">
+            </div>
+            <button class="btn btn-primary btn-block" type="submit" id="login_btn">Sign In</button>
+          </form>
+        </div>
+      </div>` : ''}
     </div>`;
+}
+
+function showLanding() {
+  clearToken();
+  document.body.classList.add('anon');
+  $view.innerHTML = landingHTML(true);
+  requestAnimationFrame(() => {
+    observeReveals();
+    initHeroScene();
+  });
+}
+
+function showLoginCard() {
+  const wrap = document.querySelector('.login-wrap');
+  if (!wrap) return;
+  wrap.classList.remove('login-wrap--hidden');
+  wrap.classList.add('login-wrap--show');
+  wrap.scrollIntoView({ behavior: 'smooth', block: 'center' });
   const input = document.querySelector('#login_pass');
-  if (input) input.focus();
+  if (input) setTimeout(() => input.focus(), 400);
 }
 
 async function login() {
@@ -85,6 +179,7 @@ async function login() {
   try {
     const { token } = await api('/api/auth/login', { method: 'POST', body: { password } });
     setToken(token);
+    document.body.classList.remove('anon');
     _cache.clear();
     toast('Welcome back.');
     router();
@@ -98,7 +193,7 @@ async function login() {
 function logout() {
   clearToken();
   _cache.clear();
-  showLogin();
+  showLanding();
 }
 
 const _reportUrls = new Map();
@@ -358,81 +453,8 @@ window.addEventListener('hashchange', router);
 
 // ── Overview / Landing ───────────────────────────────────────────
 async function renderDashboard() {
-  $view.innerHTML = `
-    <div class="landing">
-      <section class="hero">
-        <div class="hero-grid">
-          <div class="hero-copy reveal" style="--d:0ms">
-            <div class="eyebrow"><span class="dot"></span>WhatsApp Examination System</div>
-            <h1>EXAMS THAT<br><span class="grad">MARK THEMSELVES</span></h1>
-            <p>Create AI-marked exams, deliver them over WhatsApp, and let the bot run the whole session — question by question, live timer, instant results.</p>
-            <div class="hero-actions">
-              <button class="btn btn-primary" onclick="location.hash='#/exams'">Create an Exam ${I.arrow}</button>
-              <button class="btn btn-ghost" onclick="location.hash='#/results'">View Results</button>
-            </div>
-            <div class="hero-stats">
-              <div class="stat-chip reveal" style="--d:100ms"><b data-count="0">0</b><span>Exams</span></div>
-              <div class="stat-chip reveal" style="--d:200ms"><b data-count="0">0</b><span>Live</span></div>
-              <div class="stat-chip reveal" style="--d:300ms"><b data-count="0">0</b><span>Questions</span></div>
-              <div class="stat-chip reveal" style="--d:400ms"><b data-count="0">0</b><span>Students</span></div>
-            </div>
-          </div>
-          <div class="hero-visual reveal" style="--d:150ms">
-            <div class="wapp">
-              <div class="wapp-head">
-                <button class="wa-icon" aria-label="Back">${I.back}</button>
-                <img class="wapp-ava" src="/icon.svg" alt="Exam Bot">
-                <div class="wapp-id"><b>Exam Bot</b><span>online</span></div>
-                <button class="wa-icon" aria-label="Search">${I.search}</button>
-                <button class="wa-icon" aria-label="Menu">${I.menu}</button>
-              </div>
-              <div class="wapp-chat"></div>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <section class="section reveal">
-        <div class="section-head">
-          <div class="eyebrow"><span class="dot"></span>How it works</div>
-          <h2>PAPER IN. <span class="grad">GRADED</span> OUT.</h2>
-          <p>Results, printable reports, and live delivery activity roll into your dashboard in real time.</p>
-        </div>
-        <div class="features-grid">
-          <div class="feature-card reveal" style="--d:0ms">
-            <div class="f-icon">${I.pen}</div>
-            <h3>Create it your way</h3>
-            <p>Draft by hand, import a PDF, or let AI build the paper — every question ships with an editable marking scheme.</p>
-            <span class="f-tag">Hand · PDF · AI</span>
-          </div>
-          <div class="feature-card reveal" style="--d:100ms">
-            <div class="f-icon">${I.wa}</div>
-            <h3>Delivered in WhatsApp</h3>
-            <p>Exams land in the class chat and flow one question at a time against a live timer. Answers lock the moment they send.</p>
-            <span class="f-tag">One question · one answer</span>
-          </div>
-          <div class="feature-card reveal" style="--d:200ms">
-            <div class="f-icon">${I.spark}</div>
-            <h3>Marked as it lands</h3>
-            <p>AI scores objective and theory answers the moment they arrive — no waiting, no piles of scripts.</p>
-            <span class="f-tag">Instant AI marking</span>
-          </div>
-        </div>
-      </section>
-
-      <footer class="footer reveal">
-        <div class="footer-brand"><img src="/icon.svg" alt=""> WHAT EXAM</div>
-        <div class="footer-links">
-          <a href="#/exams">Exams</a>
-          <a href="#/results">Results</a>
-          <a href="${API_BASE}/privacy" target="_blank">Privacy</a>
-        </div>
-        <div class="footer-copy">WhatsApp Examination System · AI marking · © ${new Date().getFullYear()} What Exam</div>
-      </footer>
-    </div>`;
-
+  $view.innerHTML = landingHTML();
   const s = await api('/api/stats');
-
   document.querySelectorAll('.stat-chip b[data-count]').forEach((el) => {
     const val = { exams: s.exams, live: s.published, questions: s.questions, students: s.students }[el.parentElement.querySelector('span').textContent.toLowerCase()] ?? 0;
     el.dataset.count = val;
@@ -1341,4 +1363,4 @@ if (searchInput) {
 
 // ── Boot ─────────────────────────────────────────────────────────
 if (getToken()) router();
-else showLogin();
+else showLanding();
