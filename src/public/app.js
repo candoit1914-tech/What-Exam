@@ -237,8 +237,8 @@ function initHeroScene() {
       <div class="wapp-date">TODAY</div>
       <div class="wapp-bubble out"><span class="b-label">QUESTION 1 · OBJECTIVE</span>What is the capital of Ghana?<span class="b-time">09:42</span></div>
       <div class="wapp-bubble out"><span class="b-label">ANSWER OPTIONS</span><div class="b-opts"><b>A.</b> Accra<br><b>B.</b> Kumasi<br><b>C.</b> Cape Coast<br><b>D.</b> Tamale</div><div class="b-hint">Time remaining: 09:45</div></div>
-      <div class="wapp-bubble in">A<span class="b-time">09:43<span class="wapp-ticks">✔✔</span></span></div>
-      <div class="wapp-bubble out"><span class="b-label">AI MARKING</span>✓ Correct — <b>+1 mark</b><span class="b-time">09:43</span></div>`;
+      <div class="wapp-bubble in">A<span class="b-time">09:43</span></div>
+      <div class="wapp-bubble out"><span class="b-label">AI MARKING</span>✓ Correct — <b>+1 mark</b><span class="b-time">09:43<span class="wapp-ticks">✔✔</span></span></div>`;
     return;
   }
 
@@ -247,13 +247,13 @@ function initHeroScene() {
     { type: 'bubble', cls: 'out', wait: 600, html: '<span class="b-label">QUESTION 1 · OBJECTIVE</span>What is the capital of Ghana?<span class="b-time">09:42</span>' },
     { type: 'bubble', cls: 'out', wait: 700, html: '<span class="b-label">ANSWER OPTIONS</span><div class="b-opts"><b>A.</b> Accra<br><b>B.</b> Kumasi<br><b>C.</b> Cape Coast<br><b>D.</b> Tamale</div><div class="b-hint">Time remaining: 09:45</div><span class="b-time">09:42</span>' },
     { type: 'typing', wait: 950 },
-    { type: 'bubble', cls: 'in', wait: 750, html: 'A<span class="b-time">09:43<span class="wapp-ticks">✔✔</span></span>' },
+    { type: 'bubble', cls: 'in', wait: 750, html: 'A<span class="b-time">09:43</span>' },
     { type: 'bubble', cls: 'out', wait: 1600, html: '<span class="b-label">AI MARKING</span>✓ Correct — <b>+1 mark</b><span class="b-time">09:43</span>' },
     { type: 'bubble', cls: 'out', wait: 1300, html: '<span class="b-label">QUESTION 2 · THEORY</span>State two causes of soil erosion.<span class="b-time">09:44</span>' },
     { type: 'typing', wait: 1100 },
-    { type: 'bubble', cls: 'in', wait: 850, html: 'Rainwater washes away topsoil and wind blows dry soil away.<span class="b-time">09:45<span class="wapp-ticks">✔✔</span></span>' },
+    { type: 'bubble', cls: 'in', wait: 850, html: 'Rainwater washes away topsoil and wind blows dry soil away.<span class="b-time">09:45</span>' },
     { type: 'typing', wait: 950 },
-    { type: 'bubble', cls: 'out', wait: 1500, html: '<span class="b-label">AI THEORY MARKING</span>✓ Marked — <b>4 / 5</b><br><span style="opacity:.8;font-size:11.5px">Correctness · Completeness · Relevance</span><span class="b-time">09:45</span>' },
+    { type: 'bubble', cls: 'out', wait: 1500, html: '<span class="b-label">AI THEORY MARKING</span>✓ Marked — <b>4 / 5</b><br><span style="opacity:.8;font-size:11.5px">Correctness · Completeness · Relevance</span><span class="b-time">09:45<span class="wapp-ticks">✔✔</span></span>' },
     { type: 'score', wait: 2600, html: 'Exam complete — <b>9 / 10</b> · Pass' },
     { type: 'clear', wait: 3600 },
   ];
@@ -381,7 +381,7 @@ async function renderDashboard() {
             <div class="wapp">
               <div class="wapp-head">
                 <button class="wa-icon" aria-label="Back">${I.back}</button>
-                <div class="wapp-ava">WE</div>
+                <img class="wapp-ava" src="/icon.svg" alt="Exam Bot">
                 <div class="wapp-id"><b>Exam Bot</b><span>online</span></div>
                 <button class="wa-icon" aria-label="Search">${I.search}</button>
                 <button class="wa-icon" aria-label="Menu">${I.menu}</button>
