@@ -725,11 +725,11 @@ const SceneOutro: React.FC = () => {
 };
 
 /* ═══════════════════════════════════════════════════════════════
-   MAIN COMPOSITION — Voiceover-driven, 26s @ 30fps = 780 frames
+   MAIN COMPOSITION — Music-driven, 26s @ 30fps = 780 frames
    ═══════════════════════════════════════════════════════════════ */
 export const WhatExamAdvert: React.FC = () => {
   /*
-   * Scene timing (voiceover-driven):
+   * Scene timing:
    *   1. Intro        0 –  60   (2s)   Icon + "Exam Bot" lockup
    *   2. Tagline     60 – 180   (4s)   Headline over chat greeting
    *   3. Chat        180 – 360  (6s)   Question, options, answer
@@ -740,31 +740,8 @@ export const WhatExamAdvert: React.FC = () => {
    */
   return (
     <AbsoluteFill style={{ background: CHAT.bg }}>
-      {/* ── Background music (full duration, low volume under voice) ── */}
+      {/* ── Background music (full duration, low volume) ── */}
       <Audio src={staticFile("audio/bgm.wav")} volume={0.15} />
-
-      {/* ── Voiceover per scene ── */}
-      <Sequence from={15} durationInFrames={60}>
-        <Audio src={staticFile("audio/vo-01-intro.mp3")} volume={1} />
-      </Sequence>
-      <Sequence from={80} durationInFrames={120}>
-        <Audio src={staticFile("audio/vo-02-tagline.mp3")} volume={1} />
-      </Sequence>
-      <Sequence from={200} durationInFrames={180}>
-        <Audio src={staticFile("audio/vo-03-chat.mp3")} volume={1} />
-      </Sequence>
-      <Sequence from={375} durationInFrames={150}>
-        <Audio src={staticFile("audio/vo-04-answers.mp3")} volume={1} />
-      </Sequence>
-      <Sequence from={525} durationInFrames={180}>
-        <Audio src={staticFile("audio/vo-05-aimarking.mp3")} volume={1} />
-      </Sequence>
-      <Sequence from={700} durationInFrames={60}>
-        <Audio src={staticFile("audio/vo-06-results.mp3")} volume={1} />
-      </Sequence>
-      <Sequence from={755} durationInFrames={30}>
-        <Audio src={staticFile("audio/vo-07-outro.mp3")} volume={1} />
-      </Sequence>
 
       {/* ── Sound effects ── */}
       {[60, 180, 360, 510, 690, 750].map((from) => (
