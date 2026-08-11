@@ -80,6 +80,14 @@ function landingHTML(anon = false) {
           </div>
           <div class="hero-visual reveal" style="--d:150ms">
             <div class="wapp">
+              <div class="wapp-status">
+                <span>09:42</span>
+                <span class="st-icons">
+                  <svg viewBox="0 0 24 24" fill="currentColor"><path d="M2 20h2.4v-6H2zM7.6 20H10v-10H7.6zM13.2 20h2.4V6h-2.4zM18.8 20h2.4V2h-2.4z"/></svg>
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 8.5a14.5 14.5 0 0120 0M5.5 12a9.5 9.5 0 0113 0M9 15.5a4.5 4.5 0 016 0"/><circle cx="12" cy="18.5" r="1.3" fill="currentColor" stroke="none"/></svg>
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="1" y="7" width="18" height="10" rx="2"/><path d="M22 10v4"/></svg>
+                </span>
+              </div>
               <div class="wapp-head">
                 <button class="wa-icon" aria-label="Back">${I.back}</button>
                 <img class="wapp-ava" src="/icon.svg" alt="Exam Bot">
@@ -120,6 +128,35 @@ function landingHTML(anon = false) {
           </div>
         </div>
       </section>
+
+      ${anon ? `
+      <section class="section reveal">
+        <div class="section-head">
+          <div class="eyebrow"><span class="dot"></span>Contact the Admin</div>
+          <h2>NEED AN EXAM FOR YOUR<br><span class="grad">SCHOOL, CLASS, OR INDUSTRY?</span></h2>
+          <p>Exams are created by the admin. Send your school, class, or industry and your contact details — the exam is created and delivered to you.</p>
+        </div>
+        <div class="features-grid">
+          <a class="feature-card reveal" style="--d:0ms" href="https://wa.me/233269200946?text=${encodeURIComponent('Hello Admin, I would like an exam created for my school, class, or industry. My details are:')}" target="_blank" rel="noopener">
+            <div class="f-icon">${I.wa}</div>
+            <h3>Chat on WhatsApp</h3>
+            <p>Message the admin directly — 0269200946 or 0558126390 — with your school, class, or industry.</p>
+            <span class="f-tag">WhatsApp · 0269200946</span>
+          </a>
+          <a class="feature-card reveal" style="--d:100ms" href="mailto:candoit1914@gmail.com?subject=${encodeURIComponent('Exam Creation Request')}&body=${encodeURIComponent('Hello Admin,\n\nI would like an exam created for my school, class, or industry.\n\nMy details:\nName:\nSchool / Class / Industry:\nContact:\n\nThank you.')}">
+            <div class="f-icon">${I.envelope}</div>
+            <h3>Send an email</h3>
+            <p>Write to the admin at candoit1914@gmail.com and we will set your exam up.</p>
+            <span class="f-tag">Email · candoit1914@gmail.com</span>
+          </a>
+          <a class="feature-card reveal" style="--d:200ms" href="sms:+233269200946?&body=${encodeURIComponent('Hello Admin, I would like an exam created for my school, class, or industry. My details are:')}">
+            <div class="f-icon">${I.phone}</div>
+            <h3>Send an SMS</h3>
+            <p>Text either number — 0269200946 or 0558126390 — with your details and the admin will reply.</p>
+            <span class="f-tag">SMS · 0269200946 / 0558126390</span>
+          </a>
+        </div>
+      </section>` : ''}
 
       <footer class="footer reveal">
         <div class="footer-brand"><img src="/icon.svg" alt=""> WHAT EXAM</div>
@@ -248,6 +285,7 @@ const I = {
   doc: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6"/></svg>',
   spark: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3z"/><path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8L19 15z"/></svg>',
   wa: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 11.5a8.5 8.5 0 01-12.6 7.4L3 21l2.1-5.4A8.5 8.5 0 1121 11.5z"/><path d="M9 10h.01M12.5 10h.01M16 10h.01"/></svg>',
+  phone: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 16.9v3a2 2 0 01-2.2 2 19.8 19.8 0 01-8.6-3.1 19.5 19.5 0 01-6-6A19.8 19.8 0 012.1 4.2 2 2 0 014.1 2h3a2 2 0 012 1.7c.1 1 .4 2 .7 2.9a2 2 0 01-.5 2.1L8.1 10a16 16 0 006 6l1.3-1.3a2 2 0 012.1-.4c.9.3 1.9.5 2.9.7a2 2 0 011.6 1.9z"/></svg>',
   check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 6L9 17l-5-5"/></svg>',
   radar: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 1118 0"/><path d="M7 12a5 5 0 0110 0"/><circle cx="12" cy="12" r="1.4" fill="currentColor" stroke="none"/></svg>',
   bolt: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2L3 14h7l-1 8 10-12h-7l1-8z"/></svg>',
