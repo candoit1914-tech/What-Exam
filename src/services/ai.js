@@ -855,6 +855,20 @@ function splitIntoBlocks(text, perBlock = BLOCK_QUESTIONS, maxChars = BLOCK_MAX_
     if (isQuestion) qCount++;
   }
   flush();
+  // Post-process blocks: if the last line of a block does not end a sentence,
+  // move it to the next block so questions are never split mid-sentence.
+  for (let i = 0; i < blocks.length - 1; i++) {
+    const blockLines = blocks[i].split('\n');
+    const lastLine = blockLines[blockLines.length - 1].trim();
+    if (lastLine && !/[.!?;:]\s*$/.test(lastLine) && !/^\d{1,3}\s*[.)]/.test(lastLine) && !/^\(?[A-Da-d]\)?[.\-:\])]/.test(lastLine)) {
+      // Last line looks like a sentence fragment — move it to the next block
+      const fragment = blockLines.pop();
+      blocks[i] = blockLines.join('\n');
+      const nextLines = blocks[i + 1].split('\n');
+      nextLines.unshift(fragment);
+      blocks[i + 1] = nextLines.join('\n');
+    }
+  }
   return blocks;
 }
 

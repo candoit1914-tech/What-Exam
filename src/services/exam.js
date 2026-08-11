@@ -240,7 +240,17 @@ function formatQuestion(exam, question, qCount, body) {
   // The type banner and any passage/instruction/header are sent as their own
   // bubbles by buildQuestionBubbles, so the question bubble carries just the
   // stem (optionally pre-stripped of leading section headers).
-  const text = body != null ? body : String(question.text || '').trim();
+  let text = body != null ? body : String(question.text || '').trim();
+  // Ensure the question text ends with proper punctuation for a complete sentence.
+  // This fixes truncated questions from PDF imports where extraction may have
+  // cut off mid-sentence.
+  if (text && !/[.!?;:\-]\s*$/.test(text) && !/\)\s*$/.test(text)) {
+    // Check if this is a short fragment that looks like it was cut off
+    const words = text.split(/\s+/);
+    if (words.length > 2 && !text.includes('\n')) {
+      text = text + ' —';
+    }
+  }
   return `*QUESTION ${question.q_order}*\n\n${text}`;
 }
 

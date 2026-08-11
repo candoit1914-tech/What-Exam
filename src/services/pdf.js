@@ -211,7 +211,26 @@ async function analyzeDocument(buffer) {
   for (const data of pageData) {
     for (const row of data.rows) textLines.push(row.line);
   }
-  const text = textLines.join('\n').replace(/[ \t]+/g, ' ');
+  // Join lines intelligently: merge a line with the previous one when the
+  // previous line does not end with sentence-ending punctuation and the
+  // current line does not start a new sentence (lowercase or continuation).
+  // This prevents mid-sentence breaks that produce truncated questions on WhatsApp.
+  const merged = [];
+  for (const line of textLines) {
+    const trimmed = line.trim();
+    if (!trimmed) { merged.push(''); continue; }
+    const prev = merged.length > 0 ? merged[merged.length - 1] : '';
+    const prevEndsSentence = /[.!?;:]\s*$/.test(prev);
+    const curStartsNewSentence = /^[A-Z(]/.test(trimmed) && !prevEndsSentence;
+    const looksLikeOption = /^\(?[A-Da-d]\)?[.\-:\])]/.test(trimmed);
+    const looksLikeNumber = /^\d{1,3}\s*[.)]/.test(trimmed);
+    if (prev && !prevEndsSentence && !curStartsNewSentence && !looksLikeOption && !looksLikeNumber && prev.length > 0) {
+      merged[merged.length - 1] = prev + ' ' + trimmed;
+    } else {
+      merged.push(trimmed);
+    }
+  }
+  const text = merged.join('\n').replace(/[ \t]+/g, ' ');
   if (!text.trim()) throw new Error('No readable text found in PDF (scanned/image PDFs are not supported yet).');
 
   // Assemble images page by page with the size filters applied per page, then
@@ -278,7 +297,7 @@ async function analyzeDocument(buffer) {
     images.push(q);
   }
 
-  return { textLines, images, rowsByPage: pageData.map((d) => d.rows) };
+  return { textLines: merged, images, rowsByPage: pageData.map((d) => d.rows) };
 }
 
 /**
@@ -314,6 +333,24 @@ async function textWithMarkers(buffer) {
   }
   // Compute every insertion point against the ORIGINAL line array, then splice
   // from the highest position down so no earlier splice shifts a later anchor.
+  // Apply the same sentence-joining logic as analyzeDocument so markers
+  // land on complete sentences, not mid-sentence fragments.
+  const joinedLines = [];
+  for (const line of textLines) {
+    const trimmed = line.trim();
+    if (!trimmed) { joinedLines.push(''); continue; }
+    const prev = joinedLines.length > 0 ? joinedLines[joinedLines.length - 1] : '';
+    const prevEndsSentence = /[.!?;:]\s*$/.test(prev);
+    const curStartsNewSentence = /^[A-Z(]/.test(trimmed) && !prevEndsSentence;
+    const looksLikeOption = /^\(?[A-Da-d]\)?[.\-:\])]/.test(trimmed);
+    const looksLikeNumber = /^\d{1,3}\s*[.)]/.test(trimmed);
+    if (prev && !prevEndsSentence && !curStartsNewSentence && !looksLikeOption && !looksLikeNumber && prev.length > 0) {
+      joinedLines[joinedLines.length - 1] = prev + ' ' + trimmed;
+    } else {
+      joinedLines.push(trimmed);
+    }
+  }
+
   const inserts = [];
   for (let i = 0; i < images.length; i++) {
     const img = images[i];
@@ -324,7 +361,15 @@ async function textWithMarkers(buffer) {
     }
     let at;
     if (anchor) {
-      const anchorIndex = textLines.indexOf(anchor.line);
+      // Find the merged line that contains the anchor's original text
+      const anchorText = anchor.line.trim();
+      let anchorIndex = -1;
+      for (let j = 0; j < joinedLines.length; j++) {
+        if (joinedLines[j].includes(anchorText) || anchorText.includes(joinedLines[j])) {
+          anchorIndex = j;
+          break;
+        }
+      }
       at = anchorIndex >= 0 ? anchorIndex + 1 : pageStarts[img.page - 1];
     } else {
       at = pageStarts[img.page - 1] || 0;
@@ -332,7 +377,7 @@ async function textWithMarkers(buffer) {
     inserts.push({ at, marker: `[IMG:${i}]`, idx: i, page: img.page });
   }
   inserts.sort((a, b) => b.at - a.at);
-  const lines = textLines.slice();
+  const lines = joinedLines.slice();
   const markers = [];
   for (const ins of inserts) {
     lines.splice(ins.at, 0, ins.marker);

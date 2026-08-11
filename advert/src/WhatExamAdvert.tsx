@@ -29,7 +29,6 @@ const CHAT = {
   font: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif",
 };
 
-// Same doodle wallpaper as the landing chat (stroke-opacity 0.06)
 const WALLPAPER_URL =
   "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120' viewBox='0 0 120 120'%3E%3Cg fill='none' stroke='%23667C7A' stroke-opacity='0.06'%3E%3Cpath d='M10 20c0 6 4 10 10 10M90 90c6 0 10-4 10-10' stroke-width='2'/%3E%3Ccircle cx='60' cy='30' r='4'/%3E%3Ccircle cx='30' cy='80' r='3'/%3E%3Ccircle cx='92' cy='18' r='3'/%3E%3Cpath d='M18 60c4 4 8 4 12 0M70 60c4 4 8 4 12 0M40 45c0 4 3 7 7 7M88 62c0 4-3 7-7 7' stroke-width='2'/%3E%3Cpath d='M26 40l4 4M52 92l4 4M84 44l4-4M14 100l4-4' stroke-width='2'/%3E%3Cpath d='M104 40c0 3-2 5-5 5s-5-2-5-5' stroke-width='2'/%3E%3C/g%3E%3C/svg%3E";
 
@@ -46,20 +45,144 @@ function Wallpaper() {
   );
 }
 
+/* ── Waterdrop Transition Overlay ─────────────────────────── */
+function WaterdropTransition({ progress }: { progress: number }) {
+  // progress 0..1: 0 = fully transparent, 1 = fully opaque drop covering screen
+  const radius = interpolate(progress, [0, 1], [0, 1600], { extrapolateRight: "clamp" });
+  const opacity = interpolate(progress, [0, 0.1, 0.8, 1], [0, 0.95, 0.95, 0], { extrapolateRight: "clamp" });
+  // Ripple rings
+  const ring1 = interpolate(progress, [0, 1], [0, 1200], { extrapolateRight: "clamp" });
+  const ring2 = interpolate(progress, [0.1, 1], [0, 1000], { extrapolateRight: "clamp" });
+  const ring3 = interpolate(progress, [0.2, 1], [0, 800], { extrapolateRight: "clamp" });
+  const ringOpacity = interpolate(progress, [0, 0.3, 1], [0, 0.6, 0], { extrapolateRight: "clamp" });
+
+  return (
+    <div style={{ position: "absolute", inset: 0, pointerEvents: "none", zIndex: 100 }}>
+      {/* Main waterdrop circle */}
+      <div
+        style={{
+          position: "absolute",
+          left: "50%",
+          top: "50%",
+          width: radius * 2,
+          height: radius * 2,
+          marginLeft: -radius,
+          marginTop: -radius,
+          borderRadius: "50%",
+          background: "radial-gradient(circle, #008069 0%, #005C4B 60%, transparent 100%)",
+          opacity,
+        }}
+      />
+      {/* Ripple rings */}
+      {[ring1, ring2, ring3].map((r, i) => (
+        <div
+          key={i}
+          style={{
+            position: "absolute",
+            left: "50%",
+            top: "50%",
+            width: r * 2,
+            height: r * 2,
+            marginLeft: -r,
+            marginTop: -r,
+            borderRadius: "50%",
+            border: `${3 - i}px solid rgba(0,128,105,${ringOpacity})`,
+            opacity: ringOpacity,
+          }}
+        />
+      ))}
+      {/* Center droplet */}
+      {progress > 0 && progress < 0.6 && (
+        <div
+          style={{
+            position: "absolute",
+            left: "50%",
+            top: "50%",
+            width: 20 + progress * 40,
+            height: 20 + progress * 40,
+            marginLeft: -(10 + progress * 20),
+            marginTop: -(10 + progress * 20),
+            borderRadius: "50%",
+            background: "rgba(0,168,132,0.8)",
+            transform: `scale(${1 + Math.sin(progress * Math.PI) * 0.3})`,
+            boxShadow: "0 0 30px rgba(0,128,105,0.5)",
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+/* ── Floating Particles for 3D depth ───────────────────────── */
+function FloatingParticles({ count = 12, color = "rgba(0,128,105,0.15)" }: { count?: number; color?: string }) {
+  const frame = useCurrentFrame();
+  const particles = React.useMemo(() => {
+    return Array.from({ length: count }, (_, i) => ({
+      x: (i * 173 + 47) % 100,
+      y: (i * 131 + 89) % 100,
+      size: 4 + (i % 5) * 3,
+      speed: 0.3 + (i % 4) * 0.15,
+      phase: (i * 2.4) % (Math.PI * 2),
+    }));
+  }, [count]);
+
+  return (
+    <>
+      {particles.map((p, i) => {
+        const floatY = Math.sin(frame * p.speed * 0.05 + p.phase) * 20;
+        const floatX = Math.cos(frame * p.speed * 0.03 + p.phase) * 10;
+        const z = Math.sin(frame * 0.02 + p.phase) * 30;
+        return (
+          <div
+            key={i}
+            style={{
+              position: "absolute",
+              left: `${p.x}%`,
+              top: `${p.y}%`,
+              width: p.size,
+              height: p.size,
+              borderRadius: "50%",
+              background: color,
+              transform: `translate(${floatX}px, ${floatY}px) translateZ(${z}px)`,
+              filter: `blur(${1 + (i % 3)}px)`,
+            }}
+          />
+        );
+      })}
+    </>
+  );
+}
+
 function Bubble({
   side,
   children,
   time,
   ticks,
+  delay = 0,
 }: {
   side: "in" | "out";
   children: React.ReactNode;
   time: string;
   ticks?: boolean;
+  delay?: number;
 }) {
   const out = side === "out";
+  const frame = useCurrentFrame();
+  const { fps } = useVideoConfig();
+  const bubbleProgress = spring({ frame: frame - delay, fps, config: { damping: 14, mass: 0.7 } });
+  const bubbleOpacity = interpolate(bubbleProgress, [0, 1], [0, 1]);
+  const bubbleY = interpolate(bubbleProgress, [0, 1], [30, 0]);
+  const bubbleScale = interpolate(bubbleProgress, [0, 1], [0.85, 1]);
+
   return (
-    <div style={{ display: "flex", justifyContent: out ? "flex-end" : "flex-start" }}>
+    <div
+      style={{
+        display: "flex",
+        justifyContent: out ? "flex-end" : "flex-start",
+        opacity: bubbleOpacity,
+        transform: `translateY(${bubbleY}px) scale(${bubbleScale})`,
+      }}
+    >
       <div
         style={{
           position: "relative",
@@ -176,59 +299,90 @@ function ChatHeader({ icon, title, subtitle }: { icon: string; title: string; su
   );
 }
 
-function ChatCard({ children }: { children: React.ReactNode }) {
+function ChatCard({ children, perspective = false }: { children: React.ReactNode; perspective?: boolean }) {
+  const frame = useCurrentFrame();
+  const { fps } = useVideoConfig();
+  // Subtle 3D floating animation
+  const floatY = Math.sin(frame * 0.03) * 3;
+  const rotateX = Math.sin(frame * 0.02) * 0.5;
+  const rotateY = Math.cos(frame * 0.025) * 0.8;
+
   return (
     <div
       style={{
-        position: "relative",
-        width: 430,
-        borderRadius: 28,
-        overflow: "hidden",
-        background: CHAT.bg,
-        boxShadow: "0 30px 70px rgba(0,0,0,0.35)",
-        display: "flex",
-        flexDirection: "column",
-        minHeight: 560,
+        perspective: perspective ? 1200 : undefined,
+        transformStyle: "preserve-3d",
       }}
     >
-      <Wallpaper />
-      {children}
+      <div
+        style={{
+          position: "relative",
+          width: 430,
+          borderRadius: 28,
+          overflow: "hidden",
+          background: CHAT.bg,
+          boxShadow: "0 30px 70px rgba(0,0,0,0.35), 0 0 0 1px rgba(0,0,0,0.05)",
+          display: "flex",
+          flexDirection: "column",
+          minHeight: 560,
+          transform: perspective ? `translateY(${floatY}px) rotateX(${rotateX}deg) rotateY(${rotateY}deg) translateZ(20px)` : undefined,
+          transformStyle: "preserve-3d",
+        }}
+      >
+        <Wallpaper />
+        {children}
+      </div>
     </div>
   );
 }
 
-/* ── Helper: fade + slide in ───────────────────────────────── */
-function useFadeSlide(delay: number, duration = 20) {
+/* ── Helper: fade + slide in with 3D depth ────────────────── */
+function useFadeSlide3D(delay: number) {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
   const progress = spring({ frame: frame - delay, fps, config: { damping: 14, mass: 0.8 } });
   const opacity = interpolate(progress, [0, 1], [0, 1]);
-  const y = interpolate(progress, [0, 1], [40, 0]);
-  return { opacity, transform: `translateY(${y}px)` };
+  const y = interpolate(progress, [0, 1], [60, 0]);
+  const z = interpolate(progress, [0, 1], [-80, 0]);
+  const rotateX = interpolate(progress, [0, 1], [8, 0]);
+  return {
+    opacity,
+    transform: `translateY(${y}px) translateZ(${z}px) rotateX(${rotateX}deg)`,
+  };
 }
 
-/* ── Helper: scale spring ──────────────────────────────────── */
-function useScale(delay: number) {
+/* ── Helper: scale spring with 3D ──────────────────────────── */
+function useScale3D(delay: number) {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
   const progress = spring({ frame: frame - delay, fps, config: { damping: 12, mass: 0.6 } });
-  return { transform: `scale(${interpolate(progress, [0, 1], [0.7, 1])})`, opacity: interpolate(progress, [0, 1], [0, 1]) };
+  const scale = interpolate(progress, [0, 1], [0.6, 1]);
+  const z = interpolate(progress, [0, 1], [-100, 0]);
+  const rotateY = interpolate(progress, [0, 1], [15, 0]);
+  return {
+    transform: `scale(${scale}) translateZ(${z}px) rotateY(${rotateY}deg)`,
+    opacity: interpolate(progress, [0, 1], [0, 1]),
+  };
 }
 
 /* ═══════════════════════════════════════════════════════════════
-   SCENE 1: INTRO — App icon lockup (frames 0-60)
+   SCENE 1: INTRO — 3D icon lockup with waterdrop exit
    ═══════════════════════════════════════════════════════════════ */
 const SceneIntro: React.FC = () => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
 
-  // Icon spring scale from 0.3 (delay 8)
   const iconProgress = spring({ frame: frame - 8, fps, config: { damping: 10, mass: 0.8 } });
-  const iconScale = interpolate(iconProgress, [0, 1], [0.3, 1]);
+  const iconScale = interpolate(iconProgress, [0, 1], [0.2, 1]);
   const iconOpacity = interpolate(iconProgress, [0, 1], [0, 1]);
+  const iconZ = interpolate(iconProgress, [0, 1], [-200, 0]);
+  const iconRotateY = interpolate(iconProgress, [0, 1], [45, 0]);
 
-  const word = useFadeSlide(25);
-  const sub = useFadeSlide(38);
+  const word = useFadeSlide3D(25);
+  const sub = useFadeSlide3D(38);
+
+  // Waterdrop transition at end of scene
+  const dropProgress = interpolate(frame, [45, 60], [0, 1], { extrapolateLeft: "clamp", extrapolateRight: "clamp" });
 
   return (
     <AbsoluteFill
@@ -237,15 +391,18 @@ const SceneIntro: React.FC = () => {
         justifyContent: "center",
         alignItems: "center",
         overflow: "hidden",
+        perspective: 1200,
       }}
     >
       <Wallpaper />
-      <div style={{ position: "relative", textAlign: "center" }}>
+      <FloatingParticles count={8} color="rgba(0,128,105,0.12)" />
+      <div style={{ position: "relative", textAlign: "center", transformStyle: "preserve-3d" }}>
         <div
           style={{
             opacity: iconOpacity,
-            transform: `scale(${iconScale})`,
+            transform: `scale(${iconScale}) translateZ(${iconZ}px) rotateY(${iconRotateY}deg)`,
             marginBottom: 24,
+            filter: `drop-shadow(0 20px 40px rgba(0,128,105,0.3))`,
           }}
         >
           <img
@@ -266,6 +423,7 @@ const SceneIntro: React.FC = () => {
             letterSpacing: "-0.03em",
             color: CHAT.text,
             lineHeight: 1,
+            textShadow: "0 4px 20px rgba(0,0,0,0.1)",
           }}
         >
           Exam Bot
@@ -286,17 +444,21 @@ const SceneIntro: React.FC = () => {
           Start Examining — For Free
         </div>
       </div>
+      <WaterdropTransition progress={dropProgress} />
     </AbsoluteFill>
   );
 };
 
 /* ═══════════════════════════════════════════════════════════════
-   SCENE 2: HERO TAGLINE — Chat greeting over "Exams that mark themselves."
+   SCENE 2: HERO TAGLINE — 3D floating chat card
    ═══════════════════════════════════════════════════════════════ */
 const SceneTagline: React.FC = () => {
-  const headline = useFadeSlide(5);
-  const card = useScale(8);
-  const sub = useFadeSlide(22);
+  const frame = useCurrentFrame();
+  const headline = useFadeSlide3D(5);
+  const card = useScale3D(8);
+  const sub = useFadeSlide3D(22);
+
+  const dropProgress = interpolate(frame, [105, 120], [0, 1], { extrapolateLeft: "clamp", extrapolateRight: "clamp" });
 
   return (
     <AbsoluteFill
@@ -305,10 +467,12 @@ const SceneTagline: React.FC = () => {
         justifyContent: "center",
         alignItems: "center",
         overflow: "hidden",
+        perspective: 1200,
       }}
     >
       <Wallpaper />
-      <div style={{ position: "relative", display: "flex", flexDirection: "column", alignItems: "center", gap: 22 }}>
+      <FloatingParticles count={10} />
+      <div style={{ position: "relative", display: "flex", flexDirection: "column", alignItems: "center", gap: 22, transformStyle: "preserve-3d" }}>
         <div
           style={{
             opacity: headline.opacity,
@@ -319,13 +483,14 @@ const SceneTagline: React.FC = () => {
             letterSpacing: "-0.02em",
             color: "#005C4B",
             textAlign: "center",
+            textShadow: "0 2px 15px rgba(0,92,75,0.2)",
           }}
         >
           Exams that mark themselves.
         </div>
 
-        <div style={{ opacity: card.opacity, transform: card.transform }}>
-          <ChatCard>
+        <div style={{ opacity: card.opacity, transform: card.transform, transformStyle: "preserve-3d" }}>
+          <ChatCard perspective>
             <ChatHeader icon={staticFile("icon.svg")} title="Exam Bot" subtitle="online" />
             <div
               style={{
@@ -337,10 +502,10 @@ const SceneTagline: React.FC = () => {
               }}
             >
               <DatePill text="TODAY" />
-              <Bubble side="in" time="09:00">
+              <Bubble side="in" time="09:00" delay={15}>
                 Good morning! Your exam starts in 10 minutes.
               </Bubble>
-              <Bubble side="out" time="09:01">
+              <Bubble side="out" time="09:01" delay={40}>
                 Ready when you are.
               </Bubble>
             </div>
@@ -361,15 +526,18 @@ const SceneTagline: React.FC = () => {
           Your bot delivers them — AI does the rest.
         </div>
       </div>
+      <WaterdropTransition progress={dropProgress} />
     </AbsoluteFill>
   );
 };
 
 /* ═══════════════════════════════════════════════════════════════
-   SCENE 3: CHAT — Question, options, answer, AI marking
+   SCENE 3: CHAT — 3D perspective question flow
    ═══════════════════════════════════════════════════════════════ */
 const SceneDashboard: React.FC = () => {
-  const card = useFadeSlide(5);
+  const frame = useCurrentFrame();
+  const card = useFadeSlide3D(5);
+  const dropProgress = interpolate(frame, [165, 180], [0, 1], { extrapolateLeft: "clamp", extrapolateRight: "clamp" });
 
   return (
     <AbsoluteFill
@@ -378,11 +546,13 @@ const SceneDashboard: React.FC = () => {
         justifyContent: "center",
         alignItems: "center",
         overflow: "hidden",
+        perspective: 1200,
       }}
     >
       <Wallpaper />
-      <div style={{ opacity: card.opacity, transform: card.transform }}>
-        <ChatCard>
+      <FloatingParticles count={6} color="rgba(0,128,105,0.1)" />
+      <div style={{ opacity: card.opacity, transform: card.transform, transformStyle: "preserve-3d" }}>
+        <ChatCard perspective>
           <ChatHeader icon={staticFile("icon.svg")} title="Exam Bot" subtitle="online" />
           <div
             style={{
@@ -394,11 +564,11 @@ const SceneDashboard: React.FC = () => {
             }}
           >
             <DatePill text="TODAY" />
-            <Bubble side="out" time="09:42">
+            <Bubble side="out" time="09:42" delay={10}>
               <Chip out>QUESTION 1 · OBJECTIVE</Chip>
               What is the capital of Ghana?
             </Bubble>
-            <Bubble side="out" time="09:42">
+            <Bubble side="out" time="09:42" delay={35}>
               <Chip out>ANSWER OPTIONS</Chip>
               <div
                 style={{
@@ -414,25 +584,28 @@ const SceneDashboard: React.FC = () => {
                 {"A. Accra\nB. Kumasi\nC. Cape Coast\nD. Tamale"}
               </div>
             </Bubble>
-            <Bubble side="in" time="09:43">
+            <Bubble side="in" time="09:43" delay={60}>
               A
             </Bubble>
-            <Bubble side="out" time="09:43" ticks>
+            <Bubble side="out" time="09:43" ticks delay={75}>
               <Chip out>AI MARKING</Chip>
               ✓ Correct — +1 mark
             </Bubble>
           </div>
         </ChatCard>
       </div>
+      <WaterdropTransition progress={dropProgress} />
     </AbsoluteFill>
   );
 };
 
 /* ═══════════════════════════════════════════════════════════════
-   SCENE 4: ANSWERS — Photo answer bubble with chart
+   SCENE 4: ANSWERS — 3D photo answer with chart
    ═══════════════════════════════════════════════════════════════ */
 const SceneWhatsApp: React.FC = () => {
-  const card = useFadeSlide(5);
+  const frame = useCurrentFrame();
+  const card = useFadeSlide3D(5);
+  const dropProgress = interpolate(frame, [135, 150], [0, 1], { extrapolateLeft: "clamp", extrapolateRight: "clamp" });
 
   return (
     <AbsoluteFill
@@ -441,11 +614,13 @@ const SceneWhatsApp: React.FC = () => {
         justifyContent: "center",
         alignItems: "center",
         overflow: "hidden",
+        perspective: 1200,
       }}
     >
       <Wallpaper />
-      <div style={{ opacity: card.opacity, transform: card.transform }}>
-        <ChatCard>
+      <FloatingParticles count={8} color="rgba(0,128,105,0.08)" />
+      <div style={{ opacity: card.opacity, transform: card.transform, transformStyle: "preserve-3d" }}>
+        <ChatCard perspective>
           <ChatHeader icon={staticFile("icon.svg")} title="Exam Bot" subtitle="online" />
           <div
             style={{
@@ -457,7 +632,7 @@ const SceneWhatsApp: React.FC = () => {
             }}
           >
             <DatePill text="TODAY" />
-            <Bubble side="out" time="09:44">
+            <Bubble side="out" time="09:44" delay={10}>
               <Chip out>ANSWER · PHOTO</Chip>
               <div
                 style={{
@@ -471,6 +646,7 @@ const SceneWhatsApp: React.FC = () => {
                   justifyContent: "center",
                   padding: "10px 12px",
                   marginBottom: 2,
+                  transform: "perspective(400px) rotateX(2deg)",
                 }}
               >
                 <svg width="190" height="120" viewBox="0 0 190 120" fill="none">
@@ -495,22 +671,24 @@ const SceneWhatsApp: React.FC = () => {
                 />
               </div>
             </Bubble>
-            <Bubble side="out" time="09:44" ticks>
+            <Bubble side="out" time="09:44" ticks delay={45}>
               Answer received. Marking…
             </Bubble>
           </div>
         </ChatCard>
       </div>
+      <WaterdropTransition progress={dropProgress} />
     </AbsoluteFill>
   );
 };
 
 /* ═══════════════════════════════════════════════════════════════
-   SCENE 5: AI MARKING — Theory marking in chat
+   SCENE 5: AI MARKING — 3D typing indicator + theory marking
    ═══════════════════════════════════════════════════════════════ */
 const SceneAIMarking: React.FC = () => {
   const frame = useCurrentFrame();
-  const card = useFadeSlide(5);
+  const card = useFadeSlide3D(5);
+  const dropProgress = interpolate(frame, [165, 180], [0, 1], { extrapolateLeft: "clamp", extrapolateRight: "clamp" });
 
   return (
     <AbsoluteFill
@@ -519,11 +697,13 @@ const SceneAIMarking: React.FC = () => {
         justifyContent: "center",
         alignItems: "center",
         overflow: "hidden",
+        perspective: 1200,
       }}
     >
       <Wallpaper />
-      <div style={{ opacity: card.opacity, transform: card.transform }}>
-        <ChatCard>
+      <FloatingParticles count={10} color="rgba(0,128,105,0.1)" />
+      <div style={{ opacity: card.opacity, transform: card.transform, transformStyle: "preserve-3d" }}>
+        <ChatCard perspective>
           <ChatHeader icon={staticFile("icon.svg")} title="Exam Bot" subtitle="online" />
           <div
             style={{
@@ -557,17 +737,17 @@ const SceneAIMarking: React.FC = () => {
                       borderRadius: "50%",
                       background: "#7B8A93",
                       opacity: 0.5 + Math.sin(frame * 0.2 + d * 0.8) * 0.5,
-                      transform: `translateY(${Math.sin(frame * 0.2 + d * 0.8) * -3}px)`,
+                      transform: `translateY(${Math.sin(frame * 0.2 + d * 0.8) * -3}px) scale(${1 + Math.sin(frame * 0.15 + d) * 0.15})`,
                     }}
                   />
                 ))}
               </div>
             </div>
-            <Bubble side="out" time="09:45" ticks>
+            <Bubble side="out" time="09:45" ticks delay={30}>
               <Chip out>AI THEORY MARKING</Chip>
               ✓ Marked — 4 / 5
             </Bubble>
-            <Bubble side="out" time="09:45">
+            <Bubble side="out" time="09:45" delay={55}>
               <div style={{ fontSize: 13, color: "rgba(17,27,33,0.8)" }}>
                 Correctness · Completeness · Relevance
               </div>
@@ -575,16 +755,22 @@ const SceneAIMarking: React.FC = () => {
           </div>
         </ChatCard>
       </div>
+      <WaterdropTransition progress={dropProgress} />
     </AbsoluteFill>
   );
 };
 
 /* ═══════════════════════════════════════════════════════════════
-   SCENE 6: RESULTS — Results sent + score pill
+   SCENE 6: RESULTS — 3D score pill with celebration
    ═══════════════════════════════════════════════════════════════ */
 const SceneResults: React.FC = () => {
-  const card = useFadeSlide(5);
-  const pill = useScale(18);
+  const frame = useCurrentFrame();
+  const card = useFadeSlide3D(5);
+  const pill = useScale3D(18);
+  const dropProgress = interpolate(frame, [45, 60], [0, 1], { extrapolateLeft: "clamp", extrapolateRight: "clamp" });
+
+  // Celebration particles
+  const celebrationOpacity = interpolate(frame, [20, 30, 50, 60], [0, 1, 1, 0], { extrapolateLeft: "clamp", extrapolateRight: "clamp" });
 
   return (
     <AbsoluteFill
@@ -593,11 +779,41 @@ const SceneResults: React.FC = () => {
         justifyContent: "center",
         alignItems: "center",
         overflow: "hidden",
+        perspective: 1200,
       }}
     >
       <Wallpaper />
-      <div style={{ opacity: card.opacity, transform: card.transform }}>
-        <ChatCard>
+      <FloatingParticles count={14} color="rgba(0,168,132,0.15)" />
+      {/* Celebration sparkles */}
+      {celebrationOpacity > 0 && (
+        <div style={{ position: "absolute", inset: 0, opacity: celebrationOpacity }}>
+          {Array.from({ length: 20 }, (_, i) => {
+            const angle = (i / 20) * Math.PI * 2;
+            const dist = 200 + (i % 3) * 80;
+            const x = 960 + Math.cos(angle + frame * 0.03) * dist;
+            const y = 540 + Math.sin(angle + frame * 0.03) * dist;
+            const size = 6 + (i % 4) * 2;
+            return (
+              <div
+                key={i}
+                style={{
+                  position: "absolute",
+                  left: x,
+                  top: y,
+                  width: size,
+                  height: size,
+                  borderRadius: "50%",
+                  background: i % 2 === 0 ? "#00A884" : "#DCF8C6",
+                  transform: `rotate(${frame * 3 + i * 18}deg)`,
+                  boxShadow: `0 0 ${size}px ${i % 2 === 0 ? "rgba(0,168,132,0.6)" : "rgba(220,248,198,0.6)"}`,
+                }}
+              />
+            );
+          })}
+        </div>
+      )}
+      <div style={{ opacity: card.opacity, transform: card.transform, transformStyle: "preserve-3d" }}>
+        <ChatCard perspective>
           <ChatHeader icon={staticFile("icon.svg")} title="Exam Bot" subtitle="online" />
           <div
             style={{
@@ -611,22 +827,23 @@ const SceneResults: React.FC = () => {
           >
             <DatePill text="TODAY" />
             <div style={{ alignSelf: "stretch", display: "flex", justifyContent: "flex-end" }}>
-              <Bubble side="out" time="09:47" ticks>
+              <Bubble side="out" time="09:47" ticks delay={8}>
                 Results sent to your students
               </Bubble>
             </div>
             <div
               style={{
                 borderRadius: 999,
-                padding: "8px 16px",
-                background: CHAT.scoreBg,
+                padding: "10px 20px",
+                background: "linear-gradient(135deg, #DCF8C6, #B8E6A0)",
                 border: "1px solid rgba(7,94,84,0.2)",
                 color: CHAT.scoreText,
-                fontSize: 15,
+                fontSize: 16,
                 fontWeight: 700,
                 fontFamily: CHAT.font,
                 opacity: pill.opacity,
                 transform: pill.transform,
+                boxShadow: "0 8px 25px rgba(0,128,105,0.25)",
               }}
             >
               Exam complete — 9 / 10 · Pass
@@ -634,24 +851,29 @@ const SceneResults: React.FC = () => {
           </div>
         </ChatCard>
       </div>
+      <WaterdropTransition progress={dropProgress} />
     </AbsoluteFill>
   );
 };
 
 /* ═══════════════════════════════════════════════════════════════
-   SCENE 7: OUTRO — App icon lockup close
+   SCENE 7: OUTRO — 3D icon close with waterdrop finale
    ═══════════════════════════════════════════════════════════════ */
 const SceneOutro: React.FC = () => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
 
   const iconProgress = spring({ frame: frame - 2, fps, config: { damping: 10, mass: 0.7 } });
-  const iconScale = interpolate(iconProgress, [0, 1], [0.5, 1]);
+  const iconScale = interpolate(iconProgress, [0, 1], [0.3, 1]);
   const iconOpacity = interpolate(iconProgress, [0, 1], [0, 1]);
+  const iconRotateY = interpolate(iconProgress, [0, 1], [-30, 0]);
+  const iconZ = interpolate(iconProgress, [0, 1], [-150, 0]);
 
-  const word = useFadeSlide(8);
-  const url = useFadeSlide(15);
-  const tag = useFadeSlide(20);
+  const word = useFadeSlide3D(6);
+  const url = useFadeSlide3D(12);
+  const tag = useFadeSlide3D(18);
+
+  const dropProgress = interpolate(frame, [20, 30], [0, 1], { extrapolateLeft: "clamp", extrapolateRight: "clamp" });
 
   return (
     <AbsoluteFill
@@ -660,15 +882,18 @@ const SceneOutro: React.FC = () => {
         justifyContent: "center",
         alignItems: "center",
         overflow: "hidden",
+        perspective: 1200,
       }}
     >
       <Wallpaper />
-      <div style={{ position: "relative", textAlign: "center" }}>
+      <FloatingParticles count={16} color="rgba(0,128,105,0.12)" />
+      <div style={{ position: "relative", textAlign: "center", transformStyle: "preserve-3d" }}>
         <div
           style={{
             opacity: iconOpacity,
-            transform: `scale(${iconScale})`,
+            transform: `scale(${iconScale}) rotateY(${iconRotateY}deg) translateZ(${iconZ}px)`,
             marginBottom: 20,
+            filter: `drop-shadow(0 20px 40px rgba(0,128,105,0.3))`,
           }}
         >
           <img
@@ -689,6 +914,7 @@ const SceneOutro: React.FC = () => {
             letterSpacing: "-0.03em",
             color: CHAT.text,
             lineHeight: 1,
+            textShadow: "0 4px 20px rgba(0,0,0,0.1)",
           }}
         >
           Exam Bot
@@ -698,7 +924,7 @@ const SceneOutro: React.FC = () => {
             opacity: url.opacity,
             transform: url.transform,
             fontFamily: CHAT.font,
-            fontSize: 26,
+            fontSize: 28,
             fontWeight: 600,
             color: CHAT.chipTeal,
             marginTop: 14,
@@ -720,30 +946,21 @@ const SceneOutro: React.FC = () => {
           Start examining — for free.
         </div>
       </div>
+      <WaterdropTransition progress={dropProgress} />
     </AbsoluteFill>
   );
 };
 
 /* ═══════════════════════════════════════════════════════════════
-   MAIN COMPOSITION — Music-driven, 26s @ 30fps = 780 frames
+   MAIN COMPOSITION — 3D enhanced, 26s @ 30fps = 780 frames
    ═══════════════════════════════════════════════════════════════ */
 export const WhatExamAdvert: React.FC = () => {
-  /*
-   * Scene timing:
-   *   1. Intro        0 –  60   (2s)   Icon + "Exam Bot" lockup
-   *   2. Tagline     60 – 180   (4s)   Headline over chat greeting
-   *   3. Chat        180 – 360  (6s)   Question, options, answer
-   *   4. Answers     360 – 510  (5s)   Photo answer bubble
-   *   5. AI Marking  510 – 690  (6s)   Theory marking in chat
-   *   6. Results     690 – 750  (2s)   Score pill
-   *   7. Outro       750 – 780  (1s)   Icon close + "for free"
-   */
   return (
-    <AbsoluteFill style={{ background: CHAT.bg }}>
+    <AbsoluteFill style={{ background: CHAT.bg, perspective: 1200 }}>
       {/* ── Background music (full duration, low volume) ── */}
       <Audio src={staticFile("audio/bgm.wav")} volume={0.15} />
 
-      {/* ── Sound effects ── */}
+      {/* ── Sound effects at transitions ── */}
       {[60, 180, 360, 510, 690, 750].map((from) => (
         <Sequence key={from} from={from} durationInFrames={15}>
           <Audio src={staticFile("audio/whoosh.wav")} volume={0.4} />
@@ -756,7 +973,7 @@ export const WhatExamAdvert: React.FC = () => {
         <Audio src={staticFile("audio/chime.wav")} volume={0.4} />
       </Sequence>
 
-      {/* ── Scene sequences ── */}
+      {/* ── Scene sequences with waterdrop transitions ── */}
       <Sequence from={0} durationInFrames={60}>
         <SceneIntro />
       </Sequence>
