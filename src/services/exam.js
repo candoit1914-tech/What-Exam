@@ -95,7 +95,7 @@ function sessionHasNoAnswers(sessionId) {
 
 function createSession(examId, studentId) {
   const info = db
-    .prepare('INSERT INTO sessions (exam_id, student_id) VALUES (?, ?)')
+    .prepare('INSERT INTO sessions (exam_id, student_id, started_at) VALUES (?, ?, NULL)')
     .run(examId, studentId);
   const session = db.prepare('SELECT * FROM sessions WHERE id = ?').get(info.lastInsertRowid);
   drawSessionQuestions(session.id, examId);
@@ -216,6 +216,9 @@ function nextInSequence(session, question) {
 }
 
 function deadline(session) {
+  // If started_at is NULL, the session hasn't started yet — return a far-future
+  // deadline so the timer check never triggers before the student engages.
+  if (!session.started_at) return new Date(Date.now() + 365 * 24 * 60 * 60 * 1000);
   return new Date(new Date(session.started_at).getTime() + session.duration_minutes * 60000);
 }
 
@@ -488,7 +491,7 @@ function restartSession(session) {
   db.prepare('DELETE FROM answers WHERE session_id = ?').run(session.id);
   db.prepare('DELETE FROM session_questions WHERE session_id = ?').run(session.id);
   db.prepare(
-    `UPDATE sessions SET status='in_progress', current_q_order=1, started_at=datetime('now'),
+    `UPDATE sessions SET status='in_progress', current_q_order=1, started_at=NULL,
        last_active_at=datetime('now'), ended_at=NULL, final_score=0, final_percentage=0, passed=0
      WHERE id = ?`
   ).run(session.id);
@@ -641,6 +644,16 @@ async function maybeStartSession(student) {
     session = restartSession(existing);
   } else {
     session = createSession(exam.id, student.id);
+  }
+
+  // Start the timer NOW — when the student actually engages — not when the
+  // admin created or sent the exam. Question generation can take a long time,
+  // so the clock must not start until the student is ready.
+  if (!session.started_at) {
+    db.prepare(
+      `UPDATE sessions SET started_at = datetime('now'), last_active_at = datetime('now') WHERE id = ?`
+    ).run(session.id);
+    session = getActiveSession(student.id);
   }
 
   const questionCount =
@@ -987,6 +1000,7 @@ async function finalizeStaleSessions() {
     `SELECT s.id, s.student_id FROM sessions s
      JOIN exams e ON e.id = s.exam_id
      WHERE s.status = 'in_progress'
+       AND s.started_at IS NOT NULL
        AND datetime(s.started_at, '+' || e.duration_minutes || ' minutes') < datetime('now')`
   ).all();
   let n = 0;
