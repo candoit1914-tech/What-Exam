@@ -8,143 +8,222 @@ import {
   AbsoluteFill,
   Audio,
   staticFile,
+  Easing,
 } from "remotion";
 
-/* ── iOS WhatsApp chat kit ─────────────────────────────────── */
-const CHAT = {
-  bg: "#EFEAE2",
-  header: "rgba(237, 237, 237, 0.94)",
-  out: "#DCF8C6",
-  in: "#FFFFFF",
-  text: "#111B21",
-  stamp: "rgba(17, 27, 33, 0.5)",
-  online: "#00A884",
-  chipTeal: "#008069",
-  chipGray: "#667781",
-  ticks: "#34B7F1",
-  scoreBg: "#DCF8C6",
-  scoreText: "#005C4B",
-  radius: 16,
-  tail: 4,
-  font: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif",
+/* ═══════════════════════════════════════════════════════════════
+   DESIGN TOKENS — Cinematic dark palette with teal accents
+   ═══════════════════════════════════════════════════════════════ */
+const T = {
+  bg: "#060B18",
+  bgGrad2: "#0D1525",
+  teal: "#00D4AA",
+  tealDark: "#00A884",
+  tealGlow: "rgba(0,212,170,0.35)",
+  green: "#22C55E",
+  white: "#FFFFFF",
+  textPrimary: "#F1F5F9",
+  textSecondary: "#94A3B8",
+  textMuted: "#64748B",
+  chatBg: "#141E2E",
+  chatHeader: "rgba(20,30,46,0.97)",
+  chatOut: "#005C4B",
+  chatIn: "#1C2840",
+  chatText: "#E2E8F0",
+  chatStamp: "rgba(148,163,184,0.55)",
+  chatTick: "#00D4AA",
+  font: "'SF Pro Display', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
 };
 
-const WALLPAPER_URL =
-  "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120' viewBox='0 0 120 120'%3E%3Cg fill='none' stroke='%23667C7A' stroke-opacity='0.06'%3E%3Cpath d='M10 20c0 6 4 10 10 10M90 90c6 0 10-4 10-10' stroke-width='2'/%3E%3Ccircle cx='60' cy='30' r='4'/%3E%3Ccircle cx='30' cy='80' r='3'/%3E%3Ccircle cx='92' cy='18' r='3'/%3E%3Cpath d='M18 60c4 4 8 4 12 0M70 60c4 4 8 4 12 0M40 45c0 4 3 7 7 7M88 62c0 4-3 7-7 7' stroke-width='2'/%3E%3Cpath d='M26 40l4 4M52 92l4 4M84 44l4-4M14 100l4-4' stroke-width='2'/%3E%3Cpath d='M104 40c0 3-2 5-5 5s-5-2-5-5' stroke-width='2'/%3E%3C/g%3E%3C/svg%3E";
+/* ═══════════════════════════════════════════════════════════════
+   3D ENVIRONMENT — Parallax depth layers
+   ═══════════════════════════════════════════════════════════════ */
+function DepthEnvironment({ children }: { children: React.ReactNode }) {
+  const frame = useCurrentFrame();
+  const driftX = Math.sin(frame * 0.005) * 20;
+  const driftY = Math.cos(frame * 0.004) * 15;
 
-function Wallpaper() {
+  return (
+    <AbsoluteFill style={{ perspective: 2400, transformStyle: "preserve-3d" }}>
+      {/* Layer 0: Deep background gradient */}
+      <div
+        style={{
+          position: "absolute",
+          inset: -200,
+          background: `radial-gradient(ellipse 150% 100% at 50% 40%, #0F1A2E 0%, ${T.bg} 65%)`,
+          transform: `translateZ(-400px) scale(1.5)`,
+        }}
+      />
+
+      {/* Layer 1: Animated nebula orbs */}
+      <div
+        style={{
+          position: "absolute",
+          inset: -100,
+          transform: `translateZ(-200px) translate(${driftX}px, ${driftY}px) scale(1.25)`,
+        }}
+      >
+        <div
+          style={{
+            position: "absolute",
+            width: 900,
+            height: 900,
+            left: "20%",
+            top: "15%",
+            borderRadius: "50%",
+            background: "radial-gradient(circle, rgba(0,212,170,0.07) 0%, transparent 65%)",
+            filter: "blur(100px)",
+          }}
+        />
+        <div
+          style={{
+            position: "absolute",
+            width: 700,
+            height: 700,
+            right: "15%",
+            bottom: "20%",
+            borderRadius: "50%",
+            background: "radial-gradient(circle, rgba(34,197,94,0.05) 0%, transparent 65%)",
+            filter: "blur(100px)",
+          }}
+        />
+        <div
+          style={{
+            position: "absolute",
+            width: 500,
+            height: 500,
+            left: "55%",
+            top: "45%",
+            borderRadius: "50%",
+            background: "radial-gradient(circle, rgba(0,180,220,0.04) 0%, transparent 65%)",
+            filter: "blur(80px)",
+          }}
+        />
+      </div>
+
+      {/* Layer 2: Grid with perspective tilt */}
+      <div
+        style={{
+          position: "absolute",
+          inset: -50,
+          transform: `translateZ(-100px) rotateX(15deg) scale(1.12)`,
+          transformOrigin: "center bottom",
+        }}
+      >
+        <div
+          style={{
+            position: "absolute",
+            inset: 0,
+            backgroundImage:
+              "linear-gradient(rgba(0,212,170,0.03) 1px, transparent 1px), linear-gradient(90deg, rgba(0,212,170,0.03) 1px, transparent 1px)",
+            backgroundSize: "80px 80px",
+            maskImage: "linear-gradient(to top, rgba(0,0,0,0.4) 0%, transparent 60%)",
+            WebkitMaskImage: "linear-gradient(to top, rgba(0,0,0,0.4) 0%, transparent 60%)",
+          }}
+        />
+      </div>
+
+      {/* Layer 3: Content plane */}
+      <div
+        style={{
+          position: "absolute",
+          inset: 0,
+          transformStyle: "preserve-3d",
+        }}
+      >
+        {children}
+      </div>
+    </AbsoluteFill>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   VOLUMETRIC LIGHT RAYS
+   ═══════════════════════════════════════════════════════════════ */
+function LightRays({ intensity = 0.12 }: { intensity?: number }) {
+  const frame = useCurrentFrame();
+  const rotate = frame * 0.15;
+
   return (
     <div
       style={{
         position: "absolute",
-        inset: 0,
-        backgroundImage: `url("${WALLPAPER_URL}")`,
-        backgroundSize: "120px 120px",
+        left: "50%",
+        top: "-20%",
+        width: 2000,
+        height: 2000,
+        marginLeft: -1000,
+        opacity: intensity,
+        transform: `rotate(${rotate}deg)`,
+        pointerEvents: "none",
       }}
-    />
-  );
-}
-
-/* ── Waterdrop Transition Overlay ─────────────────────────── */
-function WaterdropTransition({ progress }: { progress: number }) {
-  // progress 0..1: 0 = fully transparent, 1 = fully opaque drop covering screen
-  const radius = interpolate(progress, [0, 1], [0, 1600], { extrapolateRight: "clamp" });
-  const opacity = interpolate(progress, [0, 0.1, 0.8, 1], [0, 0.95, 0.95, 0], { extrapolateRight: "clamp" });
-  // Ripple rings
-  const ring1 = interpolate(progress, [0, 1], [0, 1200], { extrapolateRight: "clamp" });
-  const ring2 = interpolate(progress, [0.1, 1], [0, 1000], { extrapolateRight: "clamp" });
-  const ring3 = interpolate(progress, [0.2, 1], [0, 800], { extrapolateRight: "clamp" });
-  const ringOpacity = interpolate(progress, [0, 0.3, 1], [0, 0.6, 0], { extrapolateRight: "clamp" });
-
-  return (
-    <div style={{ position: "absolute", inset: 0, pointerEvents: "none", zIndex: 100 }}>
-      {/* Main waterdrop circle */}
-      <div
-        style={{
-          position: "absolute",
-          left: "50%",
-          top: "50%",
-          width: radius * 2,
-          height: radius * 2,
-          marginLeft: -radius,
-          marginTop: -radius,
-          borderRadius: "50%",
-          background: "radial-gradient(circle, #008069 0%, #005C4B 60%, transparent 100%)",
-          opacity,
-        }}
-      />
-      {/* Ripple rings */}
-      {[ring1, ring2, ring3].map((r, i) => (
-        <div
-          key={i}
-          style={{
-            position: "absolute",
-            left: "50%",
-            top: "50%",
-            width: r * 2,
-            height: r * 2,
-            marginLeft: -r,
-            marginTop: -r,
-            borderRadius: "50%",
-            border: `${3 - i}px solid rgba(0,128,105,${ringOpacity})`,
-            opacity: ringOpacity,
-          }}
-        />
-      ))}
-      {/* Center droplet */}
-      {progress > 0 && progress < 0.6 && (
-        <div
-          style={{
-            position: "absolute",
-            left: "50%",
-            top: "50%",
-            width: 20 + progress * 40,
-            height: 20 + progress * 40,
-            marginLeft: -(10 + progress * 20),
-            marginTop: -(10 + progress * 20),
-            borderRadius: "50%",
-            background: "rgba(0,168,132,0.8)",
-            transform: `scale(${1 + Math.sin(progress * Math.PI) * 0.3})`,
-            boxShadow: "0 0 30px rgba(0,128,105,0.5)",
-          }}
-        />
-      )}
-    </div>
-  );
-}
-
-/* ── Floating Particles for 3D depth ───────────────────────── */
-function FloatingParticles({ count = 12, color = "rgba(0,128,105,0.15)" }: { count?: number; color?: string }) {
-  const frame = useCurrentFrame();
-  const particles = React.useMemo(() => {
-    return Array.from({ length: count }, (_, i) => ({
-      x: (i * 173 + 47) % 100,
-      y: (i * 131 + 89) % 100,
-      size: 4 + (i % 5) * 3,
-      speed: 0.3 + (i % 4) * 0.15,
-      phase: (i * 2.4) % (Math.PI * 2),
-    }));
-  }, [count]);
-
-  return (
-    <>
-      {particles.map((p, i) => {
-        const floatY = Math.sin(frame * p.speed * 0.05 + p.phase) * 20;
-        const floatX = Math.cos(frame * p.speed * 0.03 + p.phase) * 10;
-        const z = Math.sin(frame * 0.02 + p.phase) * 30;
+    >
+      {Array.from({ length: 8 }, (_, i) => {
+        const angle = (i / 8) * 360;
         return (
           <div
             key={i}
             style={{
               position: "absolute",
-              left: `${p.x}%`,
-              top: `${p.y}%`,
-              width: p.size,
-              height: p.size,
+              left: "50%",
+              top: "50%",
+              width: 3,
+              height: 900,
+              marginLeft: -1.5,
+              background: `linear-gradient(to bottom, rgba(0,212,170,0.4), transparent)`,
+              transformOrigin: "top center",
+              transform: `rotate(${angle}deg)`,
+              filter: "blur(8px)",
+            }}
+          />
+        );
+      })}
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   DEEP PARTICLES — Multi-layer bokeh with depth of field
+   ═══════════════════════════════════════════════════════════════ */
+function DeepParticles({ count = 16 }: { count?: number }) {
+  const frame = useCurrentFrame();
+  const dots = React.useMemo(
+    () =>
+      Array.from({ length: count }, (_, i) => ({
+        x: (i * 137.5 + 30) % 100,
+        y: (i * 97.3 + 20) % 100,
+        z: -300 + (i % 5) * 150,
+        size: 3 + (i % 6) * 2.5,
+        speed: 0.15 + (i % 4) * 0.08,
+        phase: (i * 2.1) % (Math.PI * 2),
+        hue: 155 + (i % 4) * 15,
+      })),
+    [count]
+  );
+
+  return (
+    <>
+      {dots.map((d, i) => {
+        const y = Math.sin(frame * d.speed * 0.03 + d.phase) * 30;
+        const x = Math.cos(frame * d.speed * 0.025 + d.phase) * 18;
+        const depthScale = 1 + (d.z + 300) / 600;
+        const blur = 2 + Math.abs(d.z + 150) / 200;
+        const opacity = 0.15 + (d.z + 300) / 800;
+
+        return (
+          <div
+            key={i}
+            style={{
+              position: "absolute",
+              left: `${d.x}%`,
+              top: `${d.y}%`,
+              width: d.size * depthScale,
+              height: d.size * depthScale,
               borderRadius: "50%",
-              background: color,
-              transform: `translate(${floatX}px, ${floatY}px) translateZ(${z}px)`,
-              filter: `blur(${1 + (i % 3)}px)`,
+              background: `hsla(${d.hue}, 75%, 60%, ${opacity})`,
+              transform: `translate(${x}px, ${y}px) translateZ(${d.z}px)`,
+              filter: `blur(${blur}px)`,
+              boxShadow: `0 0 ${d.size * 4}px hsla(${d.hue}, 75%, 60%, ${opacity * 0.6})`,
             }}
           />
         );
@@ -153,113 +232,375 @@ function FloatingParticles({ count = 12, color = "rgba(0,128,105,0.15)" }: { cou
   );
 }
 
-function Bubble({
+/* ═══════════════════════════════════════════════════════════════
+   PREMIUM HOLLYWOOD WATERDROP TRANSITION
+   Full cinematic: chromatic aberration, bokeh burst, lens flare,
+   volumetric glow, and reveal mask with light sweep.
+   ═══════════════════════════════════════════════════════════════ */
+function WaterdropHollywood({ progress }: { progress: number }) {
+  const p = Math.min(progress, 1);
+
+  // Main circle expansion with cinematic easing
+  const radius = interpolate(p, [0, 0.3, 0.7, 1], [0, 600, 1800, 3500], {
+    extrapolateRight: "clamp",
+    easing: Easing.bezier(0.25, 0.46, 0.45, 0.94),
+  });
+
+  const overlayOpacity = interpolate(p, [0, 0.12, 0.88, 1], [0, 1, 1, 0], {
+    extrapolateRight: "clamp",
+  });
+
+  // Chromatic ring with animated rotation
+  const chromaticSize = radius * 2 + 60;
+  const chromaticRotate = p * 180;
+
+  // Bokeh burst — particles fly outward from center
+  const bokehProgress = interpolate(p, [0.08, 0.5, 0.92], [0, 1, 0], {
+    extrapolateLeft: "clamp",
+    extrapolateRight: "clamp",
+  });
+
+  // Horizontal lens flare — anamorphic streak
+  const flareWidth = interpolate(p, [0.15, 0.45, 0.75], [0, 1200, 0], {
+    extrapolateLeft: "clamp",
+    extrapolateRight: "clamp",
+  });
+  const flareOpacity = interpolate(p, [0.15, 0.35, 0.55, 0.75], [0, 0.8, 0.8, 0], {
+    extrapolateLeft: "clamp",
+    extrapolateRight: "clamp",
+  });
+
+  // Vertical light sweep
+  const sweepY = interpolate(p, [0.1, 0.9], [-200, 4200], {
+    extrapolateLeft: "clamp",
+    extrapolateRight: "clamp",
+  });
+  const sweepOpacity = interpolate(p, [0.1, 0.3, 0.7, 0.9], [0, 0.5, 0.5, 0], {
+    extrapolateLeft: "clamp",
+    extrapolateRight: "clamp",
+  });
+
+  // Center energy burst
+  const burstScale = interpolate(p, [0.2, 0.5, 0.8], [0, 1.5, 0], {
+    extrapolateLeft: "clamp",
+    extrapolateRight: "clamp",
+  });
+
+  return (
+    <div style={{ position: "absolute", inset: 0, pointerEvents: "none", zIndex: 100 }}>
+      {/* Dark radial overlay */}
+      <div
+        style={{
+          position: "absolute",
+          inset: 0,
+          background: `radial-gradient(circle ${radius}px at 50% 50%, transparent 0%, rgba(4,8,20,0.97) 60%, rgba(4,8,20,1) 100%)`,
+          opacity: overlayOpacity,
+        }}
+      />
+
+      {/* Chromatic aberration ring */}
+      <div
+        style={{
+          position: "absolute",
+          left: "50%",
+          top: "50%",
+          width: chromaticSize,
+          height: chromaticSize,
+          marginLeft: -chromaticSize / 2,
+          marginTop: -chromaticSize / 2,
+          borderRadius: "50%",
+          background: `conic-gradient(from ${chromaticRotate}deg, rgba(255,40,40,0.25), rgba(40,255,40,0.25), rgba(40,40,255,0.25), rgba(255,40,40,0.25))`,
+          mask: "radial-gradient(circle, transparent 60%, black 62%, black 68%, transparent 70%)",
+          WebkitMask: "radial-gradient(circle, transparent 60%, black 62%, black 68%, transparent 70%)",
+          opacity: interpolate(p, [0.08, 0.35, 0.65, 0.92], [0, 0.7, 0.7, 0], {
+            extrapolateLeft: "clamp",
+            extrapolateRight: "clamp",
+          }),
+          filter: "blur(3px)",
+        }}
+      />
+
+      {/* Bokeh burst particles */}
+      {bokehProgress > 0 && (
+        <div style={{ position: "absolute", inset: 0, opacity: bokehProgress }}>
+          {Array.from({ length: 24 }, (_, i) => {
+            const angle = (i / 24) * Math.PI * 2;
+            const dist = 120 + (i % 5) * 100 + bokehProgress * 350;
+            const bx = 1080 + Math.cos(angle + p * 3) * dist;
+            const by = 1920 + Math.sin(angle + p * 3) * dist;
+            const size = 5 + (i % 6) * 4;
+            const hue = 155 + (i % 5) * 20;
+            return (
+              <div
+                key={i}
+                style={{
+                  position: "absolute",
+                  left: bx,
+                  top: by,
+                  width: size,
+                  height: size,
+                  borderRadius: "50%",
+                  background: `hsla(${hue}, 70%, 65%, 0.55)`,
+                  filter: `blur(${2 + (i % 4)}px)`,
+                  boxShadow: `0 0 ${size * 5}px hsla(${hue}, 70%, 65%, 0.35)`,
+                }}
+              />
+            );
+          })}
+        </div>
+      )}
+
+      {/* Anamorphic lens flare */}
+      <div
+        style={{
+          position: "absolute",
+          left: "50%",
+          top: "50%",
+          width: flareWidth,
+          height: 4,
+          marginLeft: -flareWidth / 2,
+          marginTop: -2,
+          background:
+            "linear-gradient(90deg, transparent 0%, rgba(0,212,170,0.6) 20%, rgba(255,255,255,0.95) 50%, rgba(0,212,170,0.6) 80%, transparent 100%)",
+          opacity: flareOpacity,
+          filter: "blur(1px)",
+        }}
+      />
+
+      {/* Vertical light sweep */}
+      <div
+        style={{
+          position: "absolute",
+          left: 0,
+          right: 0,
+          top: sweepY,
+          height: 120,
+          background:
+            "linear-gradient(to bottom, transparent, rgba(0,212,170,0.15), rgba(255,255,255,0.08), rgba(0,212,170,0.15), transparent)",
+          opacity: sweepOpacity,
+          filter: "blur(20px)",
+        }}
+      />
+
+      {/* Center energy burst */}
+      {burstScale > 0 && (
+        <div
+          style={{
+            position: "absolute",
+            left: "50%",
+            top: "50%",
+            width: 200,
+            height: 200,
+            marginLeft: -100,
+            marginTop: -100,
+            borderRadius: "50%",
+            background: "radial-gradient(circle, rgba(0,212,170,0.5) 0%, transparent 70%)",
+            transform: `scale(${burstScale})`,
+            opacity: 1 - burstScale * 0.6,
+            filter: "blur(15px)",
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   3D GLASS MORPHISM CARD
+   ═══════════════════════════════════════════════════════════════ */
+function GlassCard3D({
+  children,
+  rotateIntensity = 1,
+}: {
+  children: React.ReactNode;
+  rotateIntensity?: number;
+}) {
+  const frame = useCurrentFrame();
+  const floatY = Math.sin(frame * 0.02) * 6 * rotateIntensity;
+  const rotateX = Math.sin(frame * 0.015) * 1.2 * rotateIntensity;
+  const rotateY = Math.cos(frame * 0.018) * 1.5 * rotateIntensity;
+
+  return (
+    <div style={{ perspective: 1800, transformStyle: "preserve-3d" }}>
+      <div
+        style={{
+          position: "relative",
+          borderRadius: 32,
+          overflow: "hidden",
+          background: "rgba(255,255,255,0.04)",
+          backdropFilter: "blur(24px)",
+          WebkitBackdropFilter: "blur(24px)",
+          border: "1px solid rgba(255,255,255,0.07)",
+          boxShadow:
+            "0 40px 100px rgba(0,0,0,0.55), 0 0 0 1px rgba(255,255,255,0.05), inset 0 1px 0 rgba(255,255,255,0.1), inset 0 -1px 0 rgba(0,0,0,0.2)",
+          transform: `translateY(${floatY}px) rotateX(${rotateX}deg) rotateY(${rotateY}deg) translateZ(30px)`,
+          transformStyle: "preserve-3d",
+        }}
+      >
+        {/* Top specular highlight */}
+        <div
+          style={{
+            position: "absolute",
+            top: 0,
+            left: 0,
+            right: 0,
+            height: 2,
+            background:
+              "linear-gradient(90deg, transparent 10%, rgba(255,255,255,0.2) 50%, transparent 90%)",
+          }}
+        />
+        {/* Side edge light */}
+        <div
+          style={{
+            position: "absolute",
+            top: 0,
+            left: 0,
+            bottom: 0,
+            width: 1,
+            background:
+              "linear-gradient(to bottom, rgba(255,255,255,0.12) 20%, transparent 80%)",
+          }}
+        />
+        {children}
+      </div>
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   WHATSAPP CHAT — Premium dark mode
+   ═══════════════════════════════════════════════════════════════ */
+function ChatHeader() {
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 14,
+        padding: "18px 20px",
+        background: T.chatHeader,
+        borderBottom: "1px solid rgba(255,255,255,0.05)",
+      }}
+    >
+      <div
+        style={{
+          width: 52,
+          height: 52,
+          borderRadius: "50%",
+          background: `linear-gradient(135deg, ${T.teal}, ${T.tealDark})`,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          boxShadow: `0 0 28px ${T.tealGlow}`,
+        }}
+      >
+        <img src={staticFile("icon.svg")} width={34} height={34} style={{ borderRadius: "50%" }} alt="" />
+      </div>
+      <div style={{ flex: 1 }}>
+        <div style={{ fontSize: 20, fontWeight: 600, color: T.textPrimary, fontFamily: T.font }}>Exam Bot</div>
+        <div style={{ fontSize: 14, color: T.teal, fontFamily: T.font }}>online</div>
+      </div>
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke={T.textMuted} strokeWidth="1.5">
+        <circle cx="12" cy="12" r="1.5" />
+        <circle cx="19" cy="12" r="1.5" />
+        <circle cx="5" cy="12" r="1.5" />
+      </svg>
+    </div>
+  );
+}
+
+function ChatBubble({
   side,
   children,
   time,
-  ticks,
   delay = 0,
+  ticks,
 }: {
   side: "in" | "out";
   children: React.ReactNode;
   time: string;
-  ticks?: boolean;
   delay?: number;
+  ticks?: boolean;
 }) {
-  const out = side === "out";
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
-  const bubbleProgress = spring({ frame: frame - delay, fps, config: { damping: 14, mass: 0.7 } });
-  const bubbleOpacity = interpolate(bubbleProgress, [0, 1], [0, 1]);
-  const bubbleY = interpolate(bubbleProgress, [0, 1], [30, 0]);
-  const bubbleScale = interpolate(bubbleProgress, [0, 1], [0.85, 1]);
+  const out = side === "out";
+  const p = spring({ frame: frame - delay, fps, config: { damping: 14, mass: 0.55 } });
+  const opacity = interpolate(p, [0, 1], [0, 1]);
+  const y = interpolate(p, [0, 1], [35, 0]);
+  const scale = interpolate(p, [0, 1], [0.88, 1]);
 
   return (
     <div
       style={{
         display: "flex",
         justifyContent: out ? "flex-end" : "flex-start",
-        opacity: bubbleOpacity,
-        transform: `translateY(${bubbleY}px) scale(${bubbleScale})`,
+        opacity,
+        transform: `translateY(${y}px) scale(${scale})`,
       }}
     >
       <div
         style={{
           position: "relative",
-          maxWidth: "78%",
-          padding: "7px 10px 8px",
-          borderRadius: CHAT.radius,
-          borderTopLeftRadius: out ? CHAT.radius : CHAT.tail,
-          borderTopRightRadius: out ? CHAT.tail : CHAT.radius,
-          background: out ? CHAT.out : CHAT.in,
-          fontSize: 15,
-          lineHeight: 1.45,
-          color: CHAT.text,
-          fontFamily: CHAT.font,
-          boxShadow: "0 1px 0.5px rgba(17,27,33,0.13)",
+          maxWidth: "84%",
+          padding: "12px 16px 8px",
+          borderRadius: 22,
+          borderBottomRightRadius: out ? 8 : 22,
+          borderBottomLeftRadius: out ? 22 : 8,
+          background: out ? T.chatOut : T.chatIn,
+          color: T.chatText,
+          fontSize: 17,
+          lineHeight: 1.55,
+          fontFamily: T.font,
+          boxShadow: "0 3px 16px rgba(0,0,0,0.3)",
+          border: `1px solid ${out ? "rgba(0,92,75,0.25)" : "rgba(255,255,255,0.05)"}`,
         }}
       >
         {children}
-        <span
-          style={{
-            position: "absolute",
-            bottom: 0,
-            [out ? "right" : "left"]: -6,
-            width: 13,
-            height: 13,
-            background: out ? CHAT.out : CHAT.in,
-            borderRadius: out ? "100% 0 0 0" : "0 100% 0 0",
-          }}
-        />
-        <span
-          style={{
-            display: "inline-flex",
-            alignItems: "center",
-            gap: 3,
-            margin: "8px -4px -4px 10px",
-            fontSize: 11,
-            color: CHAT.stamp,
-          }}
-        >
-          {time}
-          {ticks && <span style={{ color: CHAT.ticks, fontSize: 13 }}>✔✔</span>}
-        </span>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 5, marginTop: 5 }}>
+          <span style={{ fontSize: 12, color: T.chatStamp }}>{time}</span>
+          {ticks && (
+            <svg width="18" height="12" viewBox="0 0 18 12">
+              <path d="M1 6l3.5 3.5L11 3" stroke={T.chatTick} strokeWidth="1.8" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+              <path d="M6 6l3.5 3.5L16 3" stroke={T.chatTick} strokeWidth="1.8" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          )}
+        </div>
       </div>
     </div>
   );
 }
 
-function Chip({ children, out }: { children: React.ReactNode; out?: boolean }) {
+function ChipLabel({ children, color = T.teal }: { children: React.ReactNode; color?: string }) {
   return (
-    <span
+    <div
       style={{
-        display: "block",
-        fontSize: 10.5,
+        fontSize: 11,
         fontWeight: 700,
-        letterSpacing: "0.07em",
+        letterSpacing: "0.12em",
         textTransform: "uppercase",
-        color: out ? CHAT.chipTeal : CHAT.chipGray,
-        marginBottom: 3,
+        color,
+        marginBottom: 5,
       }}
     >
       {children}
-    </span>
+    </div>
   );
 }
 
 function DatePill({ text }: { text: string }) {
   return (
-    <div style={{ display: "flex", justifyContent: "center", margin: "2px 0 6px" }}>
+    <div style={{ display: "flex", justifyContent: "center", margin: "6px 0 10px" }}>
       <div
         style={{
-          padding: "5px 12px",
-          borderRadius: 7.5,
-          background: "rgba(255,255,255,0.95)",
-          boxShadow: "0 1px 1px rgba(0,0,0,0.05)",
-          fontSize: 11.5,
+          padding: "6px 18px",
+          borderRadius: 12,
+          background: "rgba(255,255,255,0.05)",
+          border: "1px solid rgba(255,255,255,0.04)",
+          fontSize: 13,
           fontWeight: 500,
-          color: "rgba(17,27,33,0.6)",
-          fontFamily: CHAT.font,
+          color: T.textMuted,
+          fontFamily: T.font,
         }}
       >
         {text}
@@ -268,754 +609,857 @@ function DatePill({ text }: { text: string }) {
   );
 }
 
-function ChatHeader({ icon, title, subtitle }: { icon: string; title: string; subtitle: string }) {
-  return (
-    <div
-      style={{
-        display: "flex",
-        alignItems: "center",
-        gap: 8,
-        padding: "12px 10px 8px",
-        background: CHAT.header,
-        boxShadow: "inset 0 -0.5px 0 rgba(0,0,0,0.08)",
-      }}
-    >
-      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke={CHAT.chipTeal} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-        <path d="M15 5l-7 7 7 7" />
-      </svg>
-      <img src={icon} style={{ width: 38, height: 38, borderRadius: "50%", objectFit: "cover" }} alt="" />
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ fontSize: 16.5, fontWeight: 600, color: CHAT.text, fontFamily: CHAT.font, lineHeight: 1.2 }}>{title}</div>
-        <div style={{ fontSize: 12, color: CHAT.online, fontFamily: CHAT.font }}>{subtitle}</div>
-      </div>
-      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke={CHAT.chipTeal} strokeWidth="2" strokeLinecap="round">
-        <rect x="2" y="6" width="13" height="12" rx="3" />
-        <path d="M15 10l5-3v10l-5-3" />
-      </svg>
-      <svg width="20" height="20" viewBox="0 0 24 24" fill={CHAT.chipTeal}>
-        <path d="M6.6 10.8a15.5 15.5 0 006.6 6.6l2.2-2.2a1 1 0 011-.24c1.1.28 2.3.44 3.5.44.55 0 1 .45 1 1V20c0 .55-.45 1-1 1C10.6 21 3 13.4 3 4.1 3 3.55 3.45 3 4 3h3.5c.55 0 1 .45 1 1 0 1.2.16 2.4.44 3.5a1 1 0 01-.24 1l-2.1 2.3z" />
-      </svg>
-    </div>
-  );
-}
-
-function ChatCard({ children, perspective = false }: { children: React.ReactNode; perspective?: boolean }) {
+/* ═══════════════════════════════════════════════════════════════
+   PREMIUM ANIMATION HOOKS
+   ═══════════════════════════════════════════════════════════════ */
+function useReveal(delay: number) {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
-  // Subtle 3D floating animation
-  const floatY = Math.sin(frame * 0.03) * 3;
-  const rotateX = Math.sin(frame * 0.02) * 0.5;
-  const rotateY = Math.cos(frame * 0.025) * 0.8;
-
-  return (
-    <div
-      style={{
-        perspective: perspective ? 1200 : undefined,
-        transformStyle: "preserve-3d",
-      }}
-    >
-      <div
-        style={{
-          position: "relative",
-          width: 430,
-          borderRadius: 28,
-          overflow: "hidden",
-          background: CHAT.bg,
-          boxShadow: "0 30px 70px rgba(0,0,0,0.35), 0 0 0 1px rgba(0,0,0,0.05)",
-          display: "flex",
-          flexDirection: "column",
-          minHeight: 560,
-          transform: perspective ? `translateY(${floatY}px) rotateX(${rotateX}deg) rotateY(${rotateY}deg) translateZ(20px)` : undefined,
-          transformStyle: "preserve-3d",
-        }}
-      >
-        <Wallpaper />
-        {children}
-      </div>
-    </div>
-  );
-}
-
-/* ── Helper: fade + slide in with 3D depth ────────────────── */
-function useFadeSlide3D(delay: number) {
-  const frame = useCurrentFrame();
-  const { fps } = useVideoConfig();
-  const progress = spring({ frame: frame - delay, fps, config: { damping: 14, mass: 0.8 } });
-  const opacity = interpolate(progress, [0, 1], [0, 1]);
-  const y = interpolate(progress, [0, 1], [60, 0]);
-  const z = interpolate(progress, [0, 1], [-80, 0]);
-  const rotateX = interpolate(progress, [0, 1], [8, 0]);
+  const p = spring({ frame: frame - delay, fps, config: { damping: 13, mass: 0.65 } });
   return {
-    opacity,
-    transform: `translateY(${y}px) translateZ(${z}px) rotateX(${rotateX}deg)`,
+    opacity: interpolate(p, [0, 1], [0, 1]),
+    transform: `translateY(${interpolate(p, [0, 1], [50, 0])}px) translateZ(${interpolate(p, [0, 1], [-80, 0])}px)`,
   };
 }
 
-/* ── Helper: scale spring with 3D ──────────────────────────── */
-function useScale3D(delay: number) {
+function useScaleReveal(delay: number) {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
-  const progress = spring({ frame: frame - delay, fps, config: { damping: 12, mass: 0.6 } });
-  const scale = interpolate(progress, [0, 1], [0.6, 1]);
-  const z = interpolate(progress, [0, 1], [-100, 0]);
-  const rotateY = interpolate(progress, [0, 1], [15, 0]);
+  const p = spring({ frame: frame - delay, fps, config: { damping: 11, mass: 0.5 } });
   return {
-    transform: `scale(${scale}) translateZ(${z}px) rotateY(${rotateY}deg)`,
-    opacity: interpolate(progress, [0, 1], [0, 1]),
+    opacity: interpolate(p, [0, 1], [0, 1]),
+    transform: `scale(${interpolate(p, [0, 1], [0.6, 1])}) translateZ(${interpolate(p, [0, 1], [-120, 0])}px)`,
+  };
+}
+
+function useSlideIn(delay: number, from: "left" | "right" | "bottom" = "bottom") {
+  const frame = useCurrentFrame();
+  const { fps } = useVideoConfig();
+  const p = spring({ frame: frame - delay, fps, config: { damping: 14, mass: 0.6 } });
+  const x = from === "left" ? -400 : from === "right" ? 400 : 0;
+  const y = from === "bottom" ? 80 : 0;
+  return {
+    opacity: interpolate(p, [0, 1], [0, 1]),
+    transform: `translate(${interpolate(p, [0, 1], [x, 0])}px, ${interpolate(p, [0, 1], [y, 0])}px) translateZ(${interpolate(p, [0, 1], [-60, 0])}px)`,
   };
 }
 
 /* ═══════════════════════════════════════════════════════════════
-   SCENE 1: INTRO — 3D icon lockup with waterdrop exit
+   SCENE 1: INTRO — Cinematic brand reveal
+   Duration: 150 frames (5s)
    ═══════════════════════════════════════════════════════════════ */
 const SceneIntro: React.FC = () => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
 
-  const iconProgress = spring({ frame: frame - 8, fps, config: { damping: 10, mass: 0.8 } });
-  const iconScale = interpolate(iconProgress, [0, 1], [0.2, 1]);
-  const iconOpacity = interpolate(iconProgress, [0, 1], [0, 1]);
-  const iconZ = interpolate(iconProgress, [0, 1], [-200, 0]);
-  const iconRotateY = interpolate(iconProgress, [0, 1], [45, 0]);
+  const iconP = spring({ frame: frame - 15, fps, config: { damping: 9, mass: 0.5 } });
+  const iconScale = interpolate(iconP, [0, 1], [0.15, 1]);
+  const iconOpacity = interpolate(iconP, [0, 1], [0, 1]);
+  const iconRotateY = interpolate(iconP, [0, 1], [40, 0]);
+  const iconZ = interpolate(iconP, [0, 1], [-300, 0]);
 
-  const word = useFadeSlide3D(25);
-  const sub = useFadeSlide3D(38);
+  const title = useReveal(30);
+  const subtitle = useReveal(45);
+  const tagline = useReveal(60);
 
-  // Waterdrop transition at end of scene
-  const dropProgress = interpolate(frame, [45, 60], [0, 1], { extrapolateLeft: "clamp", extrapolateRight: "clamp" });
+  const glow = 0.2 + Math.sin(frame * 0.06) * 0.15;
 
-  return (
-    <AbsoluteFill
-      style={{
-        background: CHAT.bg,
-        justifyContent: "center",
-        alignItems: "center",
-        overflow: "hidden",
-        perspective: 1200,
-      }}
-    >
-      <Wallpaper />
-      <FloatingParticles count={8} color="rgba(0,128,105,0.12)" />
-      <div style={{ position: "relative", textAlign: "center", transformStyle: "preserve-3d" }}>
-        <div
-          style={{
-            opacity: iconOpacity,
-            transform: `scale(${iconScale}) translateZ(${iconZ}px) rotateY(${iconRotateY}deg)`,
-            marginBottom: 24,
-            filter: `drop-shadow(0 20px 40px rgba(0,128,105,0.3))`,
-          }}
-        >
-          <img
-            src={staticFile("icon.svg")}
-            width={140}
-            height={140}
-            style={{ borderRadius: 36, objectFit: "cover" }}
-            alt=""
-          />
-        </div>
-        <div
-          style={{
-            opacity: word.opacity,
-            transform: word.transform,
-            fontFamily: CHAT.font,
-            fontSize: 72,
-            fontWeight: 700,
-            letterSpacing: "-0.03em",
-            color: CHAT.text,
-            lineHeight: 1,
-            textShadow: "0 4px 20px rgba(0,0,0,0.1)",
-          }}
-        >
-          Exam Bot
-        </div>
-        <div
-          style={{
-            opacity: sub.opacity,
-            transform: sub.transform,
-            fontFamily: CHAT.font,
-            fontSize: 26,
-            fontWeight: 500,
-            letterSpacing: "0.3em",
-            color: CHAT.chipGray,
-            textTransform: "uppercase",
-            marginTop: 18,
-          }}
-        >
-          Start Examining — For Free
-        </div>
-      </div>
-      <WaterdropTransition progress={dropProgress} />
-    </AbsoluteFill>
-  );
-};
-
-/* ═══════════════════════════════════════════════════════════════
-   SCENE 2: HERO TAGLINE — 3D floating chat card
-   ═══════════════════════════════════════════════════════════════ */
-const SceneTagline: React.FC = () => {
-  const frame = useCurrentFrame();
-  const headline = useFadeSlide3D(5);
-  const card = useScale3D(8);
-  const sub = useFadeSlide3D(22);
-
-  const dropProgress = interpolate(frame, [105, 120], [0, 1], { extrapolateLeft: "clamp", extrapolateRight: "clamp" });
+  const drop = interpolate(frame, [120, 150], [0, 1], {
+    extrapolateLeft: "clamp",
+    extrapolateRight: "clamp",
+  });
 
   return (
-    <AbsoluteFill
-      style={{
-        background: CHAT.bg,
-        justifyContent: "center",
-        alignItems: "center",
-        overflow: "hidden",
-        perspective: 1200,
-      }}
-    >
-      <Wallpaper />
-      <FloatingParticles count={10} />
-      <div style={{ position: "relative", display: "flex", flexDirection: "column", alignItems: "center", gap: 22, transformStyle: "preserve-3d" }}>
+    <AbsoluteFill style={{ overflow: "hidden" }}>
+      <DepthEnvironment>
+        <LightRays intensity={0.08 + Math.sin(frame * 0.04) * 0.04} />
+        <DeepParticles count={20} />
+
         <div
           style={{
-            opacity: headline.opacity,
-            transform: headline.transform,
-            fontFamily: CHAT.font,
-            fontSize: 52,
-            fontWeight: 700,
-            letterSpacing: "-0.02em",
-            color: "#005C4B",
-            textAlign: "center",
-            textShadow: "0 2px 15px rgba(0,92,75,0.2)",
+            position: "absolute",
+            inset: 0,
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            justifyContent: "center",
+            transformStyle: "preserve-3d",
           }}
         >
-          Exams that mark themselves.
-        </div>
-
-        <div style={{ opacity: card.opacity, transform: card.transform, transformStyle: "preserve-3d" }}>
-          <ChatCard perspective>
-            <ChatHeader icon={staticFile("icon.svg")} title="Exam Bot" subtitle="online" />
+          {/* Icon with volumetric glow */}
+          <div
+            style={{
+              opacity: iconOpacity,
+              transform: `scale(${iconScale}) rotateY(${iconRotateY}deg) translateZ(${iconZ}px)`,
+              marginBottom: 40,
+              transformStyle: "preserve-3d",
+            }}
+          >
             <div
               style={{
                 position: "relative",
-                display: "flex",
-                flexDirection: "column",
-                gap: 8,
-                padding: "12px 12px 16px",
+                filter: `drop-shadow(0 0 ${60 + glow * 80}px rgba(0,212,170,${glow}))`,
               }}
             >
-              <DatePill text="TODAY" />
-              <Bubble side="in" time="09:00" delay={15}>
-                Good morning! Your exam starts in 10 minutes.
-              </Bubble>
-              <Bubble side="out" time="09:01" delay={40}>
-                Ready when you are.
-              </Bubble>
+              {/* Glow ring behind icon */}
+              <div
+                style={{
+                  position: "absolute",
+                  left: "50%",
+                  top: "50%",
+                  width: 260,
+                  height: 260,
+                  marginLeft: -130,
+                  marginTop: -130,
+                  borderRadius: "50%",
+                  border: `2px solid rgba(0,212,170,${0.1 + glow * 0.1})`,
+                  boxShadow: `0 0 40px rgba(0,212,170,${glow * 0.3}), inset 0 0 40px rgba(0,212,170,${glow * 0.1})`,
+                }}
+              />
+              <img
+                src={staticFile("icon.svg")}
+                width={160}
+                height={160}
+                style={{
+                  borderRadius: 44,
+                  objectFit: "cover",
+                  border: `2px solid rgba(0,212,170,0.2)`,
+                  position: "relative",
+                }}
+                alt=""
+              />
             </div>
-          </ChatCard>
+          </div>
+
+          {/* Title */}
+          <div
+            style={{
+              ...title,
+              fontSize: 86,
+              fontWeight: 700,
+              letterSpacing: "-0.04em",
+              color: T.textPrimary,
+              textAlign: "center",
+              fontFamily: T.font,
+              lineHeight: 1.05,
+              textShadow: "0 4px 30px rgba(0,0,0,0.4)",
+            }}
+          >
+            Exam Bot
+          </div>
+
+          {/* Subtitle */}
+          <div
+            style={{
+              ...subtitle,
+              fontSize: 24,
+              fontWeight: 500,
+              letterSpacing: "0.3em",
+              textTransform: "uppercase",
+              color: T.teal,
+              marginTop: 20,
+              fontFamily: T.font,
+            }}
+          >
+            Start Examining — For Free
+          </div>
+
+          {/* Decorative line */}
+          <div
+            style={{
+              ...tagline,
+              width: 120,
+              height: 2,
+              background: `linear-gradient(90deg, transparent, ${T.teal}, transparent)`,
+              marginTop: 30,
+              borderRadius: 1,
+            }}
+          />
         </div>
+      </DepthEnvironment>
+
+      <WaterdropHollywood progress={drop} />
+    </AbsoluteFill>
+  );
+};
+
+/* ═══════════════════════════════════════════════════════════════
+   SCENE 2: TAGLINE — Hero headline + 3D floating card
+   Duration: 165 frames (5.5s)
+   ═══════════════════════════════════════════════════════════════ */
+const SceneTagline: React.FC = () => {
+  const frame = useCurrentFrame();
+
+  const headline = useReveal(8);
+  const card = useScaleReveal(18);
+  const sub = useReveal(35);
+
+  const drop = interpolate(frame, [135, 165], [0, 1], {
+    extrapolateLeft: "clamp",
+    extrapolateRight: "clamp",
+  });
+
+  return (
+    <AbsoluteFill style={{ overflow: "hidden" }}>
+      <DepthEnvironment>
+        <LightRays intensity={0.06} />
+        <DeepParticles count={14} />
 
         <div
           style={{
-            opacity: sub.opacity,
-            transform: sub.transform,
-            fontFamily: CHAT.font,
-            fontSize: 24,
-            fontWeight: 500,
-            color: CHAT.chipGray,
-            textAlign: "center",
+            position: "absolute",
+            inset: 0,
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: 36,
+            padding: "0 60px",
+            transformStyle: "preserve-3d",
           }}
         >
-          Your bot delivers them — AI does the rest.
+          {/* Headline */}
+          <div
+            style={{
+              ...headline,
+              fontSize: 62,
+              fontWeight: 700,
+              letterSpacing: "-0.03em",
+              color: T.textPrimary,
+              textAlign: "center",
+              fontFamily: T.font,
+              lineHeight: 1.15,
+              textShadow: "0 3px 25px rgba(0,0,0,0.35)",
+            }}
+          >
+            Exams that
+            <br />
+            <span style={{ color: T.teal }}>mark themselves.</span>
+          </div>
+
+          {/* Chat card */}
+          <div style={{ ...card, width: "100%", maxWidth: 560 }}>
+            <GlassCard3D>
+              <ChatHeader />
+              <div style={{ padding: "16px 18px 22px", display: "flex", flexDirection: "column", gap: 10 }}>
+                <DatePill text="TODAY" />
+                <ChatBubble side="in" time="09:00" delay={25}>
+                  Good morning! Your exam starts in 10 minutes.
+                </ChatBubble>
+                <ChatBubble side="out" time="09:01" delay={55}>
+                  Ready when you are.
+                </ChatBubble>
+              </div>
+            </GlassCard3D>
+          </div>
+
+          {/* Subtext */}
+          <div
+            style={{
+              ...sub,
+              fontSize: 20,
+              fontWeight: 500,
+              color: T.textSecondary,
+              textAlign: "center",
+              fontFamily: T.font,
+            }}
+          >
+            Your bot delivers them — AI does the rest.
+          </div>
         </div>
-      </div>
-      <WaterdropTransition progress={dropProgress} />
+      </DepthEnvironment>
+
+      <WaterdropHollywood progress={drop} />
     </AbsoluteFill>
   );
 };
 
 /* ═══════════════════════════════════════════════════════════════
-   SCENE 3: CHAT — 3D perspective question flow
+   SCENE 3: QUESTION FLOW — Chat with options
+   Duration: 180 frames (6s)
    ═══════════════════════════════════════════════════════════════ */
-const SceneDashboard: React.FC = () => {
+const SceneChat: React.FC = () => {
   const frame = useCurrentFrame();
-  const card = useFadeSlide3D(5);
-  const dropProgress = interpolate(frame, [165, 180], [0, 1], { extrapolateLeft: "clamp", extrapolateRight: "clamp" });
+  const card = useScaleReveal(5);
+
+  const drop = interpolate(frame, [150, 180], [0, 1], {
+    extrapolateLeft: "clamp",
+    extrapolateRight: "clamp",
+  });
 
   return (
-    <AbsoluteFill
-      style={{
-        background: CHAT.bg,
-        justifyContent: "center",
-        alignItems: "center",
-        overflow: "hidden",
-        perspective: 1200,
-      }}
-    >
-      <Wallpaper />
-      <FloatingParticles count={6} color="rgba(0,128,105,0.1)" />
-      <div style={{ opacity: card.opacity, transform: card.transform, transformStyle: "preserve-3d" }}>
-        <ChatCard perspective>
-          <ChatHeader icon={staticFile("icon.svg")} title="Exam Bot" subtitle="online" />
-          <div
-            style={{
-              position: "relative",
-              display: "flex",
-              flexDirection: "column",
-              gap: 8,
-              padding: "12px 12px 16px",
-            }}
-          >
-            <DatePill text="TODAY" />
-            <Bubble side="out" time="09:42" delay={10}>
-              <Chip out>QUESTION 1 · OBJECTIVE</Chip>
-              What is the capital of Ghana?
-            </Bubble>
-            <Bubble side="out" time="09:42" delay={35}>
-              <Chip out>ANSWER OPTIONS</Chip>
-              <div
-                style={{
-                  borderLeft: "2px solid rgba(0,128,105,0.4)",
-                  background: "rgba(11,20,26,0.04)",
-                  borderRadius: 8,
-                  padding: "7px 10px",
-                  fontSize: 13,
-                  lineHeight: 1.5,
-                  whiteSpace: "pre-line",
-                }}
-              >
-                {"A. Accra\nB. Kumasi\nC. Cape Coast\nD. Tamale"}
+    <AbsoluteFill style={{ overflow: "hidden" }}>
+      <DepthEnvironment>
+        <LightRays intensity={0.05} />
+        <DeepParticles count={12} />
+
+        <div
+          style={{
+            position: "absolute",
+            inset: 0,
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: "0 50px",
+            transformStyle: "preserve-3d",
+          }}
+        >
+          <div style={{ ...card, width: "100%", maxWidth: 580 }}>
+            <GlassCard3D>
+              <ChatHeader />
+              <div style={{ padding: "16px 18px 22px", display: "flex", flexDirection: "column", gap: 10 }}>
+                <DatePill text="TODAY" />
+                <ChatBubble side="out" time="09:42" delay={10}>
+                  <ChipLabel>QUESTION 1 · OBJECTIVE</ChipLabel>
+                  What is the capital of Ghana?
+                </ChatBubble>
+                <ChatBubble side="out" time="09:42" delay={40}>
+                  <ChipLabel>ANSWER OPTIONS</ChipLabel>
+                  <div
+                    style={{
+                      borderLeft: `3px solid ${T.tealDark}`,
+                      background: "rgba(0,0,0,0.25)",
+                      borderRadius: 10,
+                      padding: "10px 14px",
+                      fontSize: 16,
+                      lineHeight: 1.7,
+                      whiteSpace: "pre-line",
+                    }}
+                  >
+                    {"A. Accra\nB. Kumasi\nC. Cape Coast\nD. Tamale"}
+                  </div>
+                </ChatBubble>
+                <ChatBubble side="in" time="09:43" delay={70}>
+                  A
+                </ChatBubble>
+                <ChatBubble side="out" time="09:43" ticks delay={95}>
+                  <ChipLabel color={T.green}>AI MARKING</ChipLabel>
+                  ✓ Correct — +1 mark
+                </ChatBubble>
               </div>
-            </Bubble>
-            <Bubble side="in" time="09:43" delay={60}>
-              A
-            </Bubble>
-            <Bubble side="out" time="09:43" ticks delay={75}>
-              <Chip out>AI MARKING</Chip>
-              ✓ Correct — +1 mark
-            </Bubble>
+            </GlassCard3D>
           </div>
-        </ChatCard>
-      </div>
-      <WaterdropTransition progress={dropProgress} />
+        </div>
+      </DepthEnvironment>
+
+      <WaterdropHollywood progress={drop} />
     </AbsoluteFill>
   );
 };
 
 /* ═══════════════════════════════════════════════════════════════
-   SCENE 4: ANSWERS — 3D photo answer with chart
+   SCENE 4: PHOTO ANSWER — Image submission
+   Duration: 165 frames (5.5s)
    ═══════════════════════════════════════════════════════════════ */
-const SceneWhatsApp: React.FC = () => {
+const ScenePhotoAnswer: React.FC = () => {
   const frame = useCurrentFrame();
-  const card = useFadeSlide3D(5);
-  const dropProgress = interpolate(frame, [135, 150], [0, 1], { extrapolateLeft: "clamp", extrapolateRight: "clamp" });
+  const card = useScaleReveal(5);
+
+  const drop = interpolate(frame, [135, 165], [0, 1], {
+    extrapolateLeft: "clamp",
+    extrapolateRight: "clamp",
+  });
 
   return (
-    <AbsoluteFill
-      style={{
-        background: CHAT.bg,
-        justifyContent: "center",
-        alignItems: "center",
-        overflow: "hidden",
-        perspective: 1200,
-      }}
-    >
-      <Wallpaper />
-      <FloatingParticles count={8} color="rgba(0,128,105,0.08)" />
-      <div style={{ opacity: card.opacity, transform: card.transform, transformStyle: "preserve-3d" }}>
-        <ChatCard perspective>
-          <ChatHeader icon={staticFile("icon.svg")} title="Exam Bot" subtitle="online" />
-          <div
-            style={{
-              position: "relative",
-              display: "flex",
-              flexDirection: "column",
-              gap: 8,
-              padding: "12px 12px 16px",
-            }}
-          >
-            <DatePill text="TODAY" />
-            <Bubble side="out" time="09:44" delay={10}>
-              <Chip out>ANSWER · PHOTO</Chip>
-              <div
-                style={{
-                  position: "relative",
-                  width: 240,
-                  height: 160,
-                  borderRadius: 10,
-                  background: "linear-gradient(135deg,#DFF0DC,#E8F5E9)",
-                  display: "flex",
-                  alignItems: "flex-end",
-                  justifyContent: "center",
-                  padding: "10px 12px",
-                  marginBottom: 2,
-                  transform: "perspective(400px) rotateX(2deg)",
-                }}
-              >
-                <svg width="190" height="120" viewBox="0 0 190 120" fill="none">
-                  <rect x="10" y="52" width="34" height="58" rx="6" fill="rgba(0,128,105,0.55)" />
-                  <rect x="54" y="28" width="34" height="82" rx="6" fill="rgba(0,128,105,0.55)" />
-                  <rect x="98" y="42" width="34" height="68" rx="6" fill="rgba(0,128,105,0.55)" />
-                  <rect x="142" y="12" width="34" height="98" rx="6" fill="rgba(0,128,105,0.55)" />
-                </svg>
-                <img
-                  src={staticFile("icon.svg")}
-                  width={28}
-                  height={28}
-                  style={{
-                    position: "absolute",
-                    right: 8,
-                    bottom: 8,
-                    borderRadius: "50%",
-                    objectFit: "cover",
-                    boxShadow: "0 0 0 1.5px #FFFFFF",
-                  }}
-                  alt=""
-                />
+    <AbsoluteFill style={{ overflow: "hidden" }}>
+      <DepthEnvironment>
+        <LightRays intensity={0.04} />
+        <DeepParticles count={10} />
+
+        <div
+          style={{
+            position: "absolute",
+            inset: 0,
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: "0 50px",
+            transformStyle: "preserve-3d",
+          }}
+        >
+          <div style={{ ...card, width: "100%", maxWidth: 580 }}>
+            <GlassCard3D>
+              <ChatHeader />
+              <div style={{ padding: "16px 18px 22px", display: "flex", flexDirection: "column", gap: 10 }}>
+                <DatePill text="TODAY" />
+                <ChatBubble side="out" time="09:44" delay={10}>
+                  <ChipLabel>ANSWER · PHOTO</ChipLabel>
+                  <div
+                    style={{
+                      position: "relative",
+                      width: 340,
+                      height: 220,
+                      borderRadius: 14,
+                      background: "linear-gradient(135deg, rgba(0,212,170,0.15), rgba(0,168,132,0.08))",
+                      border: "1px solid rgba(0,212,170,0.2)",
+                      display: "flex",
+                      alignItems: "flex-end",
+                      justifyContent: "center",
+                      padding: "14px 16px",
+                      marginBottom: 4,
+                      overflow: "hidden",
+                    }}
+                  >
+                    {/* Simulated chart image */}
+                    <svg width="280" height="160" viewBox="0 0 280 160" fill="none">
+                      <rect x="15" y="70" width="50" height="80" rx="8" fill="rgba(0,212,170,0.4)" />
+                      <rect x="80" y="40" width="50" height="110" rx="8" fill="rgba(0,212,170,0.5)" />
+                      <rect x="145" y="55" width="50" height="95" rx="8" fill="rgba(0,212,170,0.45)" />
+                      <rect x="210" y="20" width="50" height="130" rx="8" fill="rgba(0,212,170,0.55)" />
+                      <path d="M40 65 L105 35 L170 50 L235 15" stroke="rgba(255,255,255,0.3)" strokeWidth="2" fill="none" strokeDasharray="4 4" />
+                    </svg>
+                    <div
+                      style={{
+                        position: "absolute",
+                        right: 10,
+                        bottom: 10,
+                        width: 36,
+                        height: 36,
+                        borderRadius: "50%",
+                        background: `linear-gradient(135deg, ${T.teal}, ${T.tealDark})`,
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        boxShadow: `0 0 15px ${T.tealGlow}`,
+                      }}
+                    >
+                      <img src={staticFile("icon.svg")} width={22} height={22} style={{ borderRadius: "50%" }} alt="" />
+                    </div>
+                  </div>
+                </ChatBubble>
+                <ChatBubble side="out" time="09:44" ticks delay={55}>
+                  Answer received. Marking…
+                </ChatBubble>
               </div>
-            </Bubble>
-            <Bubble side="out" time="09:44" ticks delay={45}>
-              Answer received. Marking…
-            </Bubble>
+            </GlassCard3D>
           </div>
-        </ChatCard>
-      </div>
-      <WaterdropTransition progress={dropProgress} />
+        </div>
+      </DepthEnvironment>
+
+      <WaterdropHollywood progress={drop} />
     </AbsoluteFill>
   );
 };
 
 /* ═══════════════════════════════════════════════════════════════
-   SCENE 5: AI MARKING — 3D typing indicator + theory marking
+   SCENE 5: AI MARKING — Theory marking showcase
+   Duration: 165 frames (5.5s)
    ═══════════════════════════════════════════════════════════════ */
 const SceneAIMarking: React.FC = () => {
   const frame = useCurrentFrame();
-  const card = useFadeSlide3D(5);
-  const dropProgress = interpolate(frame, [165, 180], [0, 1], { extrapolateLeft: "clamp", extrapolateRight: "clamp" });
+  const card = useScaleReveal(5);
+
+  const typingDots = [0, 1, 2].map((d) => ({
+    opacity: 0.25 + Math.sin(frame * 0.16 + d * 1) * 0.75,
+    y: Math.sin(frame * 0.16 + d * 1) * -4,
+  }));
+
+  const drop = interpolate(frame, [135, 165], [0, 1], {
+    extrapolateLeft: "clamp",
+    extrapolateRight: "clamp",
+  });
 
   return (
-    <AbsoluteFill
-      style={{
-        background: CHAT.bg,
-        justifyContent: "center",
-        alignItems: "center",
-        overflow: "hidden",
-        perspective: 1200,
-      }}
-    >
-      <Wallpaper />
-      <FloatingParticles count={10} color="rgba(0,128,105,0.1)" />
-      <div style={{ opacity: card.opacity, transform: card.transform, transformStyle: "preserve-3d" }}>
-        <ChatCard perspective>
-          <ChatHeader icon={staticFile("icon.svg")} title="Exam Bot" subtitle="online" />
-          <div
-            style={{
-              position: "relative",
-              display: "flex",
-              flexDirection: "column",
-              gap: 8,
-              padding: "12px 12px 16px",
-            }}
-          >
-            <DatePill text="TODAY" />
-            {/* Typing indicator */}
-            <div style={{ display: "flex", justifyContent: "flex-start" }}>
-              <div
-                style={{
-                  display: "flex",
-                  gap: 4,
-                  padding: "14px 16px",
-                  background: "#FFFFFF",
-                  borderRadius: 16,
-                  borderTopLeftRadius: 4,
-                  boxShadow: "0 1px 0.5px rgba(17,27,33,0.13)",
-                }}
-              >
-                {[0, 1, 2].map((d) => (
+    <AbsoluteFill style={{ overflow: "hidden" }}>
+      <DepthEnvironment>
+        <LightRays intensity={0.05} />
+        <DeepParticles count={14} />
+
+        <div
+          style={{
+            position: "absolute",
+            inset: 0,
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: "0 50px",
+            transformStyle: "preserve-3d",
+          }}
+        >
+          <div style={{ ...card, width: "100%", maxWidth: 580 }}>
+            <GlassCard3D>
+              <ChatHeader />
+              <div style={{ padding: "16px 18px 22px", display: "flex", flexDirection: "column", gap: 10 }}>
+                <DatePill text="TODAY" />
+
+                {/* Typing indicator */}
+                <div style={{ display: "flex", justifyContent: "flex-start" }}>
                   <div
-                    key={d}
                     style={{
-                      width: 7,
-                      height: 7,
-                      borderRadius: "50%",
-                      background: "#7B8A93",
-                      opacity: 0.5 + Math.sin(frame * 0.2 + d * 0.8) * 0.5,
-                      transform: `translateY(${Math.sin(frame * 0.2 + d * 0.8) * -3}px) scale(${1 + Math.sin(frame * 0.15 + d) * 0.15})`,
+                      display: "flex",
+                      gap: 6,
+                      padding: "16px 22px",
+                      background: T.chatIn,
+                      borderRadius: 22,
+                      borderBottomLeftRadius: 8,
+                      border: "1px solid rgba(255,255,255,0.05)",
                     }}
-                  />
-                ))}
+                  >
+                    {typingDots.map((dot, d) => (
+                      <div
+                        key={d}
+                        style={{
+                          width: 10,
+                          height: 10,
+                          borderRadius: "50%",
+                          background: T.teal,
+                          opacity: dot.opacity,
+                          transform: `translateY(${dot.y}px)`,
+                          boxShadow: `0 0 8px rgba(0,212,170,0.4)`,
+                        }}
+                      />
+                    ))}
+                  </div>
+                </div>
+
+                <ChatBubble side="out" time="09:45" ticks delay={30}>
+                  <ChipLabel color={T.green}>AI THEORY MARKING</ChipLabel>
+                  ✓ Marked — 4 / 5
+                </ChatBubble>
+                <ChatBubble side="out" time="09:45" delay={60}>
+                  <div style={{ fontSize: 15, color: T.textSecondary, lineHeight: 1.6 }}>
+                    Correctness · Completeness · Relevance
+                  </div>
+                </ChatBubble>
               </div>
-            </div>
-            <Bubble side="out" time="09:45" ticks delay={30}>
-              <Chip out>AI THEORY MARKING</Chip>
-              ✓ Marked — 4 / 5
-            </Bubble>
-            <Bubble side="out" time="09:45" delay={55}>
-              <div style={{ fontSize: 13, color: "rgba(17,27,33,0.8)" }}>
-                Correctness · Completeness · Relevance
-              </div>
-            </Bubble>
+            </GlassCard3D>
           </div>
-        </ChatCard>
-      </div>
-      <WaterdropTransition progress={dropProgress} />
+        </div>
+      </DepthEnvironment>
+
+      <WaterdropHollywood progress={drop} />
     </AbsoluteFill>
   );
 };
 
 /* ═══════════════════════════════════════════════════════════════
-   SCENE 6: RESULTS — 3D score pill with celebration
+   SCENE 6: RESULTS — Score reveal with celebration
+   Duration: 120 frames (4s)
    ═══════════════════════════════════════════════════════════════ */
 const SceneResults: React.FC = () => {
   const frame = useCurrentFrame();
-  const card = useFadeSlide3D(5);
-  const pill = useScale3D(18);
-  const dropProgress = interpolate(frame, [45, 60], [0, 1], { extrapolateLeft: "clamp", extrapolateRight: "clamp" });
+  const card = useScaleReveal(5);
+  const pill = useScaleReveal(20);
 
   // Celebration particles
-  const celebrationOpacity = interpolate(frame, [20, 30, 50, 60], [0, 1, 1, 0], { extrapolateLeft: "clamp", extrapolateRight: "clamp" });
+  const celebOpacity = interpolate(frame, [25, 35, 85, 100], [0, 1, 1, 0], {
+    extrapolateLeft: "clamp",
+    extrapolateRight: "clamp",
+  });
+
+  const drop = interpolate(frame, [90, 120], [0, 1], {
+    extrapolateLeft: "clamp",
+    extrapolateRight: "clamp",
+  });
 
   return (
-    <AbsoluteFill
-      style={{
-        background: CHAT.bg,
-        justifyContent: "center",
-        alignItems: "center",
-        overflow: "hidden",
-        perspective: 1200,
-      }}
-    >
-      <Wallpaper />
-      <FloatingParticles count={14} color="rgba(0,168,132,0.15)" />
-      {/* Celebration sparkles */}
-      {celebrationOpacity > 0 && (
-        <div style={{ position: "absolute", inset: 0, opacity: celebrationOpacity }}>
-          {Array.from({ length: 20 }, (_, i) => {
-            const angle = (i / 20) * Math.PI * 2;
-            const dist = 200 + (i % 3) * 80;
-            const x = 960 + Math.cos(angle + frame * 0.03) * dist;
-            const y = 540 + Math.sin(angle + frame * 0.03) * dist;
-            const size = 6 + (i % 4) * 2;
-            return (
-              <div
-                key={i}
-                style={{
-                  position: "absolute",
-                  left: x,
-                  top: y,
-                  width: size,
-                  height: size,
-                  borderRadius: "50%",
-                  background: i % 2 === 0 ? "#00A884" : "#DCF8C6",
-                  transform: `rotate(${frame * 3 + i * 18}deg)`,
-                  boxShadow: `0 0 ${size}px ${i % 2 === 0 ? "rgba(0,168,132,0.6)" : "rgba(220,248,198,0.6)"}`,
-                }}
-              />
-            );
-          })}
-        </div>
-      )}
-      <div style={{ opacity: card.opacity, transform: card.transform, transformStyle: "preserve-3d" }}>
-        <ChatCard perspective>
-          <ChatHeader icon={staticFile("icon.svg")} title="Exam Bot" subtitle="online" />
-          <div
-            style={{
-              position: "relative",
-              display: "flex",
-              flexDirection: "column",
-              alignItems: "center",
-              gap: 16,
-              padding: "12px 12px 20px",
-            }}
-          >
-            <DatePill text="TODAY" />
-            <div style={{ alignSelf: "stretch", display: "flex", justifyContent: "flex-end" }}>
-              <Bubble side="out" time="09:47" ticks delay={8}>
-                Results sent to your students
-              </Bubble>
-            </div>
-            <div
-              style={{
-                borderRadius: 999,
-                padding: "10px 20px",
-                background: "linear-gradient(135deg, #DCF8C6, #B8E6A0)",
-                border: "1px solid rgba(7,94,84,0.2)",
-                color: CHAT.scoreText,
-                fontSize: 16,
-                fontWeight: 700,
-                fontFamily: CHAT.font,
-                opacity: pill.opacity,
-                transform: pill.transform,
-                boxShadow: "0 8px 25px rgba(0,128,105,0.25)",
-              }}
-            >
-              Exam complete — 9 / 10 · Pass
-            </div>
+    <AbsoluteFill style={{ overflow: "hidden" }}>
+      <DepthEnvironment>
+        <LightRays intensity={0.07 + Math.sin(frame * 0.08) * 0.03} />
+        <DeepParticles count={18} />
+
+        {/* Celebration sparkles */}
+        {celebOpacity > 0 && (
+          <div style={{ position: "absolute", inset: 0, opacity: celebOpacity, zIndex: 50 }}>
+            {Array.from({ length: 30 }, (_, i) => {
+              const angle = (i / 30) * Math.PI * 2;
+              const dist = 250 + (i % 4) * 100;
+              const x = 1080 + Math.cos(angle + frame * 0.025) * dist;
+              const y = 1920 + Math.sin(angle + frame * 0.025) * dist;
+              const size = 5 + (i % 5) * 3;
+              return (
+                <div
+                  key={i}
+                  style={{
+                    position: "absolute",
+                    left: x,
+                    top: y,
+                    width: size,
+                    height: size,
+                    borderRadius: "50%",
+                    background: i % 3 === 0 ? T.teal : i % 3 === 1 ? "#DCF8C6" : "#FFFFFF",
+                    transform: `rotate(${frame * 4 + i * 12}deg)`,
+                    boxShadow: `0 0 ${size * 3}px ${i % 2 === 0 ? T.tealGlow : "rgba(220,248,198,0.5)"}`,
+                  }}
+                />
+              );
+            })}
           </div>
-        </ChatCard>
-      </div>
-      <WaterdropTransition progress={dropProgress} />
+        )}
+
+        <div
+          style={{
+            position: "absolute",
+            inset: 0,
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: "0 50px",
+            transformStyle: "preserve-3d",
+          }}
+        >
+          <div style={{ ...card, width: "100%", maxWidth: 580 }}>
+            <GlassCard3D>
+              <ChatHeader />
+              <div
+                style={{
+                  padding: "16px 18px 26px",
+                  display: "flex",
+                  flexDirection: "column",
+                  alignItems: "center",
+                  gap: 18,
+                }}
+              >
+                <DatePill text="TODAY" />
+                <div style={{ alignSelf: "stretch", display: "flex", justifyContent: "flex-end" }}>
+                  <ChatBubble side="out" time="09:47" ticks delay={10}>
+                    Results sent to your students
+                  </ChatBubble>
+                </div>
+                <div
+                  style={{
+                    borderRadius: 999,
+                    padding: "14px 28px",
+                    background: "linear-gradient(135deg, rgba(0,212,170,0.15), rgba(0,168,132,0.1))",
+                    border: `1px solid rgba(0,212,170,0.3)`,
+                    color: T.teal,
+                    fontSize: 20,
+                    fontWeight: 700,
+                    fontFamily: T.font,
+                    opacity: pill.opacity,
+                    transform: pill.transform,
+                    boxShadow: `0 12px 35px rgba(0,212,170,0.2)`,
+                  }}
+                >
+                  Exam complete — 9 / 10 · Pass
+                </div>
+              </div>
+            </GlassCard3D>
+          </div>
+        </div>
+      </DepthEnvironment>
+
+      <WaterdropHollywood progress={drop} />
     </AbsoluteFill>
   );
 };
 
 /* ═══════════════════════════════════════════════════════════════
-   SCENE 7: OUTRO — 3D icon close with waterdrop finale
+   SCENE 7: OUTRO — Premium CTA close
+   Duration: 105 frames (3.5s)
    ═══════════════════════════════════════════════════════════════ */
 const SceneOutro: React.FC = () => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
 
-  const iconProgress = spring({ frame: frame - 2, fps, config: { damping: 10, mass: 0.7 } });
-  const iconScale = interpolate(iconProgress, [0, 1], [0.3, 1]);
-  const iconOpacity = interpolate(iconProgress, [0, 1], [0, 1]);
-  const iconRotateY = interpolate(iconProgress, [0, 1], [-30, 0]);
-  const iconZ = interpolate(iconProgress, [0, 1], [-150, 0]);
+  const iconP = spring({ frame: frame - 8, fps, config: { damping: 9, mass: 0.45 } });
+  const iconScale = interpolate(iconP, [0, 1], [0.3, 1]);
+  const iconOpacity = interpolate(iconP, [0, 1], [0, 1]);
 
-  const word = useFadeSlide3D(6);
-  const url = useFadeSlide3D(12);
-  const tag = useFadeSlide3D(18);
+  const title = useReveal(15);
+  const url = useReveal(22);
+  const tag = useReveal(30);
+  const line = useReveal(38);
 
-  const dropProgress = interpolate(frame, [20, 30], [0, 1], { extrapolateLeft: "clamp", extrapolateRight: "clamp" });
+  const glow = 0.25 + Math.sin(frame * 0.08) * 0.2;
 
   return (
-    <AbsoluteFill
-      style={{
-        background: CHAT.bg,
-        justifyContent: "center",
-        alignItems: "center",
-        overflow: "hidden",
-        perspective: 1200,
-      }}
-    >
-      <Wallpaper />
-      <FloatingParticles count={16} color="rgba(0,128,105,0.12)" />
-      <div style={{ position: "relative", textAlign: "center", transformStyle: "preserve-3d" }}>
+    <AbsoluteFill style={{ overflow: "hidden" }}>
+      <DepthEnvironment>
+        <LightRays intensity={0.1 + Math.sin(frame * 0.05) * 0.05} />
+        <DeepParticles count={24} />
+
+        {/* Radial glow burst */}
         <div
           style={{
-            opacity: iconOpacity,
-            transform: `scale(${iconScale}) rotateY(${iconRotateY}deg) translateZ(${iconZ}px)`,
-            marginBottom: 20,
-            filter: `drop-shadow(0 20px 40px rgba(0,128,105,0.3))`,
+            position: "absolute",
+            left: "50%",
+            top: "42%",
+            width: 1000,
+            height: 1000,
+            marginLeft: -500,
+            marginTop: -500,
+            borderRadius: "50%",
+            background: `radial-gradient(circle, rgba(0,212,170,${glow * 0.12}) 0%, transparent 55%)`,
+            filter: "blur(50px)",
+            zIndex: 1,
+          }}
+        />
+
+        <div
+          style={{
+            position: "absolute",
+            inset: 0,
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            justifyContent: "center",
+            transformStyle: "preserve-3d",
+            zIndex: 2,
           }}
         >
-          <img
-            src={staticFile("icon.svg")}
-            width={120}
-            height={120}
-            style={{ borderRadius: 36, objectFit: "cover" }}
-            alt=""
+          {/* Icon */}
+          <div
+            style={{
+              opacity: iconOpacity,
+              transform: `scale(${iconScale})`,
+              marginBottom: 36,
+              filter: `drop-shadow(0 0 ${70 + glow * 70}px rgba(0,212,170,${glow}))`,
+            }}
+          >
+            <img
+              src={staticFile("icon.svg")}
+              width={140}
+              height={140}
+              style={{
+                borderRadius: 38,
+                objectFit: "cover",
+                border: `2px solid rgba(0,212,170,0.25)`,
+              }}
+              alt=""
+            />
+          </div>
+
+          {/* Brand name */}
+          <div
+            style={{
+              ...title,
+              fontSize: 72,
+              fontWeight: 700,
+              letterSpacing: "-0.04em",
+              color: T.textPrimary,
+              fontFamily: T.font,
+              lineHeight: 1,
+              textShadow: "0 4px 30px rgba(0,0,0,0.4)",
+            }}
+          >
+            Exam Bot
+          </div>
+
+          {/* URL */}
+          <div
+            style={{
+              ...url,
+              fontSize: 28,
+              fontWeight: 600,
+              color: T.teal,
+              marginTop: 20,
+              fontFamily: T.font,
+              letterSpacing: "0.03em",
+            }}
+          >
+            whatexam.com
+          </div>
+
+          {/* Decorative line */}
+          <div
+            style={{
+              ...line,
+              width: 160,
+              height: 2,
+              background: `linear-gradient(90deg, transparent, ${T.teal}, transparent)`,
+              marginTop: 24,
+              borderRadius: 1,
+            }}
           />
+
+          {/* Tagline */}
+          <div
+            style={{
+              ...tag,
+              fontSize: 20,
+              fontWeight: 500,
+              color: T.textMuted,
+              marginTop: 20,
+              fontFamily: T.font,
+            }}
+          >
+            Start examining — for free.
+          </div>
         </div>
-        <div
-          style={{
-            opacity: word.opacity,
-            transform: word.transform,
-            fontFamily: CHAT.font,
-            fontSize: 64,
-            fontWeight: 700,
-            letterSpacing: "-0.03em",
-            color: CHAT.text,
-            lineHeight: 1,
-            textShadow: "0 4px 20px rgba(0,0,0,0.1)",
-          }}
-        >
-          Exam Bot
-        </div>
-        <div
-          style={{
-            opacity: url.opacity,
-            transform: url.transform,
-            fontFamily: CHAT.font,
-            fontSize: 28,
-            fontWeight: 600,
-            color: CHAT.chipTeal,
-            marginTop: 14,
-          }}
-        >
-          whatexam.com
-        </div>
-        <div
-          style={{
-            opacity: tag.opacity,
-            transform: tag.transform,
-            fontFamily: CHAT.font,
-            fontSize: 26,
-            fontWeight: 500,
-            color: CHAT.chipGray,
-            marginTop: 6,
-          }}
-        >
-          Start examining — for free.
-        </div>
-      </div>
-      <WaterdropTransition progress={dropProgress} />
+      </DepthEnvironment>
     </AbsoluteFill>
   );
 };
 
 /* ═══════════════════════════════════════════════════════════════
-   MAIN COMPOSITION — 3D enhanced, 26s @ 30fps = 780 frames
+   MAIN COMPOSITION — 35s @ 30fps = 1050 frames
+   7 scenes, no voiceover, premium Hollywood transitions
    ═══════════════════════════════════════════════════════════════ */
 export const WhatExamAdvert: React.FC = () => {
   return (
-    <AbsoluteFill style={{ background: CHAT.bg, perspective: 1200 }}>
-      {/* ── Background music (full duration, low volume) ── */}
-      <Audio src={staticFile("audio/bgm.wav")} volume={0.15} />
+    <AbsoluteFill style={{ background: T.bg }}>
+      {/* ── Background music ── */}
+      <Audio src={staticFile("audio/bgm.wav")} volume={0.28} />
 
-      {/* ── Sound effects at transitions ── */}
-      {[60, 180, 360, 510, 690, 750].map((from) => (
-        <Sequence key={from} from={from} durationInFrames={15}>
-          <Audio src={staticFile("audio/whoosh.wav")} volume={0.4} />
+      {/* ── Transition whooshes ── */}
+      {[150, 315, 495, 660, 825, 945].map((from) => (
+        <Sequence key={from} from={from} durationInFrames={25}>
+          <Audio src={staticFile("audio/whoosh.wav")} volume={0.55} />
         </Sequence>
       ))}
-      <Sequence from={385} durationInFrames={15}>
+
+      {/* ── Voiceovers ── */}
+      <Sequence from={30} durationInFrames={120}>
+        <Audio src={staticFile("audio/vo-01-intro.mp3")} volume={0.85} />
+      </Sequence>
+      <Sequence from={140} durationInFrames={175}>
+        <Audio src={staticFile("audio/vo-02-tagline.mp3")} volume={0.85} />
+      </Sequence>
+      <Sequence from={285} durationInFrames={210}>
+        <Audio src={staticFile("audio/vo-03-chat.mp3")} volume={0.85} />
+      </Sequence>
+      <Sequence from={495} durationInFrames={165}>
+        <Audio src={staticFile("audio/vo-04-answers.mp3")} volume={0.85} />
+      </Sequence>
+      <Sequence from={675} durationInFrames={150}>
+        <Audio src={staticFile("audio/vo-05-aimarking.mp3")} volume={0.85} />
+      </Sequence>
+      <Sequence from={785} durationInFrames={160}>
+        <Audio src={staticFile("audio/vo-06-results.mp3")} volume={0.85} />
+      </Sequence>
+      <Sequence from={845} durationInFrames={205}>
+        <Audio src={staticFile("audio/vo-07-outro.mp3")} volume={0.85} />
+      </Sequence>
+
+      {/* ── Accent sounds ── */}
+      <Sequence from={70} durationInFrames={15}>
+        <Audio src={staticFile("audio/ding.wav")} volume={0.4} />
+      </Sequence>
+      <Sequence from={400} durationInFrames={15}>
         <Audio src={staticFile("audio/ding.wav")} volume={0.35} />
       </Sequence>
-      <Sequence from={710} durationInFrames={20}>
-        <Audio src={staticFile("audio/chime.wav")} volume={0.4} />
+      <Sequence from={560} durationInFrames={12}>
+        <Audio src={staticFile("audio/tick.wav")} volume={0.45} />
+      </Sequence>
+      <Sequence from={835} durationInFrames={25}>
+        <Audio src={staticFile("audio/chime.wav")} volume={0.5} />
       </Sequence>
 
-      {/* ── Voiceover clips (Edge TTS) ── */}
-      <Sequence from={30} durationInFrames={60}>
-        <Audio src={staticFile("audio/vo-01-intro.mp3")} volume={1} />
-      </Sequence>
-      <Sequence from={140} durationInFrames={120}>
-        <Audio src={staticFile("audio/vo-02-tagline.mp3")} volume={1} />
-      </Sequence>
-      <Sequence from={285} durationInFrames={180}>
-        <Audio src={staticFile("audio/vo-03-chat.mp3")} volume={1} />
-      </Sequence>
-      <Sequence from={495} durationInFrames={150}>
-        <Audio src={staticFile("audio/vo-04-answers.mp3")} volume={1} />
-      </Sequence>
-      <Sequence from={675} durationInFrames={120}>
-        <Audio src={staticFile("audio/vo-05-aimarking.mp3")} volume={1} />
-      </Sequence>
-      <Sequence from={785} durationInFrames={60}>
-        <Audio src={staticFile("audio/vo-06-results.mp3")} volume={1} />
-      </Sequence>
-      <Sequence from={845} durationInFrames={30}>
-        <Audio src={staticFile("audio/vo-07-outro.mp3")} volume={1} />
-      </Sequence>
-
-      {/* ── Scene sequences with waterdrop transitions ── */}
-      <Sequence from={0} durationInFrames={60}>
+      {/* ── Scene sequences ── */}
+      <Sequence from={0} durationInFrames={150}>
         <SceneIntro />
       </Sequence>
-      <Sequence from={60} durationInFrames={120}>
+      <Sequence from={150} durationInFrames={165}>
         <SceneTagline />
       </Sequence>
-      <Sequence from={180} durationInFrames={180}>
-        <SceneDashboard />
+      <Sequence from={315} durationInFrames={180}>
+        <SceneChat />
       </Sequence>
-      <Sequence from={360} durationInFrames={150}>
-        <SceneWhatsApp />
+      <Sequence from={495} durationInFrames={165}>
+        <ScenePhotoAnswer />
       </Sequence>
-      <Sequence from={510} durationInFrames={180}>
+      <Sequence from={660} durationInFrames={165}>
         <SceneAIMarking />
       </Sequence>
-      <Sequence from={690} durationInFrames={60}>
+      <Sequence from={825} durationInFrames={120}>
         <SceneResults />
       </Sequence>
-      <Sequence from={750} durationInFrames={30}>
+      <Sequence from={945} durationInFrames={105}>
         <SceneOutro />
       </Sequence>
     </AbsoluteFill>

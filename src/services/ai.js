@@ -115,7 +115,10 @@ async function chatJSON(messages, { temperature = 0.4, maxRetries = 2, timeoutMs
     throw new AIError('AI is not configured. Set AI_API_KEY and AI_BASE_URL in .env');
   }
 
-  const common = { messages, temperature, maxRetries, maxTokens, timeoutMs };
+  // Ensure every provider always has a timeout so a hanging endpoint can
+  // never block the whole flow. 0 means "no timeout" in withHardTimeout.
+  const effectiveTimeout = Math.max(timeoutMs, 60000);
+  const common = { messages, temperature, maxRetries, maxTokens, timeoutMs: effectiveTimeout };
   const primary = () =>
     callEndpoint({
       baseUrl: config.ai.baseUrl,
@@ -131,7 +134,7 @@ async function chatJSON(messages, { temperature = 0.4, maxRetries = 2, timeoutMs
       baseUrl: config.claude.baseUrl,
       apiKey: config.claude.apiKey,
       model: config.claude.model || config.ai.model,
-      timeoutMs: config.claude.timeoutMs || timeoutMs,
+      timeoutMs: config.claude.timeoutMs || effectiveTimeout,
       ...common,
     });
 
@@ -140,7 +143,7 @@ async function chatJSON(messages, { temperature = 0.4, maxRetries = 2, timeoutMs
       baseUrl: config.xai.baseUrl,
       apiKey: config.xai.apiKey,
       model: config.xai.model,
-      timeoutMs: config.xai.timeoutMs || timeoutMs,
+      timeoutMs: config.xai.timeoutMs || effectiveTimeout,
       ...common,
     });
 
@@ -363,7 +366,7 @@ async function generateQuestions({ subject, topics, count, objectiveCount, theor
       : '';
 
   const system = (objN, theoN, variety) => SYSTEM_BASE + `
-Return an object: {"questions": [...]}. Every question is a JSON object.
+Generate EXACTLY ${objN} objective questions and EXACTLY ${theoN} theory questions. Return: {"questions": [...]}.
 
 Objective question schema:
 {
@@ -391,14 +394,14 @@ Theory question schema:
   "grammar_marks": 1
 }
 
-Rules:
-- The number of objective questions MUST be ${objN} and theory questions MUST be ${theoN}.
+CRITICAL RULES:
+- You MUST return EXACTLY ${objN} objective questions and EXACTLY ${theoN} theory questions. Count them before returning. If you return fewer, the exam is broken.
 - Options must have exactly one correct answer; distractors must be plausible.
 - correct_index is the 0-based index of the correct option.
-- CORRECTNESS IS NON-NEGOTIABLE: the option at correct_index must be the ONLY defensible correct answer. If a stem or options are ambiguous, rewrite them so exactly one option is clearly correct. These keys are used to grade students, so a wrong key marks innocent students wrong — never emit an uncertain key.
-- Theory rubric points must sum to (marks - presentation_marks - grammar_marks) or less; total scoring adds up to exactly marks where sensible.
+- CORRECTNESS IS NON-NEGOTIABLE: the option at correct_index must be the ONLY defensible correct answer. These keys are used to grade students, so a wrong key marks innocent students wrong.
+- Theory rubric points must sum to (marks - presentation_marks - grammar_marks) or less.
 - Difficulty overall: ${difficulty || 'mixed'}.
-- Style: write like the Ghana Basic Education Certificate Examination (BECE) for a Junior High School (JHS) candidate. Use clear, age-appropriate English and concise stems. Each objective question has exactly four options (A-D) with ONE clearly correct answer and three plausible distractors. No trick wording, no ambiguity, no questions that depend on a textbook not available to the student. Theory questions may use sub-parts (a), (b), (c) where natural.
+- Style: write like the Ghana BECE for a JHS candidate. Use clear, age-appropriate English.
 ${NOVELTY_RULE}
 ${spin}
 ${variety || ''}
@@ -409,7 +412,7 @@ ${avoidBlock}`;
       `Subject: ${subject || 'General'}`,
       topics ? `Topics: ${topics}` : 'Topics: general',
       instructions ? `Additional instructions: ${instructions}` : '',
-      `Please generate ${batchTotal} questions total (${perBatchObjective} objective, ${perBatchTheory} theory).`,
+      `Generate EXACTLY ${perBatchObjective} objective questions and EXACTLY ${perBatchTheory} theory questions. Return them all in one JSON array.`,
     ]
       .filter(Boolean)
       .join('\n');
@@ -427,10 +430,16 @@ ${avoidBlock}`;
         { role: 'system', content: system(perBatchObjective, perBatchTheory, variety) },
         { role: 'user', content: user(batchSize) },
       ],
-      { temperature: 0.9 }
+      { temperature: 0.9, maxRetries: 3 }
     )
   );
-  const settled = await mapLimit(tasks, 8, (run) => run());
+  // Low concurrency (3) to avoid rate-limiting on shared/free AI endpoints.
+  // A small delay between batches further reduces 429 errors.
+  const settled = await mapLimit(tasks, 3, async (run) => {
+    const result = await run();
+    await delay(300);
+    return result;
+  });
 
   const seen = new Set();
   const all = [];

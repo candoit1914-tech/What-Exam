@@ -456,10 +456,16 @@ router.post('/exams/:id/generate', asyncWrap(async (req, res) => {
     return res.status(400).json({ error: 'Exam is already live/ended.' });
   }
   const { subject, topics, count, objectiveCount, theoryCount, types, difficulty, instructions, pool, poolMultiplier } = req.body;
-  const n = Math.min(Math.max(parseInt(count) || 10, 1), 50);
   const objN = objectiveCount != null ? Math.min(Math.max(parseInt(objectiveCount) || 0, 0), 50) : null;
   const theoN = theoryCount != null ? Math.min(Math.max(parseInt(theoryCount) || 0, 0), 50) : null;
-  const multiplier = pool ? Math.min(Math.max(parseInt(poolMultiplier) || 3, 2), 7) : 1;
+  // Compute the actual total from per-type counts. The frontend sends
+  // objectiveCount + theoryCount but NOT count, so parseInt(count) || 10
+  // always defaulted to 10 and sliced the results to 10 questions.
+  const totalFromTypes = (objN || 0) + (theoN || 0);
+  const n = totalFromTypes > 0
+    ? Math.min(Math.max(totalFromTypes, 1), 150)
+    : Math.min(Math.max(parseInt(count) || 10, 1), 50);
+  const multiplier = pool ? Math.min(Math.max(parseInt(poolMultiplier) || 2, 2), 7) : 1;
   const existing = db
     .prepare('SELECT text FROM questions WHERE exam_id = ? ORDER BY q_order LIMIT 20')
     .all(exam.id)
