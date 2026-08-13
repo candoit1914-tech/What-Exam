@@ -827,11 +827,16 @@ async function addQuestionForm(id) {
     </div>
     <div class="field"><label>Marks</label><input type="number" id="qf_marks" value="1" step="0.5"></div>
     <div class="field"><label>Difficulty</label><select id="qf_diff"><option>easy</option><option selected>medium</option><option>hard</option></select></div>
+    <div class="field">
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer"><input type="checkbox" id="qf_add_another"> Add another question after saving</label>
+      <p class="muted" style="margin:4px 0 0">Check this to add multiple questions quickly without reopening the form each time.</p>
+    </div>
     <div class="modal-actions" style="margin-top:18px"><button id="qf_save" class="btn btn-primary">Add Question</button></div>`;
 
   const div = await openModal('Add Question', body);
   if (!div) return;
-  document.querySelector('#qf_save').addEventListener('click', async () => {
+
+  const saveHandler = async () => {
     const type = document.querySelector('input[name="q_type"]:checked').value;
     const payload = {
       type,
@@ -850,10 +855,27 @@ async function addQuestionForm(id) {
     try {
       await api(`/api/exams/${id}/questions`, { method: 'POST', body: payload });
       invalidateCache(`/api/exams/${id}`);
-      div.remove();
-      renderExam(id);
+
+      if (document.querySelector('#qf_add_another')?.checked) {
+        // Clear form for next question
+        document.querySelector('#qf_text').value = '';
+        document.querySelector('#qf_passage').value = '';
+        ['A', 'B', 'C', 'D'].forEach((k) => {
+          const opt = document.querySelector(`[data-opt="${k}"]`);
+          if (opt) opt.value = '';
+        });
+        const sel = document.querySelector('input[name="qf_correct"]:checked');
+        if (sel) sel.checked = false;
+        document.querySelector('#qf_text').focus();
+        toast('Question added! Enter the next one.');
+      } else {
+        div.remove();
+        renderExam(id);
+      }
     } catch (e) { toast(e.message, true); }
-  });
+  };
+
+  document.querySelector('#qf_save').addEventListener('click', saveHandler);
 }
 
 async function editQuestionForm(id, qid) {
@@ -918,12 +940,10 @@ async function aiGenerateForm(id) {
       <label style="display:flex;align-items:center;gap:8px;cursor:pointer"><input type="checkbox" id="ag_pool" checked> Fresh questions per attempt</label>
       <p class="muted" style="margin:4px 0 8px">Generates extra variant questions from the same topic so every student's attempt (and retake) draws a different, unseen set.</p>
       <select id="ag_variants">
-        <option value="2">2 variants per question</option>
-        <option value="3" selected>3 variants per question</option>
+        <option value="2" selected>2 variants per question (faster)</option>
+        <option value="3">3 variants per question</option>
         <option value="4">4 variants per question</option>
-        <option value="5">5 variants per question</option>
-        <option value="6">6 variants per question</option>
-        <option value="7">7 variants per question</option>
+        <option value="5">5 variants per question (slower)</option>
       </select>
     </div>
     <div class="modal-actions" style="margin-top:18px"><button id="ag_run" class="btn btn-primary">Generate</button></div>
@@ -947,7 +967,7 @@ async function aiGenerateForm(id) {
         difficulty: document.querySelector('#ag_diff').value,
         instructions: document.querySelector('#ag_inst').value,
         pool: document.querySelector('#ag_pool').checked,
-        poolMultiplier: parseInt(document.querySelector('#ag_variants').value) || 3,
+        poolMultiplier: parseInt(document.querySelector('#ag_variants').value) || 2,
       };
       const res = await api(`/api/exams/${id}/generate`, { method: 'POST', body });
       invalidateCache(`/api/exams/${id}`);
@@ -1039,7 +1059,7 @@ function pollPdfJob(examId, div, jobId) {
       div.remove();
       toast(job.error || 'Extraction failed.', true);
     }
-  }, 2000);
+  }, 1500); // Poll every 1.5s for faster feedback
 }
 
 // ── Scheme actions ───────────────────────────────────────────────

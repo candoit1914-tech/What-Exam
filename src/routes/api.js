@@ -282,6 +282,93 @@ router.post('/exams/:id/questions', asyncWrap(async (req, res) => {
   res.json(qWithScheme(question));
 }));
 
+// Batch add multiple questions at once (much faster than adding one-by-one)
+router.post('/exams/:id/questions/batch', asyncWrap(async (req, res) => {
+  const exam = db.prepare('SELECT * FROM exams WHERE id = ?').get(req.params.id);
+  if (!exam) return res.status(404).json({ error: 'Exam not found' });
+  if (exam.status === 'live' || exam.status === 'ended') {
+    return res.status(400).json({ error: 'Exam is already live/ended. Questions can no longer be edited.' });
+  }
+  const questions = Array.isArray(req.body.questions) ? req.body.questions : [];
+  if (!questions.length) return res.status(400).json({ error: 'No questions provided' });
+
+  let nextOrder = (db.prepare('SELECT MAX(q_order) m FROM questions WHERE exam_id = ?').get(exam.id).m || 0) + 1;
+  const insert = db.prepare(
+    `INSERT INTO questions (exam_id, q_order, type, text, passage, options, correct_answer, marks, difficulty, learning_objective, explanation, source)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`
+  );
+  const insertScheme = db.prepare(
+    `INSERT INTO marking_schemes (question_id, type, scheme) VALUES (?, ?, ?)
+     ON CONFLICT(question_id) DO UPDATE SET scheme=excluded.scheme, updated_at=datetime('now')`
+  );
+
+  const created = [];
+  const theoryToScheme = [];
+
+  db.exec('BEGIN');
+  try {
+    for (const q of questions) {
+      const marks = parseFloat(q.marks) || (q.type === 'theory' ? 5 : 1);
+      const info = insert.run(
+        exam.id, nextOrder, q.type || 'objective', q.text || '', q.passage || '',
+        q.type === 'objective' && Array.isArray(q.options)
+          ? JSON.stringify(q.options.map((o, i) => ({ key: String.fromCharCode(65 + i), text: o })))
+          : null,
+        q.correct_answer || null,
+        marks, q.difficulty || 'medium', q.learning_objective || '', q.explanation || '',
+        q.source || 'manual'
+      );
+      const qid = info.lastInsertRowid;
+      created.push(qid);
+
+      // Insert scheme inline for objective questions
+      if (q.type === 'objective') {
+        insertScheme.run(qid, 'objective', JSON.stringify({
+          type: 'objective',
+          correct_answer: q.correct_answer || null,
+          marks,
+          explanation: q.explanation || '',
+        }));
+      } else {
+        // For theory questions, if scheme data is provided, use it; otherwise mark for AI generation
+        if (q.model_answer || q.key_points?.length || q.rubric?.length) {
+          insertScheme.run(qid, 'theory', JSON.stringify({
+            type: 'theory',
+            model_answer: q.model_answer || '',
+            key_points: q.key_points || [],
+            rubric: q.rubric || [],
+            presentation_marks: q.presentation_marks || 0,
+            grammar_marks: q.grammar_marks || 0,
+          }));
+        } else {
+          theoryToScheme.push(qid);
+        }
+      }
+      nextOrder++;
+    }
+    db.exec('COMMIT');
+  } catch (e) {
+    db.exec('ROLLBACK');
+    throw e;
+  }
+
+  // Generate marking schemes for theory questions in parallel (best-effort)
+  if (theoryToScheme.length) {
+    const schemeTasks = theoryToScheme.map((qid) => async () => {
+      try {
+        const q = db.prepare('SELECT * FROM questions WHERE id = ?').get(qid);
+        if (q) await marking.buildMarkingScheme(q);
+      } catch (err) {
+        console.error('[api] batch scheme gen failed for qid', qid, err.message);
+      }
+    });
+    await ai.mapLimit(schemeTasks, 8, (run) => run());
+  }
+
+  marking.recomputeExamTotal(exam.id);
+  res.json({ ok: true, count: created.length, questions: created });
+}));
+
 router.put('/exams/:id/questions/:qid', (req, res) => {
   const exam = db.prepare('SELECT * FROM exams WHERE id = ?').get(req.params.id);
   if (!exam) return res.status(404).json({ error: 'Exam not found' });

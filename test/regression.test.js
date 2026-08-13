@@ -1177,14 +1177,14 @@ test('extractQuestionsFromText serially retries a block that failed in the wave'
   const calls = { n: 0 };
   ai.chatJSON = async () => {
     calls.n++;
-    if (calls.n <= 4) throw new Error('fetch failed');
+    if (calls.n <= 2) throw new Error('fetch failed');
     return { questions: [{ type: 'objective', text: 'Retry Q', options: ['A. X', 'B. Y'], correct_answer: 'A', correct_index: 0 }] };
   };
   try {
     const out = await ai.extractQuestionsFromText('1. Retry Q?\nA. X\nB. Y');
     assert.equal(out.length, 1, 'question survives the failed wave via the serial re-run');
     assert.equal(out[0].text, 'Retry Q');
-    assert.ok(calls.n >= 5, 'wave retries exhausted before the serial re-run succeeded');
+    assert.ok(calls.n >= 3, 'wave retries exhausted before the serial re-run succeeded');
   } finally {
     ai.chatJSON = orig;
   }
@@ -1215,15 +1215,15 @@ test('extractQuestionsFromText caps concurrent extraction blocks at BLOCK_CONCUR
     return { questions: [{ type: 'objective', text: 'Guard Q', options: ['A. X', 'B. Y', 'C. Z', 'D. W'], correct_answer: 'A', correct_index: 0 }] };
   };
   try {
-    // 60 numbered questions split into 12 blocks (perBlock 5) — enough to
-    // exceed BLOCK_CONCURRENCY (12) so the cap is actually exercised. This
+    // 200 numbered questions split into ~25 blocks (perBlock 8) — enough to
+    // exceed BLOCK_CONCURRENCY (20) so the cap is actually exercised. This
     // couples the test to the current cap value on purpose: it is a
     // deliberate performance tuning constant, so the test is updated when
     // the cap is tuned.
     const lines = [];
-    for (let i = 1; i <= 60; i++) lines.push(`${i}. Guard question ${i}?`, 'A. X', 'B. Y', 'C. Z', 'D. W');
+    for (let i = 1; i <= 200; i++) lines.push(`${i}. Guard question ${i}?`, 'A. X', 'B. Y', 'C. Z', 'D. W');
     const out = await ai.extractQuestionsFromText(lines.join('\n'));
-    assert.equal(state.max, 12, `extraction fires no more than 12 blocks at once (saw ${state.max})`);
+    assert.equal(state.max, 20, `extraction fires no more than 20 blocks at once (saw ${state.max})`);
     assert.ok(out.length >= 1, 'capped extraction still parses questions');
   } finally {
     ai.chatJSON = orig;

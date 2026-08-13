@@ -236,21 +236,21 @@ const BULK_TIMEOUT_MS = 5 * 60 * 1000;
 // Blocks are kept SMALL on purpose: a huge block forces a slow (e.g. 100B+)
 // model to generate a very long JSON payload, which can take minutes and hang
 // the whole import. Small blocks finish quickly even on slow endpoints.
-const BLOCK_QUESTIONS = 5;
-const BLOCK_MAX_CHARS = 3500;
+const BLOCK_QUESTIONS = 8;
+const BLOCK_MAX_CHARS = 5000;
 // Blocks run several at a time: enough parallelism to collapse a long paper's
 // wall-clock time, so a slow block does not stall the whole wave. The cap is
 // still bounded so a single upload never floods a shared endpoint.
-// Increased from 8 to 12 for faster extraction with Grok as fallback.
-const BLOCK_CONCURRENCY = 12;
+// Increased to 20 for faster extraction.
+const BLOCK_CONCURRENCY = 20;
 const BLOCK_MAX_TOKENS = 6000;
 // A single extraction block runs on its own clock with a couple of retries
 // (flaky shared endpoints drop requests under concurrency). A block that still
 // fails is SKIPPED — never fails the whole paper — so this only bounds how
-// long one stubborn block can stall the import. Reduced from 150s to 90s
-// since Grok and Claude are much faster than the primary 100B+ model.
-const BLOCK_TIMEOUT_MS = 90 * 1000;
-const BLOCK_RETRIES = 2;
+// long one stubborn block can stall the import. Reduced to 45s for faster
+// failover to retries.
+const BLOCK_TIMEOUT_MS = 45 * 1000;
+const BLOCK_RETRIES = 1;
 
 /** Run fn over items with at most `limit` promises in flight (like a semaphore). */
 async function mapLimit(items, limit, fn) {
@@ -330,8 +330,9 @@ async function generateQuestions({ subject, topics, count, objectiveCount, theor
   const total = objN + theoN;
 
   const target = Math.min(Math.max(parseInt(poolSize) || total, total), 150);
-  const batchSize = Math.max(1, Math.min(target, 10));
-  const maxCalls = Math.min(Math.ceil(target / batchSize), 16);
+  // Use larger batches for faster generation - fewer AI calls needed
+  const batchSize = Math.max(1, Math.min(target, 15));
+  const maxCalls = Math.min(Math.ceil(target / batchSize), 12);
 
   // Keep the same objective/theory split within each smaller batch so the
   // per-batch counts stay consistent with the overall request.
@@ -429,7 +430,7 @@ ${avoidBlock}`;
       { temperature: 0.9 }
     )
   );
-  const settled = await mapLimit(tasks, 4, (run) => run());
+  const settled = await mapLimit(tasks, 8, (run) => run());
 
   const seen = new Set();
   const all = [];
@@ -618,7 +619,7 @@ Rules:
       } catch (err) {
         const isTimeout = err && err.name === 'AIError' && /timed out/i.test(err.message);
         if (attempt < BLOCK_RETRIES) {
-          await delay(1000 * (attempt + 1));
+          await delay(500 * (attempt + 1));
           continue;
         }
         console.error('[ai] extraction block skipped:', isTimeout ? 'timeout' : err.message);
@@ -1034,12 +1035,12 @@ Rules:
  * easily truncated, and one failure loses every answer. Batching means a
  * flaky/slow endpoint loses only a handful of questions, never the whole paper.
  */
-const ANSWER_BATCH = 10;
-const ANSWER_CONCURRENCY = 8;
-const ANSWER_TIMEOUT_MS = 4 * 60 * 1000;
+const ANSWER_BATCH = 15;
+const ANSWER_CONCURRENCY = 12;
+const ANSWER_TIMEOUT_MS = 3 * 60 * 1000;
 const ANSWER_MAX_TOKENS = 3000;
 
-async function answerObjectiveQuestions(questions) {
+async function answerObjectiveQuestions(questions, { skipVerify = false } = {}) {
   if (!questions.length) return [];
   const system = examinerPrompt(SYSTEM_BASE + `
 For each question, determine the single correct answer option. Return:
@@ -1066,7 +1067,7 @@ Rules:
         return `Q${i} (index ${q.index}):\n${q.text}\nOptions:\n${opts.join('\n')}`;
       })
       .join('\n\n');
-    for (let attempt = 0; attempt < 2; attempt++) {
+      for (let attempt = 0; attempt < 2; attempt++) {
       try {
         const result = await chatJSON(
           [
@@ -1084,7 +1085,7 @@ Rules:
         }));
       } catch (err) {
         if (attempt === 0) {
-          await delay(1000);
+          await delay(500);
           continue;
         }
         console.error('[ai] answer batch skipped:', err.message);
@@ -1100,6 +1101,17 @@ Rules:
   // Self-verification pass: independently re-check every first-pass answer.
   // This is authoritative — a second look that cannot confirm an answer voids
   // it (correct_index: -1) so the question is flagged for review, not guessed.
+  // Skip when skipVerify is true (e.g., answer key was already in the PDF).
+  if (skipVerify) {
+    return questions.map((q) => {
+      const a = byIndex[q.index];
+      return {
+        index: q.index,
+        correct_index: a ? Number(a.correct_index) : -1,
+        explanation: a?.explanation || '',
+      };
+    });
+  }
   const toVerify = questions
     .map((q) => ({ q, a: byIndex[q.index] }))
     .filter((x) => x.a && Number(x.a.correct_index) >= 0)
@@ -1165,7 +1177,7 @@ Rules:
       return { correct_index: valid ? idx : -1, explanation: result.explanation || '' };
     } catch (err) {
       if (attempt === 0) {
-        await delay(1000);
+        await delay(500);
         continue;
       }
       console.error('[ai] resolveObjectiveAnswer failed:', err.message);
@@ -1238,7 +1250,7 @@ Rules:
         });
       } catch (err) {
         if (attempt === 0) {
-          await delay(1000);
+          await delay(500);
           continue;
         }
         console.error('[ai] verify batch skipped:', err.message);

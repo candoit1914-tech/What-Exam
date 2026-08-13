@@ -186,7 +186,9 @@ async function startJob(jobId, buffer) {
     if (missingAnswers.length) {
       updateJob(jobId, { stage: 'Filling missing answers…', progress: 57 });
       try {
-        const answers = await ai.answerObjectiveQuestions(missingAnswers);
+        // Skip verification pass since we're only filling genuinely missing answers
+        // (the PDF's own answer key answers were already spliced deterministically)
+        const answers = await ai.answerObjectiveQuestions(missingAnswers, { skipVerify: true });
         for (const a of answers) answersMap[a.index] = a;
       } catch (err) {
         console.error('[pdfImport] answer fill failed (continuing):', err.message);
@@ -304,10 +306,10 @@ async function startJob(jobId, buffer) {
       updateJob(jobId, { progress: Math.min(pct, 98) });
       return marking.buildMarkingScheme(q);
     });
-    // Theory scheme generation is one AI call per question; run up to 8 in
+    // Theory scheme generation is one AI call per question; run up to 12 in
     // parallel (capped like the other bulk AI phases so a shared endpoint is
     // not flooded) instead of one at a time.
-    await ai.mapLimit(tasks, 8, (run) => run());
+    await ai.mapLimit(tasks, 12, (run) => run());
 
     marking.recomputeExamTotal(job.exam_id);
     updateJob(jobId, { status: 'done', stage: 'Done', progress: 100, count: created.length });
