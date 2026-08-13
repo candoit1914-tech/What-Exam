@@ -660,6 +660,10 @@ async function maybeStartSession(student) {
     .get(exam.id, student.id);
 
   if (existing && existing.status === 'in_progress') {
+    const questionCount =
+      getSessionQuestionCount(existing.id) ||
+      db.prepare('SELECT COUNT(*) c FROM questions WHERE exam_id = ?').get(exam.id).c;
+    await wa.sendText(student.phone, formatExamIntro(exam, questionCount));
     await sendQuestionTo(existing, student);
     return { ok: true, reason: 'resumed' };
   }
