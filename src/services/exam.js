@@ -95,7 +95,7 @@ function sessionHasNoAnswers(sessionId) {
 
 function createSession(examId, studentId) {
   const info = db
-    .prepare('INSERT INTO sessions (exam_id, student_id, started_at) VALUES (?, ?, NULL)')
+    .prepare('INSERT INTO sessions (exam_id, student_id) VALUES (?, ?)')
     .run(examId, studentId);
   const session = db.prepare('SELECT * FROM sessions WHERE id = ?').get(info.lastInsertRowid);
   drawSessionQuestions(session.id, examId);

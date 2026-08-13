@@ -333,9 +333,11 @@ async function generateQuestions({ subject, topics, count, objectiveCount, theor
   const total = objN + theoN;
 
   const target = Math.min(Math.max(parseInt(poolSize) || total, total), 150);
-  // Use larger batches for faster generation - fewer AI calls needed
-  const batchSize = Math.max(1, Math.min(target, 15));
-  const maxCalls = Math.min(Math.ceil(target / batchSize), 12);
+  // Small batches (5) keep output within Nvidia's ~4096-token output cap.
+  // Theory questions with rubric/e/key_points are token-heavy; 15-question
+  // batches routinely truncate mid-JSON on smaller providers.
+  const batchSize = Math.max(1, Math.min(target, 5));
+  const maxCalls = Math.min(Math.ceil(target / batchSize), 20);
 
   // Keep the same objective/theory split within each smaller batch so the
   // per-batch counts stay consistent with the overall request.
@@ -430,20 +432,29 @@ ${avoidBlock}`;
         { role: 'system', content: system(perBatchObjective, perBatchTheory, variety) },
         { role: 'user', content: user(batchSize) },
       ],
-      { temperature: 0.9, maxRetries: 3 }
+      { temperature: 0.9, maxRetries: 3, maxTokens: 16384 }
     )
   );
   // Low concurrency (3) to avoid rate-limiting on shared/free AI endpoints.
   // A small delay between batches further reduces 429 errors.
+  // Individual batch failures are caught so a single 429 doesn't kill the
+  // entire generation — we collect however many batches succeed.
   const settled = await mapLimit(tasks, 3, async (run) => {
-    const result = await run();
-    await delay(300);
-    return result;
+    try {
+      const result = await run();
+      await delay(300);
+      return result;
+    } catch (err) {
+      console.error('[generate] batch failed:', err.message);
+      await delay(1000);
+      return null;
+    }
   });
 
   const seen = new Set();
   const all = [];
   for (const result of settled) {
+    if (!result) continue;
     const batch = Array.isArray(result) ? result : result.questions;
     for (const q of batch || []) {
       const t = String(q && q.text || '').toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -453,6 +464,7 @@ ${avoidBlock}`;
       }
     }
   }
+  console.log(`[generate] collected ${all.length} unique questions from ${settled.filter(Boolean).length}/${maxCalls} batches`);
 
   // The first `total` questions form the main set; every extra pool question
   // must be genuinely distinct from them (and from its siblings), so an

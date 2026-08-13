@@ -458,30 +458,38 @@ router.post('/exams/:id/generate', asyncWrap(async (req, res) => {
   const { subject, topics, count, objectiveCount, theoryCount, types, difficulty, instructions, pool, poolMultiplier } = req.body;
   const objN = objectiveCount != null ? Math.min(Math.max(parseInt(objectiveCount) || 0, 0), 50) : null;
   const theoN = theoryCount != null ? Math.min(Math.max(parseInt(theoryCount) || 0, 0), 50) : null;
-  // Compute the actual total from per-type counts. The frontend sends
-  // objectiveCount + theoryCount but NOT count, so parseInt(count) || 10
-  // always defaulted to 10 and sliced the results to 10 questions.
   const totalFromTypes = (objN || 0) + (theoN || 0);
   const n = totalFromTypes > 0
     ? Math.min(Math.max(totalFromTypes, 1), 150)
     : Math.min(Math.max(parseInt(count) || 10, 1), 50);
   const multiplier = pool ? Math.min(Math.max(parseInt(poolMultiplier) || 2, 2), 7) : 1;
+  console.log(`[generate] exam=${exam.id} objN=${objN} theoN=${theoN} n=${n} pool=${pool} multiplier=${multiplier}`);
   const existing = db
     .prepare('SELECT text FROM questions WHERE exam_id = ? ORDER BY q_order LIMIT 20')
     .all(exam.id)
     .map((r) => r.text);
-  const generated = await ai.generateQuestions({
-    subject: subject || exam.subject || exam.title,
-    topics,
-    count: n,
-    objectiveCount: objN,
-    theoryCount: theoN,
-    poolSize: pool ? n * multiplier : n,
-    types: Array.isArray(types) ? types : ['objective', 'theory'],
-    difficulty,
-    instructions,
-    avoid: existing,
-  });
+  let generated;
+  try {
+    generated = await ai.generateQuestions({
+      subject: subject || exam.subject || exam.title,
+      topics,
+      count: n,
+      objectiveCount: objN,
+      theoryCount: theoN,
+      poolSize: pool ? n * multiplier : n,
+      types: Array.isArray(types) ? types : ['objective', 'theory'],
+      difficulty,
+      instructions,
+      avoid: existing,
+    });
+  } catch (err) {
+    console.error('[generate] AI generation failed:', err.message);
+    return res.status(502).json({ error: `AI generation failed: ${err.message}` });
+  }
+  console.log(`[generate] got ${generated.length} questions from AI`);
+  if (generated.length === 0) {
+    return res.status(502).json({ error: 'AI returned no questions. The provider may be rate-limited — try again in a few seconds.' });
+  }
 
   const active = generated.slice(0, n);
   const variants = pool ? generated.slice(n) : [];
