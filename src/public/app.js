@@ -634,6 +634,16 @@ async function renderTab() {
       ? `<div class="empty-state">${I.empty}<p>No questions yet.</p></div>`
       : questions.map((q) => schemeHTML(q, id)).join('');
   } else if (tab === 'recipients') {
+    // Build participation map: student_id -> session info
+    const participatedMap = {};
+    for (const s of results) {
+      if (s.student_id && s.started_at) {
+        participatedMap[s.student_id] = s;
+      }
+    }
+    const totalR = recipients.length;
+    const participated = recipients.filter((r) => participatedMap[r.id]);
+    const notParticipated = recipients.filter((r) => !participatedMap[r.id]);
     bodyEl.innerHTML = `
       <div class="card">
         <h3 style="margin-bottom:4px">ADD A <span class="gr">STUDENT</span></h3>
@@ -654,16 +664,33 @@ async function renderTab() {
           <button class="btn btn-ghost" onclick="sendExam(${id})">${I.wa} Send Exam to Recipients</button>
         </div>
       </div>
+      ${totalR > 0 ? `
+      <div class="card" style="margin-top:14px">
+        <h3 style="margin-bottom:4px">PARTICIPATION <span class="gr">SUMMARY</span></h3>
+        <div class="row" style="margin-top:10px;gap:16px;flex-wrap:wrap">
+          <div><b>${totalR}</b> <span class="muted">Total recipients</span></div>
+          <div><b style="color:var(--green,#10b981)">${participated.length}</b> <span class="muted">Participated</span></div>
+          <div><b style="color:var(--red,#ef4444)">${notParticipated.length}</b> <span class="muted">Did not participate</span></div>
+        </div>
+      </div>` : ''}
       <div class="card table-card" style="margin-top:14px"><table>
-        <thead><tr><th>Name</th><th>Phone</th><th>Sent</th><th></th></tr></thead>
+        <thead><tr><th>Name</th><th>Phone</th><th>Sent</th><th>Status</th><th></th></tr></thead>
         <tbody>
-          ${recipients.length === 0 ? `<tr><td colspan="4"><div class="empty-state">${I.empty}<p>No recipients yet.</p></div></td></tr>` : ''}
-          ${recipients.map((r) => `<tr>
-            <td>${esc(r.name || '—')}</td>
-            <td>${esc(r.phone)}</td>
-            <td class="muted">${esc(r.sent_at || '—')}</td>
-            <td><button class="small ghost danger" onclick="removeRecipient(${id}, ${r.id})">Remove</button></td>
-          </tr>`).join('')}
+          ${recipients.length === 0 ? `<tr><td colspan="5"><div class="empty-state">${I.empty}<p>No recipients yet.</p></div></td></tr>` : ''}
+          ${recipients.map((r) => {
+            const sess = participatedMap[r.id];
+            const status = sess
+              ? `<span class="pass">${sess.status === 'completed' ? 'Finished' : 'In progress'}</span>`
+              : (r.sent_at ? '<span class="fail">Not started</span>' : '<span class="muted">Not sent</span>');
+            const time = sess && sess.started_at ? sess.started_at : '';
+            return `<tr>
+              <td>${esc(r.name || '—')}</td>
+              <td>${esc(r.phone)}</td>
+              <td class="muted">${esc(r.sent_at || '—')}</td>
+              <td>${status} ${time ? `<span class="muted" style="font-size:11px">(${esc(time)})</span>` : ''}</td>
+              <td><button class="small ghost danger" onclick="removeRecipient(${id}, ${r.id})">Remove</button></td>
+            </tr>`;
+          }).join('')}
         </tbody>
       </table></div>`;
   } else if (tab === 'results') {

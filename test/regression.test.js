@@ -257,7 +257,7 @@ test('buildQuestionBubbles sends OBJECTIVE header once then each question', () =
   const q1 = { id: 1, q_order: 1, type: 'objective', text: 'Q1', passage: '' };
   const q2 = { id: 2, q_order: 2, type: 'objective', text: 'Q2', passage: '' };
   const seq = [q1, q2];
-  assert.deepEqual(exam.buildQuestionBubbles({}, q1, seq, 0), ['*OBJECTIVE*', '*QUESTION 1*\n\nQ1']);
+  assert.deepEqual(exam.buildQuestionBubbles({}, q1, seq, 0), ['Reply with the letter of your answer (e.g. A, B, C, or D).', '*OBJECTIVE*', '*QUESTION 1*\n\nQ1']);
   assert.deepEqual(exam.buildQuestionBubbles({}, q2, seq, 1), ['*QUESTION 2*\n\nQ2']);
 });
 
@@ -266,7 +266,7 @@ test('buildQuestionBubbles sends THEORY header once before theory questions', ()
   const q2 = { id: 2, q_order: 2, type: 'theory', text: 'Q2', passage: '' };
   const q3 = { id: 3, q_order: 3, type: 'theory', text: 'Q3', passage: '' };
   const seq = [q1, q2, q3];
-  assert.deepEqual(exam.buildQuestionBubbles({}, q2, seq, 1), ['*THEORY*', '*QUESTION 2*\n\nQ2']);
+  assert.deepEqual(exam.buildQuestionBubbles({}, q2, seq, 1), ['Type your full answer to each question as a single message.', '*THEORY*', '*QUESTION 2*\n\nQ2']);
   assert.deepEqual(exam.buildQuestionBubbles({}, q3, seq, 2), ['*QUESTION 3*\n\nQ3']);
 });
 
@@ -276,6 +276,7 @@ test('buildQuestionBubbles emits header, instructions, passage, then question', 
   const q2 = { id: 2, q_order: 2, type: 'objective', text: 'Q2', passage };
   const seq = [q1, q2];
   assert.deepEqual(exam.buildQuestionBubbles({}, q1, seq, 0), [
+    'Reply with the letter of your answer (e.g. A, B, C, or D).',
     '*OBJECTIVE*',
     '*Instructions*\n\nRead the passage.',
     'Ama lost her pencil on the way to school.',
@@ -287,6 +288,7 @@ test('buildQuestionBubbles emits header, instructions, passage, then question', 
 test('buildQuestionBubbles treats an unknown index as the first question', () => {
   const q = { id: 7, q_order: 3, type: 'objective', text: 'Q3', passage: 'Read the passage.' };
   assert.deepEqual(exam.buildQuestionBubbles({}, q, [], -1), [
+    'Reply with the letter of your answer (e.g. A, B, C, or D).',
     '*OBJECTIVE*',
     '*Instructions*\n\nRead the passage.',
     '*QUESTION 3*\n\nQ3',
@@ -571,6 +573,7 @@ test("buildQuestionBubbles keeps a later question's own instruction lines", () =
   const q2 = { id: 2, q_order: 2, type: 'objective', text: 'Q2', passage: 'Read the second passage.\nKofi stayed home.' };
   const seq = [q1, q2];
   assert.deepEqual(exam.buildQuestionBubbles({}, q1, seq, 0), [
+    'Reply with the letter of your answer (e.g. A, B, C, or D).',
     '*OBJECTIVE*',
     '*Instructions*\n\nRead the first passage.',
     'Ama went to the market.',
@@ -616,6 +619,7 @@ test('buildQuestionBubbles puts a PDF section heading in its own bubble before t
   const q2 = { id: 2, q_order: 2, type: 'objective', text: 'Q2', passage: '' };
   const seq = [q1, q2];
   assert.deepEqual(exam.buildQuestionBubbles({}, q1, seq, 0), [
+    'Reply with the letter of your answer (e.g. A, B, C, or D).',
     '*OBJECTIVE*',
     '*PART A, LEXIS AND STRUCTURE*',
     '*QUESTION 1*\n\nFrom the words lettered A to D, choose the one that best completes each sentence.',
@@ -630,6 +634,7 @@ test('buildQuestionBubbles splits a header off the top of a passage and emits it
   const q2 = { id: 2, q_order: 2, type: 'theory', text: 'Q2', passage };
   const seq = [q1, q2];
   assert.deepEqual(exam.buildQuestionBubbles({}, q1, seq, 0), [
+    'Type your full answer to each question as a single message.',
     '*THEORY*',
     '*SECTION B*',
     '*Instructions*\n\nAnswer ONE question in this section.\nWrite an essay on any one of the following topics.',

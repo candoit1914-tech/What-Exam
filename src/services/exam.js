@@ -364,6 +364,12 @@ function formatSectionInstructions(instructions) {
   return `*Instructions*\n\n${instructions}`;
 }
 
+/** Simple instructions shown before the first question of each type. */
+const SECTION_INTRO = {
+  objective: 'Reply with the letter of your answer (e.g. A, B, C, or D).',
+  theory: 'Type your full answer to each question as a single message.',
+};
+
 /**
  * The chat bubbles to send for one question: a section header (once per type,
  * before the first of its kind), the section instructions and reading passage
@@ -377,7 +383,10 @@ function buildQuestionBubbles(exam, question, sequence, index) {
   const type = question.type === 'theory' ? 'THEORY' : 'OBJECTIVE';
   const prev = index > 0 ? sequence.slice(0, index) : [];
   const firstOfType = !prev.some((q) => q.type === question.type);
-  if (firstOfType) bubbles.push(formatSectionHeader(type));
+  if (firstOfType) {
+    if (SECTION_INTRO[question.type]) bubbles.push(SECTION_INTRO[question.type]);
+    bubbles.push(formatSectionHeader(type));
+  }
 
   const clean = (p) => stripPaperOnlyInstructions(stripSourceWatermarks(p)).trim();
   // Dedupe keys are normalized (case + whitespace) so the same instruction or

@@ -173,6 +173,11 @@ CREATE INDEX IF NOT EXISTS idx_questions_exam ON questions(exam_id, q_order);
 CREATE INDEX IF NOT EXISTS idx_sessions_exam ON sessions(exam_id);
 CREATE INDEX IF NOT EXISTS idx_answers_session ON answers(session_id, q_order);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_schemes_question ON marking_schemes(question_id);
+-- Performance indexes for 80-100 concurrent students
+CREATE INDEX IF NOT EXISTS idx_sessions_exam_student ON sessions(exam_id, student_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status);
+CREATE INDEX IF NOT EXISTS idx_pool_exam ON question_pool(exam_id);
+CREATE INDEX IF NOT EXISTS idx_recipients_exam ON exam_recipients(exam_id);
 `;
 
 db.exec(SCHEMA);

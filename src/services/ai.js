@@ -398,6 +398,7 @@ Theory question schema:
 
 CRITICAL RULES:
 - You MUST return EXACTLY ${objN} objective questions and EXACTLY ${theoN} theory questions. Count them before returning. If you return fewer, the exam is broken.
+- ORDER: List all objective questions FIRST, then all theory questions. Do NOT mix them.
 - Options must have exactly one correct answer; distractors must be plausible.
 - correct_index is the 0-based index of the correct option.
 - CORRECTNESS IS NON-NEGOTIABLE: the option at correct_index must be the ONLY defensible correct answer. These keys are used to grade students, so a wrong key marks innocent students wrong.

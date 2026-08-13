@@ -491,8 +491,14 @@ router.post('/exams/:id/generate', asyncWrap(async (req, res) => {
     return res.status(502).json({ error: 'AI returned no questions. The provider may be rate-limited — try again in a few seconds.' });
   }
 
-  const active = generated.slice(0, n);
-  const variants = pool ? generated.slice(n) : [];
+  // Sort so objective questions come first, then theory — matches WhatsApp
+  // section delivery order (OBJECTIVE header, then THEORY header).
+  const sorted = [...generated].sort((a, b) => {
+    if (a.type === b.type) return 0;
+    return a.type === 'objective' ? -1 : 1;
+  });
+  const active = sorted.slice(0, n);
+  const variants = pool ? sorted.slice(n) : [];
 
   let nextOrder = (db.prepare('SELECT MAX(q_order) m FROM questions WHERE exam_id = ?').get(exam.id).m || 0) + 1;
   const insert = db.prepare(
