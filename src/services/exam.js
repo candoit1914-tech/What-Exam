@@ -542,6 +542,26 @@ async function sendQuestionTo(session, student) {
   }
   const sequence = sessionQuestionSequence(session);
   const index = sequence.findIndex((q) => q.id === question.id);
+
+  // When this is the first question of its type (objective or theory), send
+  // the section header and instructions as SEPARATE WhatsApp messages before
+  // any questions — so the student sees:
+  //   OBJECTIVE            ← section header bubble
+  //   Instructions...      ← instruction bubble
+  //   Q1, Q2, ...          ← question bubbles
+  //   THEORY               ← next section header
+  //   Instructions...
+  //   Q1, Q2, ...
+  const prev = index > 0 ? sequence.slice(0, index) : [];
+  const firstOfType = !prev.some((q) => q.type === question.type);
+  if (firstOfType) {
+    const type = question.type === 'theory' ? 'THEORY' : 'OBJECTIVE';
+    await wa.sendText(student.phone, `*${type}*`);
+    if (SECTION_INTRO[question.type]) {
+      await wa.sendText(student.phone, SECTION_INTRO[question.type]);
+    }
+  }
+
   // The question's diagram arrives first as its own image bubble; the text
   // and options follow. Rendering/send failures must never stall delivery,
   // so a diagram send error logs and continues.
@@ -550,7 +570,18 @@ async function sendQuestionTo(session, student) {
       console.error('[exam] image send failed (continued):', err.message);
     });
   }
+
+  // buildQuestionBubbles returns the question bubble (with any PDF passage
+  // headings, section instructions, or reading passage that haven't been
+  // sent yet). The section header and intro are already sent above for the
+  // first question, so buildQuestionBubbles only adds those when they are
+  // genuinely new — but we skip them here when firstOfType handled them.
   for (const bubble of buildQuestionBubbles(exam, question, sequence, index)) {
+    // Skip bubbles we already sent as separate messages above.
+    if (firstOfType) {
+      if (bubble === formatSectionHeader(question.type === 'theory' ? 'THEORY' : 'OBJECTIVE')) continue;
+      if (SECTION_INTRO[question.type] && bubble === SECTION_INTRO[question.type]) continue;
+    }
     await wa.sendText(student.phone, bubble);
   }
   if (question.type === 'objective') {

@@ -302,8 +302,13 @@ test('WhatsApp question delivery sends the diagram image before text when presen
     const sid = db.prepare("INSERT INTO sessions (exam_id, student_id, current_q_order, status) VALUES (?, ?, '1','in_progress')").run(examId, stud).lastInsertRowid;
     const session = db.prepare('SELECT * FROM sessions WHERE id = ?').get(sid);
     await examMod.sendQuestionTo(session, { phone: '233000000000' });
-    assert.equal(calls[0], 'image', 'image is the first WhatsApp bubble');
-    assert.ok(calls.slice(1).includes('text'), 'question text follows the image');
+    // New flow: section header and instructions are sent first as separate
+    // messages, then the diagram image, then question text.
+    assert.equal(calls[0], 'text', 'section header is the first bubble');
+    assert.ok(calls[1] === 'text' || calls[1] === 'image', 'instructions or image follows');
+    const imgIdx = calls.indexOf('image');
+    assert.ok(imgIdx >= 0, 'image is sent');
+    assert.ok(imgIdx < calls.length - 1, 'question text follows the image');
   } finally {
     db.exec('ROLLBACK');
     wa.sendImage = origImg; wa.sendText = origTxt;
