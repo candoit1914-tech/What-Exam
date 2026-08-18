@@ -725,6 +725,80 @@ router.get('/results/:sessionId/report-url', (req, res) => {
   res.json({ url: auth.reportUrl(session.id) });
 });
 
+// ── Exam attendance (participation list) ──────────────────────────
+
+router.get('/exams/:id/attendance', (req, res) => {
+  const exam = db.prepare('SELECT * FROM exams WHERE id = ?').get(req.params.id);
+  if (!exam) return res.status(404).json({ error: 'Exam not found' });
+
+  const recipients = db
+    .prepare(
+      `SELECT s.id, s.name, s.phone, r.sent_at
+       FROM exam_recipients r
+       JOIN students s ON s.id = r.student_id
+       WHERE r.exam_id = ?
+       ORDER BY s.name, s.phone`
+    )
+    .all(exam.id);
+
+  const sessions = db
+    .prepare(
+      `SELECT student_id, status, final_score, final_percentage, passed, started_at, ended_at
+       FROM sessions
+       WHERE exam_id = ?`
+    )
+    .all(exam.id);
+
+  // Map student_id -> session
+  const sessionMap = {};
+  for (const s of sessions) {
+    if (!sessionMap[s.student_id] || s.started_at > (sessionMap[s.student_id]?.started_at || '')) {
+      sessionMap[s.student_id] = s;
+    }
+  }
+
+  const participated = [];
+  const absent = [];
+
+  for (const r of recipients) {
+    const sess = sessionMap[r.id];
+    if (sess) {
+      const finished = ['completed', 'expired', 'ended'].includes(sess.status);
+      participated.push({
+        id: r.id,
+        name: r.name || '—',
+        phone: r.phone,
+        sent_at: r.sent_at,
+        status: sess.status,
+        score: finished ? sess.final_score : null,
+        percentage: finished ? sess.final_percentage : null,
+        passed: finished ? !!sess.passed : null,
+        started_at: sess.started_at,
+        ended_at: sess.ended_at,
+      });
+    } else {
+      absent.push({
+        id: r.id,
+        name: r.name || '—',
+        phone: r.phone,
+        sent_at: r.sent_at,
+      });
+    }
+  }
+
+  // Sort participated by score descending
+  participated.sort((a, b) => (b.score || 0) - (a.score || 0));
+
+  res.json({
+    exam: examSummary(exam),
+    total: recipients.length,
+    participated,
+    absent,
+    participatedCount: participated.length,
+    absentCount: absent.length,
+  });
+});
+
 // ── Students ───────────────────────────────────────────────────────────
 
 router.get('/students', (req, res) => {

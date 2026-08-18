@@ -453,6 +453,7 @@ const routes = {
   '/': renderDashboard,
   '/exams': renderExams,
   '/exams/:id': renderExam,
+  '/exams/:id/attendance': renderAttendance,
   '/results': renderResults,
   '/results/:id': renderResultDetail,
   '/students': renderStudents,
@@ -591,6 +592,7 @@ async function renderExam(id) {
       <div class="row">
         ${exam.status === 'draft' ? `<button class="btn btn-primary" onclick="publishExam(${exam.id})">Publish</button>` : ''}
         ${exam.status === 'live' ? `<button class="btn btn-ghost" onclick="endExam(${exam.id})">End Exam</button>` : ''}
+        ${['live', 'ended'].includes(exam.status) ? `<button class="btn btn-ghost" onclick="location.hash='#/exams/${exam.id}/attendance'">Attendance</button>` : ''}
         <button class="btn btn-ghost" onclick="editExamMeta(${exam.id})">Edit</button>
         <button class="btn btn-ghost danger" onclick="deleteExam(${exam.id})">Delete</button>
       </div>
@@ -1166,6 +1168,197 @@ async function sendExam(id) {
     toast(errList ? `${parts.join(', ')}. ${errList}` : parts.join(', ') + '.');
     renderExam(id);
   } catch (e) { toast(e.message, true); btn.disabled = false; btn.textContent = 'Send Exam to Recipients'; }
+}
+
+// ── Exam actions ─────────────────────────────────────────────────
+
+async function renderAttendance(id) {
+  $view.innerHTML = `
+    <div class="page-head"><div class="ic">${I.people}</div><h1>Loading…</h1></div>
+    <div class="card"><div class="skeleton skeleton-card"></div></div>`;
+
+  const data = await api(`/api/exams/${id}/attendance`);
+  const { exam, total, participated, absent, participatedCount, absentCount } = data;
+
+  $view.innerHTML = `
+    <div class="spread">
+      <div>
+        <h1>EXAM ATTENDANCE — ${esc(exam.title)}</h1>
+        <p class="muted" style="margin-top:4px">${esc(exam.subject)} · ${exam.total_marks} marks · ${exam.pass_percentage}% pass mark</p>
+      </div>
+      <div class="row">
+        <button class="btn btn-primary" onclick="printAttendance(${id})">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:17px;height:17px"><path d="M6 9V2h12v7"/><path d="M6 18H4a2 2 0 01-2-2v-5a2 2 0 012-2h16a2 2 0 012 2v5a2 2 0 01-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></svg>
+          Print List
+        </button>
+        <a href="#/exams/${id}"><button class="btn btn-ghost">Back to Exam</button></a>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:14px" id="attendance-summary">
+      <h3 style="margin-bottom:4px">PARTICIPATION <span class="gr">SUMMARY</span></h3>
+      <div class="row" style="margin-top:10px;gap:16px;flex-wrap:wrap">
+        <div><b>${total}</b> <span class="muted">Total Recipients</span></div>
+        <div><b style="color:var(--green,#10b981)">${participatedCount}</b> <span class="muted">Participated</span></div>
+        <div><b style="color:var(--red,#ef4444)">${absentCount}</b> <span class="muted">Absent</span></div>
+      </div>
+    </div>
+
+    <div class="card table-card" style="margin-top:14px" id="attendance-participated">
+      <h3 style="margin:0 0 10px 10px">PARTICIPATED <span class="gr">(${participatedCount})</span></h3>
+      ${participatedCount === 0 ? `<div class="empty-state">${I.empty}<p>No students participated in this exam.</p></div>` : `
+      <table>
+        <thead><tr>
+          <th>#</th>
+          <th>Name</th>
+          <th>Phone</th>
+          <th>Score</th>
+          <th>Percentage</th>
+          <th>Result</th>
+          <th>Status</th>
+          <th>Started</th>
+          <th>Ended</th>
+        </tr></thead>
+        <tbody>
+          ${participated.map((s, i) => `<tr>
+            <td>${i + 1}</td>
+            <td>${esc(s.name)}</td>
+            <td>${esc(s.phone)}</td>
+            <td>${s.score != null ? s.score : '—'}</td>
+            <td>${s.percentage != null ? s.percentage + '%' : '—'}</td>
+            <td>${s.passed != null ? (s.passed ? '<span class="pass">PASS</span>' : '<span class="fail">FAIL</span>') : '—'}</td>
+            <td>${badge(s.status)}</td>
+            <td class="muted">${s.started_at || '—'}</td>
+            <td class="muted">${s.ended_at || '—'}</td>
+          </tr>`).join('')}
+        </tbody>
+      </table>`}
+    </div>
+
+    <div class="card table-card" style="margin-top:14px" id="attendance-absent">
+      <h3 style="margin:0 0 10px 10px">ABSENT <span class="gr">(${absentCount})</span></h3>
+      ${absentCount === 0 ? `<div class="empty-state">${I.empty}<p>All recipients participated.</p></div>` : `
+      <table>
+        <thead><tr>
+          <th>#</th>
+          <th>Name</th>
+          <th>Phone</th>
+          <th>Sent At</th>
+        </tr></thead>
+        <tbody>
+          ${absent.map((s, i) => `<tr>
+            <td>${i + 1}</td>
+            <td>${esc(s.name)}</td>
+            <td>${esc(s.phone)}</td>
+            <td class="muted">${s.sent_at || '—'}</td>
+          </tr>`).join('')}
+        </tbody>
+      </table>`}
+    </div>`;
+
+  observeReveals();
+}
+
+function printAttendance(id) {
+  // Fetch the data again for printing
+  api(`/api/exams/${id}/attendance`).then(data => {
+    const { exam, total, participated, absent, participatedCount, absentCount } = data;
+    const printWindow = window.open('', '_blank');
+    
+    printWindow.document.write(`
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>Exam Attendance - ${exam.title}</title>
+        <style>
+          * { box-sizing: border-box; margin: 0; padding: 0; }
+          body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; padding: 24px; color: #111; }
+          h1 { font-size: 20px; margin-bottom: 4px; }
+          h3 { font-size: 14px; margin-bottom: 10px; }
+          .sub { color: #666; font-size: 13px; margin-bottom: 16px; }
+          .gr { color: #059669; }
+          .summary { display: flex; gap: 20px; margin-bottom: 20px; padding: 12px; border: 1px solid #ddd; border-radius: 8px; }
+          .summary div { font-size: 14px; }
+          .summary b { font-size: 18px; }
+          .muted { color: #888; }
+          table { width: 100%; border-collapse: collapse; font-size: 12px; margin-bottom: 20px; }
+          th, td { padding: 8px 10px; border: 1px solid #ddd; text-align: left; }
+          th { background: #f5f5f5; font-weight: 600; }
+          .pass { color: #059669; font-weight: 700; }
+          .fail { color: #dc2626; font-weight: 700; }
+          .section-title { font-size: 15px; font-weight: 600; margin: 16px 0 8px; }
+          .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 10px; font-weight: 600; }
+          .badge.completed { background: #d1fae5; color: #065f46; }
+          .badge.expired { background: #fee2e2; color: #991b1b; }
+          .badge.in_progress { background: #dbeafe; color: #1e40af; }
+          .empty { color: #888; font-style: italic; padding: 12px; }
+          @media print { body { padding: 16px; } }
+        </style>
+      </head>
+      <body>
+        <h1>EXAM ATTENDANCE LIST</h1>
+        <div class="sub">${exam.title} — ${exam.subject || 'No subject'} · ${new Date().toLocaleDateString()}</div>
+        <div class="summary">
+          <div><b>${total}</b> <span class="muted">Total Recipients</span></div>
+          <div><b style="color:#059669">${participatedCount}</b> <span class="muted">Participated</span></div>
+          <div><b style="color:#dc2626">${absentCount}</b> <span class="muted">Absent</span></div>
+        </div>
+        
+        <div class="section-title">PARTICIPATED (${participatedCount})</div>
+        ${participatedCount === 0 ? '<div class="empty">No students participated in this exam.</div>' : `
+        <table>
+          <thead><tr>
+            <th>#</th>
+            <th>Name</th>
+            <th>Phone</th>
+            <th>Score</th>
+            <th>Percentage</th>
+            <th>Result</th>
+            <th>Status</th>
+            <th>Started</th>
+            <th>Ended</th>
+          </tr></thead>
+          <tbody>
+            ${participated.map((s, i) => `<tr>
+              <td>${i + 1}</td>
+              <td>${s.name}</td>
+              <td>${s.phone}</td>
+              <td>${s.score != null ? s.score : '—'}</td>
+              <td>${s.percentage != null ? s.percentage + '%' : '—'}</td>
+              <td>${s.passed != null ? (s.passed ? '<span class="pass">PASS</span>' : '<span class="fail">FAIL</span>') : '—'}</td>
+              <td><span class="badge ${s.status}">${s.status}</span></td>
+              <td class="muted">${s.started_at || '—'}</td>
+              <td class="muted">${s.ended_at || '—'}</td>
+            </tr>`).join('')}
+          </tbody>
+        </table>`}
+        
+        <div class="section-title">ABSENT (${absentCount})</div>
+        ${absentCount === 0 ? '<div class="empty">All recipients participated.</div>' : `
+        <table>
+          <thead><tr>
+            <th>#</th>
+            <th>Name</th>
+            <th>Phone</th>
+            <th>Sent At</th>
+          </tr></thead>
+          <tbody>
+            ${absent.map((s, i) => `<tr>
+              <td>${i + 1}</td>
+              <td>${s.name}</td>
+              <td>${s.phone}</td>
+              <td class="muted">${s.sent_at || '—'}</td>
+            </tr>`).join('')}
+          </tbody>
+        </table>`}
+      </body>
+      </html>
+    `);
+    printWindow.document.close();
+    printWindow.print();
+  }).catch(e => {
+    toast('Failed to load attendance data: ' + e.message, true);
+  });
 }
 
 // ── Exam actions ─────────────────────────────────────────────────
