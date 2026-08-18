@@ -313,16 +313,40 @@ function parseWebhook(body) {
  */
 async function downloadMedia(mediaId) {
   if (!mediaId) throw new Error('No media id');
-  const meta = await request(`${GRAPH}/v21.0/${mediaId}`, {
-    headers: waHeaders(),
-    timeoutMs: 60000,
-  });
+
+  // Step 1: GET media metadata (requires GET, not POST)
+  const metaUrl = `${GRAPH}/v21.0/${mediaId}`;
+  const authHeader = { Authorization: `Bearer ${config.whatsapp.accessToken}` };
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 60000);
+  let metaRes;
+  try {
+    metaRes = await fetch(metaUrl, {
+      method: 'GET',
+      headers: authHeader,
+      signal: ctrl.signal,
+    });
+  } catch (err) {
+    clearTimeout(timer);
+    throw new Error(`WhatsApp media metadata request failed: ${err.message}`);
+  }
+  clearTimeout(timer);
+
+  if (!metaRes.ok) {
+    const errData = await metaRes.json().catch(() => ({}));
+    throw new Error(`WhatsApp media metadata error ${metaRes.status}: ${JSON.stringify(errData).slice(0, 200)}`);
+  }
+
+  const meta = await metaRes.json();
   const url = meta?.url;
   if (!url) throw new Error(`WhatsApp media meta missing url: ${JSON.stringify(meta).slice(0, 200)}`);
-  const res = await fetch(url, { headers: waHeaders() });
-  if (!res.ok) throw new Error(`WhatsApp media download failed (${res.status})`);
+
+  // Step 2: Download the actual image bytes from the expiring URL
+  const imgRes = await fetch(url, { headers: authHeader });
+  if (!imgRes.ok) throw new Error(`WhatsApp media download failed (${imgRes.status})`);
+
   return {
-    buffer: Buffer.from(await res.arrayBuffer()),
+    buffer: Buffer.from(await imgRes.arrayBuffer()),
     mimeType: meta.mime_type || '',
   };
 }

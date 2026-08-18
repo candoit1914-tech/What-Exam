@@ -873,23 +873,34 @@ async function handleAnswer(exam, session, student, question, body, meta = {}) {
     let answerText = body;
     let answerImage = '';
     if (meta.mediaType === 'image') {
+      console.log(`[exam] Received image from ${student.phone}, mediaId=${meta.mediaId}`);
       try {
-        const { buffer } = await wa.downloadMedia(meta.mediaId);
+        if (!meta.mediaId) {
+          throw new Error('No media ID in image message');
+        }
+        const { buffer, mimeType } = await wa.downloadMedia(meta.mediaId);
         if (!buffer || buffer.length === 0) {
           throw new Error('Downloaded image buffer is empty');
         }
+        console.log(`[exam] Downloaded image: ${buffer.length} bytes, mimeType=${mimeType}`);
         // Save the raw image directly — no canvas re-rendering needed.
         // Accept jpg, png, webp, etc. as-is from WhatsApp.
-        const ext = meta.mimeType?.includes('png') ? 'png'
-          : meta.mimeType?.includes('webp') ? 'webp'
-          : meta.mimeType?.includes('gif') ? 'gif'
+        const ext = mimeType?.includes('png') ? 'png'
+          : mimeType?.includes('webp') ? 'webp'
+          : mimeType?.includes('gif') ? 'gif'
           : 'jpg';
         answerImage = `${session.id}-${question.q_order}-${Date.now()}.${ext}`;
         fs.writeFileSync(path.join(config.uploadsDir, answerImage), buffer);
         answerText = (body || '').trim() || '(photo answer)';
+        console.log(`[exam] Saved photo answer as ${answerImage}`);
       } catch (err) {
-        console.error('[exam] photo answer download/render failed:', err.message, err.stack);
-        await wa.sendText(student.phone, 'Sorry, I could not receive your photo. Please try again.');
+        console.error('[exam] photo answer download/render failed:', err.message);
+        console.error('[exam] Full error:', err.stack);
+        // Try to send a more helpful error message
+        const errorMsg = err.message.includes('metadata')
+          ? 'Sorry, I could not process your photo. The image may be too large or the connection timed out. Please try sending a smaller photo.'
+          : 'Sorry, I could not receive your photo. Please try again.';
+        await wa.sendText(student.phone, errorMsg);
         return false;
       }
     }
