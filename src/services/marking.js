@@ -221,7 +221,8 @@ async function markTheoryImageAnswer(question, studentAnswer, imageFile, scheme)
       // Fallback: just read the text, then mark it
       const readResult = await puter.readPhotoAnswer(imageFile, question.text, question.type);
       if (readResult.success && readResult.answerText && readResult.answerText !== '[unreadable]') {
-        const textResult = markTheoryAnswer({
+        const textResult = await markTheoryAnswer({
+          id: question.id,
           text: question.text,
           passage: question.passage || '',
           marks: total,
