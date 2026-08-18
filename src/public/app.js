@@ -702,7 +702,21 @@ async function renderTab() {
         .filter((s) => ['completed', 'expired', 'ended'].includes(s.status))
         .map(async (s) => { urls[s.id] = await reportUrl(s.id).catch(() => null); })
     );
-    bodyEl.innerHTML = `<div class="card table-card"><table>
+    const finishedCount = results.filter((s) => ['completed', 'expired', 'ended'].includes(s.status)).length;
+    bodyEl.innerHTML = `
+      ${finishedCount > 0 ? `
+      <div class="card" style="margin-bottom:14px">
+        <div class="spread">
+          <div>
+            <h3 style="margin-bottom:2px">RESEND <span class="gr">RESULTS</span></h3>
+            <p class="muted" style="font-size:12.5px">Send result messages and certificates to all ${finishedCount} participant(s) again.</p>
+          </div>
+          <button class="btn btn-ghost" onclick="bulkResendResults(${id})">
+            ${I.wa} Resend All Results & Certificates
+          </button>
+        </div>
+      </div>` : ''}
+      <div class="card table-card"><table>
       <thead><tr><th>Student</th><th>Phone</th><th>Score</th><th>%</th><th>Result</th><th>Status</th><th>Started</th><th></th></tr></thead>
       <tbody>
         ${results.length === 0 ? `<tr><td colspan="8"><div class="empty-state">${I.empty}<p>No sessions yet. Send the exam to recipients to begin.</p></div></td></tr>` : ''}
@@ -1508,8 +1522,28 @@ async function saveMarks(sessionId, answerId) {
 async function resendResult(id) {
   try {
     await api(`/api/results/${id}/resend`, { method: 'POST' });
-    toast('Result sent via WhatsApp.');
+    toast('Result and certificate sent via WhatsApp.');
   } catch (e) { toast(e.message, true); }
+}
+
+async function bulkResendResults(examId) {
+  if (!confirm('Resend results and certificates to ALL participants who finished this exam?')) return;
+  const btn = event.currentTarget;
+  btn.disabled = true;
+  btn.textContent = 'Sending…';
+  try {
+    const report = await api(`/api/exams/${examId}/resend-all`, { method: 'POST' });
+    invalidateCache('/api/results');
+    const parts = [`Sent ${report.sent}/${report.total}`];
+    if (report.failed) parts.push(`failed ${report.failed}`);
+    toast(parts.join(', ') + '.');
+    btn.disabled = false;
+    btn.textContent = 'Resend All Results & Certificates';
+  } catch (e) {
+    toast(e.message, true);
+    btn.disabled = false;
+    btn.textContent = 'Resend All Results & Certificates';
+  }
 }
 
 // ── Students ─────────────────────────────────────────────────────

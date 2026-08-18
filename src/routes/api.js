@@ -832,8 +832,16 @@ router.post('/results/:sessionId/resend', asyncWrap(async (req, res) => {
   const session = db.prepare('SELECT * FROM sessions WHERE id = ?').get(req.params.sessionId);
   if (!session) return res.status(404).json({ error: 'Session not found' });
   const student = db.prepare('SELECT * FROM students WHERE id = ?').get(session.student_id);
-  await results.sendResultMessage(session.id, student.phone, session.status);
+  await results.sendResultAndCertificate(session.id, student.phone, session.status);
   res.json({ ok: true });
+}));
+
+// Bulk resend results + certificates for all finished sessions in an exam
+router.post('/exams/:id/resend-all', asyncWrap(async (req, res) => {
+  const exam = db.prepare('SELECT * FROM exams WHERE id = ?').get(req.params.id);
+  if (!exam) return res.status(404).json({ error: 'Exam not found' });
+  const report = await results.bulkResendResults(req.params.id);
+  res.json(report);
 }));
 
 module.exports = router;

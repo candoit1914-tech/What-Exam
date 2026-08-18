@@ -2,6 +2,7 @@ const db = require('../db');
 const config = require('../config');
 const wa = require('./whatsapp');
 const auth = require('../auth');
+const certificate = require('./certificate');
 
 function computeForSession(sessionId) {
   const session = db.prepare('SELECT * FROM sessions WHERE id = ?').get(sessionId);
@@ -351,4 +352,62 @@ function esc(s) {
     .replace(/>/g, '&gt;');
 }
 
-module.exports = { computeForSession, persistSessionTotals, sendResultMessage, reportHTML };
+/**
+ * Resend result message and certificate to a single student.
+ * Used by both individual resend and bulk resend.
+ */
+async function sendResultAndCertificate(sessionId, phone, reason) {
+  await sendResultMessage(sessionId, phone, reason);
+
+  if (config.exam.sendCertificates) {
+    try {
+      const session = db.prepare('SELECT * FROM sessions WHERE id = ?').get(sessionId);
+      const student = db.prepare('SELECT * FROM students WHERE id = ?').get(session.student_id);
+      const r = computeForSession(sessionId);
+      const png = await certificate.renderCertificatePng({
+        studentName: student.name || student.phone,
+        examTitle: r.exam.title,
+        subject: r.exam.subject,
+        date: session.ended_at ? new Date(session.ended_at) : new Date(),
+        score: r.score,
+        totalMarks: r.totalMarks,
+        percentage: r.percentage,
+        passed: r.passed,
+      });
+      await wa.sendImage(phone, png);
+    } catch (err) {
+      console.error(`[results] certificate resend failed for ${phone}:`, err.message);
+    }
+  }
+}
+
+/**
+ * Bulk resend results + certificates to all finished sessions for an exam.
+ * Returns a report with sent/failed counts.
+ */
+async function bulkResendResults(examId) {
+  const sessions = db
+    .prepare(
+      `SELECT s.*, st.phone, st.name FROM sessions s
+       JOIN students st ON st.id = s.student_id
+       WHERE s.exam_id = ? AND s.status IN ('completed','expired','ended')
+       ORDER BY s.ended_at DESC`
+    )
+    .all(examId);
+
+  const report = { total: sessions.length, sent: 0, failed: 0, errors: [] };
+
+  for (const sess of sessions) {
+    try {
+      await sendResultAndCertificate(sess.id, sess.phone, sess.status);
+      report.sent++;
+    } catch (err) {
+      report.failed++;
+      report.errors.push({ phone: sess.phone, name: sess.name, error: err.message });
+    }
+  }
+
+  return report;
+}
+
+module.exports = { computeForSession, persistSessionTotals, sendResultMessage, sendResultAndCertificate, bulkResendResults, reportHTML };
