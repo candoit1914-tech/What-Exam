@@ -193,42 +193,40 @@ async function markTheoryAnswer(question, studentAnswer, scheme) {
 
 /**
  * Grade a photo (written/drawn) theory answer.
- * Tries Puter.js vision first, then AI providers.
+ * Uses local OCR (tesseract.js) to read text, then marks against scheme.
  * Never throws.
  */
 async function markTheoryImageAnswer(question, studentAnswer, imageFile, scheme) {
   const total = Number(question.marks) || 0;
   const review = { marksAwarded: 0, maxMarks: total, needsReview: true, feedback: 'Photo answer awaiting manual review.', aiGenerated: false };
 
-  // Try Puter.js vision first
-  const puter = require('./puter');
-  if (puter.isConfigured()) {
-    try {
-      const readText = await puter.readPhotoAnswer(imageFile, question.text);
-      if (readText && readText !== '[unreadable]') {
-        const textResult = await markTheoryAnswer({
-          id: question.id,
-          text: question.text,
-          passage: question.passage || '',
-          marks: total,
-          type: 'theory',
-        }, readText, scheme);
-        return {
-          marksAwarded: textResult.marksAwarded,
-          maxMarks: textResult.maxMarks,
-          breakdown: textResult.breakdown || [],
-          feedback: textResult.feedback || `Photo read: ${readText.slice(0, 150)}`,
-          aiGenerated: true,
-          aiReason: 'puter_vision',
-          needsReview: false,
-        };
-      }
-    } catch (err) {
-      console.error('[marking] Puter.js vision failed:', err.message);
+  // Try local OCR first (tesseract.js)
+  const ocr = require('./ocr');
+  try {
+    const ocrResult = await ocr.readPhotoAnswer(imageFile, question.text);
+    if (ocrResult.success && ocrResult.text && ocrResult.text !== '[unreadable]' && ocrResult.text.length > 1) {
+      const textResult = await markTheoryAnswer({
+        id: question.id,
+        text: question.text,
+        passage: question.passage || '',
+        marks: total,
+        type: 'theory',
+      }, ocrResult.text, scheme);
+      return {
+        marksAwarded: textResult.marksAwarded,
+        maxMarks: textResult.maxMarks,
+        breakdown: textResult.breakdown || [],
+        feedback: textResult.feedback || `OCR read (${ocrResult.confidence}% conf): ${ocrResult.text.slice(0, 150)}`,
+        aiGenerated: true,
+        aiReason: 'local_ocr',
+        needsReview: false,
+      };
     }
+  } catch (err) {
+    console.error('[marking] Local OCR failed:', err.message);
   }
 
-  // Fallback to AI providers
+  // Fallback to AI vision providers
   if (ai.aiConfigured()) {
     try {
       const readText = await ai.readPhotoAnswer(imageFile, question.text);
@@ -244,7 +242,7 @@ async function markTheoryImageAnswer(question, studentAnswer, imageFile, scheme)
           marksAwarded: textResult.marksAwarded,
           maxMarks: textResult.maxMarks,
           breakdown: textResult.breakdown || [],
-          feedback: textResult.feedback || `Photo read: ${readText.slice(0, 150)}`,
+          feedback: textResult.feedback || `AI read: ${readText.slice(0, 150)}`,
           aiGenerated: true,
           aiReason: 'ai_vision',
           needsReview: false,
@@ -255,6 +253,7 @@ async function markTheoryImageAnswer(question, studentAnswer, imageFile, scheme)
     }
   }
 
+  // No vision available — needs manual review
   return review;
 }
 

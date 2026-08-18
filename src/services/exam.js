@@ -7,7 +7,7 @@ const marking = require('./marking');
 const results = require('./results');
 const certificate = require('./certificate');
 const ai = require('./ai');
-const puter = require('./puter');
+const ocr = require('./ocr');
 const { stripSourceWatermarks } = require('./textClean');
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -895,26 +895,25 @@ async function handleAnswer(exam, session, student, question, body, meta = {}) {
         fs.writeFileSync(path.join(config.uploadsDir, answerImage), buffer);
         console.log(`[exam] Saved photo answer as ${answerImage}`);
 
-        // Use AI vision to read the handwritten answer from the photo
-        // Try Puter.js first (GPT-4o-mini supports vision), then AI providers
+        // Read the handwritten answer from the photo
+        // Primary: local OCR (tesseract.js) — always works, no API needed
+        // Fallback: AI providers with vision support
         let readSuccess = false;
-        if (puter.isConfigured()) {
-          try {
-            console.log(`[exam] Using Puter.js vision to read photo answer...`);
-            const readText = await puter.readPhotoAnswer(answerImage, question.text);
-            if (readText && readText !== '[unreadable]') {
-              answerText = readText;
-              puterRead = true;
-              readSuccess = true;
-              console.log(`[puter] Read answer: ${answerText.slice(0, 150)}...`);
-            }
-          } catch (err) {
-            console.error(`[puter] Vision read failed: ${err.message}`);
+        try {
+          console.log(`[exam] Reading photo with local OCR (tesseract.js)...`);
+          const ocrResult = await ocr.readPhotoAnswer(answerImage, question.text);
+          if (ocrResult.success && ocrResult.text && ocrResult.text !== '[unreadable]' && ocrResult.text.length > 1) {
+            answerText = ocrResult.text;
+            puterRead = true;
+            readSuccess = true;
+            console.log(`[ocr] Read answer (${ocrResult.confidence}% conf): ${answerText.slice(0, 150)}...`);
           }
+        } catch (err) {
+          console.error(`[ocr] Read failed: ${err.message}`);
         }
         if (!readSuccess && ai.aiConfigured()) {
           try {
-            console.log(`[exam] Falling back to AI providers for photo read...`);
+            console.log(`[exam] Falling back to AI vision...`);
             const readText = await ai.readPhotoAnswer(answerImage, question.text);
             if (readText && readText !== '[unreadable]') {
               answerText = readText;
@@ -955,19 +954,21 @@ async function handleAnswer(exam, session, student, question, body, meta = {}) {
         // Step 1: If not already read, read the handwritten text from the photo
         if (!puterRead) {
           let readText = null;
-          // Try Puter.js first
-          if (puter.isConfigured()) {
-            try {
-              console.log(`[exam] Reading photo answer with Puter.js vision...`);
-              readText = await puter.readPhotoAnswer(answerImage, question.text);
-            } catch (err) {
-              console.error(`[puter] Read failed: ${err.message}`);
+          // Try local OCR first (tesseract.js)
+          try {
+            console.log(`[exam] Reading photo with local OCR...`);
+            const ocrResult = await ocr.readPhotoAnswer(answerImage, question.text);
+            if (ocrResult.success && ocrResult.text && ocrResult.text !== '[unreadable]' && ocrResult.text.length > 1) {
+              readText = ocrResult.text;
+              console.log(`[ocr] Read (${ocrResult.confidence}% conf): "${readText.slice(0, 200)}"`);
             }
+          } catch (err) {
+            console.error(`[ocr] Read failed: ${err.message}`);
           }
-          // Fallback to AI providers
+          // Fallback to AI vision providers
           if (!readText && ai.aiConfigured()) {
             try {
-              console.log(`[exam] Falling back to AI providers...`);
+              console.log(`[exam] Falling back to AI vision...`);
               readText = await ai.readPhotoAnswer(answerImage, question.text);
             } catch (err) {
               console.error(`[ai] Read failed: ${err.message}`);
@@ -1088,19 +1089,21 @@ async function markAllPendingTheory(sessionId) {
     }
     let marked;
     if (a.answer_image) {
-      // Photo answer: read with vision, then mark with AI
+      // Photo answer: read with local OCR, then mark with AI
       try {
         let readText = null;
         console.log(`[exam] Marking pending photo answer ${a.id}...`);
-        // Try Puter.js first
-        if (puter.isConfigured()) {
-          try {
-            readText = await puter.readPhotoAnswer(a.answer_image, question.text);
-          } catch (err) {
-            console.error(`[puter] Pending read failed: ${err.message}`);
+        // Try local OCR first
+        try {
+          const ocrResult = await ocr.readPhotoAnswer(a.answer_image, question.text);
+          if (ocrResult.success && ocrResult.text && ocrResult.text !== '[unreadable]' && ocrResult.text.length > 1) {
+            readText = ocrResult.text;
+            console.log(`[ocr] Pending read (${ocrResult.confidence}% conf): "${readText.slice(0, 150)}"`);
           }
+        } catch (err) {
+          console.error(`[ocr] Pending read failed: ${err.message}`);
         }
-        // Fallback to AI providers
+        // Fallback to AI vision providers
         if (!readText && ai.aiConfigured()) {
           try {
             readText = await ai.readPhotoAnswer(a.answer_image, question.text);
