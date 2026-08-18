@@ -192,35 +192,21 @@ async function markTheoryAnswer(question, studentAnswer, scheme) {
 }
 
 /**
- * Grade a photo (written/drawn) theory answer. With AI_VISION enabled the
- * image is sent to the vision-capable endpoint; any failure — or a text-only
- * provider — results in needsReview=true so the admin grades it manually.
- * Uses Puter.js vision when configured for honest, precise reading.
+ * Grade a photo (written/drawn) theory answer.
+ * Uses Puter.js vision to read the text, then marks it against the scheme.
  * Never throws.
  */
 async function markTheoryImageAnswer(question, studentAnswer, imageFile, scheme) {
   const total = Number(question.marks) || 0;
   const review = { marksAwarded: 0, maxMarks: total, needsReview: true, feedback: 'Photo answer awaiting manual review.', aiGenerated: false };
 
-  // Try Puter.js vision first for honest, precise reading
+  // Try Puter.js vision to read the text
   const puter = require('./puter');
   if (puter.isConfigured()) {
     try {
-      const visionResult = await puter.readAndMarkPhotoAnswer(imageFile, question, scheme);
-      if (visionResult.success) {
-        return {
-          marksAwarded: visionResult.marksAwarded,
-          maxMarks: visionResult.maxMarks,
-          breakdown: [],
-          feedback: visionResult.feedback || `Photo read: ${visionResult.answerText?.slice(0, 150) || ''}`,
-          aiGenerated: true,
-          aiReason: 'puter_vision',
-          needsReview: false,
-        };
-      }
-      // Fallback: just read the text, then mark it
       const readResult = await puter.readPhotoAnswer(imageFile, question.text, question.type);
       if (readResult.success && readResult.answerText && readResult.answerText !== '[unreadable]') {
+        // Mark the read text using the AI marking pipeline
         const textResult = await markTheoryAnswer({
           id: question.id,
           text: question.text,
@@ -240,41 +226,12 @@ async function markTheoryImageAnswer(question, studentAnswer, imageFile, scheme)
         };
       }
     } catch (err) {
-      console.error('[marking] Puter.js vision marking failed, trying fallback:', err.message);
+      console.error('[marking] Puter.js vision marking failed:', err.message);
     }
   }
 
-  // Fallback to AI_VISION endpoint
-  if (!config.ai.vision) return review;
-  try {
-    const full = imageFile && !path.isAbsolute(imageFile) ? path.join(config.uploadsDir, imageFile) : imageFile;
-    const imageBase64 = fs.readFileSync(full).toString('base64');
-    const sch = scheme || getScheme(question.id);
-    const result = await ai.markImageTheory({
-      questionText: question.text,
-      passage: question.passage || '',
-      modelAnswer: sch?.model_answer || '',
-      keyPoints: sch?.key_points || [],
-      rubric: sch?.rubric || [],
-      presentationMarks: sch?.presentation_marks || 0,
-      grammarMarks: sch?.grammar_marks || 0,
-      maxMarks: total,
-      studentAnswer,
-      imageBase64,
-    });
-    return {
-      marksAwarded: result.marksAwarded,
-      maxMarks: result.maxMarks,
-      breakdown: result.breakdown || [],
-      feedback: result.feedback || '',
-      aiGenerated: !!result.aiGenerated,
-      aiReason: result.aiReason || '',
-      needsReview: false,
-    };
-  } catch (err) {
-    console.error('[marking] vision grading failed, flagged for manual review:', err.message);
-    return review;
-  }
+  // No vision available — needs manual review
+  return review;
 }
 
 // ── Exam totals ────────────────────────────────────────────────────────
