@@ -193,19 +193,18 @@ async function markTheoryAnswer(question, studentAnswer, scheme) {
 
 /**
  * Grade a photo (written/drawn) theory answer.
- * Uses Puter.js vision to read the text, then marks it against the scheme.
+ * Uses AI vision to read the text, then marks it against the scheme.
  * Never throws.
  */
 async function markTheoryImageAnswer(question, studentAnswer, imageFile, scheme) {
   const total = Number(question.marks) || 0;
   const review = { marksAwarded: 0, maxMarks: total, needsReview: true, feedback: 'Photo answer awaiting manual review.', aiGenerated: false };
 
-  // Try Puter.js vision to read the text
-  const puter = require('./puter');
-  if (puter.isConfigured()) {
+  // Try AI vision to read the text
+  if (ai.aiConfigured()) {
     try {
-      const readResult = await puter.readPhotoAnswer(imageFile, question.text, question.type);
-      if (readResult.success && readResult.answerText && readResult.answerText !== '[unreadable]') {
+      const readText = await ai.readPhotoAnswer(imageFile, question.text);
+      if (readText && readText !== '[unreadable]') {
         // Mark the read text using the AI marking pipeline
         const textResult = await markTheoryAnswer({
           id: question.id,
@@ -213,20 +212,20 @@ async function markTheoryImageAnswer(question, studentAnswer, imageFile, scheme)
           passage: question.passage || '',
           marks: total,
           type: 'theory',
-        }, readResult.answerText, scheme);
+        }, readText, scheme);
 
         return {
           marksAwarded: textResult.marksAwarded,
           maxMarks: textResult.maxMarks,
           breakdown: textResult.breakdown || [],
-          feedback: textResult.feedback || `Photo read: ${readResult.answerText.slice(0, 150)}`,
+          feedback: textResult.feedback || `Photo read: ${readText.slice(0, 150)}`,
           aiGenerated: true,
-          aiReason: 'puter_vision',
+          aiReason: 'ai_vision',
           needsReview: false,
         };
       }
     } catch (err) {
-      console.error('[marking] Puter.js vision marking failed:', err.message);
+      console.error('[marking] AI vision marking failed:', err.message);
     }
   }
 

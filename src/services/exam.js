@@ -7,7 +7,6 @@ const marking = require('./marking');
 const results = require('./results');
 const certificate = require('./certificate');
 const ai = require('./ai');
-const puter = require('./puter');
 const { stripSourceWatermarks } = require('./textClean');
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -895,17 +894,22 @@ async function handleAnswer(exam, session, student, question, body, meta = {}) {
         fs.writeFileSync(path.join(config.uploadsDir, answerImage), buffer);
         console.log(`[exam] Saved photo answer as ${answerImage}`);
 
-        // Use Puter.js vision to read the handwritten answer from the photo
-        if (puter.isConfigured()) {
-          console.log(`[exam] Using Puter.js vision to read photo answer...`);
-          const visionResult = await puter.readPhotoAnswer(answerImage, question.text, question.type);
-          if (visionResult.success && visionResult.answerText) {
-            answerText = visionResult.answerText;
-            puterRead = true;
-            console.log(`[puter] Read answer: ${answerText.slice(0, 150)}...`);
-          } else {
-            console.log(`[puter] Vision read failed or empty: ${visionResult.error || 'no text found'}`);
-            answerText = (body || '').trim() || '(photo answer - awaiting manual review)';
+        // Use AI vision to read the handwritten answer from the photo
+        if (ai.aiConfigured()) {
+          console.log(`[exam] Using AI vision to read photo answer...`);
+          try {
+            const readText = await ai.readPhotoAnswer(answerImage, question.text);
+            if (readText && readText !== '[unreadable]') {
+              answerText = readText;
+              puterRead = true;
+              console.log(`[ai] Read answer: ${answerText.slice(0, 150)}...`);
+            } else {
+              console.log(`[ai] Vision read returned unreadable or empty`);
+              answerText = (body || '').trim() || '(photo answer - could not read)';
+            }
+          } catch (readErr) {
+            console.error(`[ai] Vision read failed:`, readErr.message);
+            answerText = (body || '').trim() || '(photo answer - read failed)';
           }
         } else {
           answerText = (body || '').trim() || '(photo answer)';
@@ -923,8 +927,8 @@ async function handleAnswer(exam, session, student, question, body, meta = {}) {
     }
     const context = [question.passage, question.text].filter(Boolean).join('\n\n');
 
-    // PHOTO ANSWER: Read with Puter.js, then mark with AI
-    if (answerImage && puter.isConfigured()) {
+    // PHOTO ANSWER: Read with AI vision, then mark with AI
+    if (answerImage && ai.aiConfigured()) {
       let markedBy = 'pending';
       let marksAwarded = 0;
       let maxMarks = question.marks;
@@ -933,40 +937,39 @@ async function handleAnswer(exam, session, student, question, body, meta = {}) {
       let aiDetected = 0;
 
       try {
-        // Step 1: Read the handwritten text from the photo
-        console.log(`[exam] Reading photo answer with Puter.js vision...`);
-        const readResult = await puter.readPhotoAnswer(answerImage, question.text, question.type);
-
-        if (readResult.success && readResult.answerText && readResult.answerText !== '[unreadable]') {
-          answerText = readResult.answerText;
-          console.log(`[exam] Puter.js read: "${answerText.slice(0, 200)}"`);
-
-          // Step 2: Mark the read text against the marking scheme using AI
-          try {
-            const scheme = marking.getScheme(question.id);
-            const marked = await marking.markTheoryAnswer({
-              id: question.id,
-              text: question.text,
-              passage: question.passage || '',
-              marks: question.marks,
-              type: 'theory',
-            }, answerText, scheme);
-
-            markedBy = 'ai';
-            marksAwarded = marked.marksAwarded;
-            maxMarks = marked.maxMarks;
-            aiFeedback = marked.feedback || '';
-            needsReview = 0;
-            console.log(`[exam] Photo answer marked: ${marksAwarded}/${maxMarks}`);
-          } catch (markErr) {
-            console.error(`[exam] AI marking failed for photo answer:`, markErr.message);
-            // Still store the read text — at least the admin can see it
-            aiFeedback = `Read: ${answerText.slice(0, 200)}. AI marking failed: ${markErr.message}`;
+        // Step 1: If not already read, read the handwritten text from the photo
+        if (!puterRead) {
+          console.log(`[exam] Reading photo answer with AI vision...`);
+          const readText = await ai.readPhotoAnswer(answerImage, question.text);
+          if (readText && readText !== '[unreadable]') {
+            answerText = readText;
+            console.log(`[ai] Read: "${answerText.slice(0, 200)}"`);
+          } else {
+            console.log(`[ai] Could not read photo answer`);
+            answerText = answerText || '(photo answer - could not read)';
           }
-        } else {
-          console.log(`[exam] Puter.js could not read photo: ${readResult.error || 'unreadable'}`);
-          answerText = answerText || '(photo answer - could not read)';
-          needsReview = 1;
+        }
+
+        // Step 2: Mark the read text against the marking scheme using AI
+        try {
+          const scheme = marking.getScheme(question.id);
+          const marked = await marking.markTheoryAnswer({
+            id: question.id,
+            text: question.text,
+            passage: question.passage || '',
+            marks: question.marks,
+            type: 'theory',
+          }, answerText, scheme);
+
+          markedBy = 'ai';
+          marksAwarded = marked.marksAwarded;
+          maxMarks = marked.maxMarks;
+          aiFeedback = marked.feedback || '';
+          needsReview = 0;
+          console.log(`[exam] Photo answer marked: ${marksAwarded}/${maxMarks}`);
+        } catch (markErr) {
+          console.error(`[exam] AI marking failed for photo answer:`, markErr.message);
+          aiFeedback = `Read: ${answerText.slice(0, 200)}. Marking failed: ${markErr.message}`;
         }
       } catch (err) {
         console.error('[exam] Photo processing failed:', err.message);
@@ -1053,48 +1056,33 @@ async function markAllPendingTheory(sessionId) {
     }
     let marked;
     if (a.answer_image) {
-      // Photo answer: read with Puter.js, then mark with AI
-      const puter = require('./puter');
-      if (puter.isConfigured()) {
-        try {
-          console.log(`[exam] Marking pending photo answer ${a.id} with Puter.js...`);
-          const readResult = await puter.readPhotoAnswer(a.answer_image, question.text, question.type);
-          if (readResult.success && readResult.answerText && readResult.answerText !== '[unreadable]') {
-            const textMarked = await marking.markTheoryAnswer({
-              id: question.id,
-              text: question.text,
-              passage: question.passage || '',
-              marks: question.marks,
-              type: 'theory',
-            }, readResult.answerText, scheme);
-
-            db.prepare(
-              `UPDATE answers SET marked_by='ai', marks_awarded=?, ai_feedback=?, answer_text=?, needs_review=0, marked_at=datetime('now') WHERE id=?`
-            ).run(textMarked.marksAwarded, textMarked.feedback || `Photo read: ${readResult.answerText.slice(0, 200)}`, readResult.answerText, a.id);
-            console.log(`[exam] Pending photo marked: ${textMarked.marksAwarded}/${question.marks}`);
-            return;
-          }
-        } catch (err) {
-          console.error(`[exam] Puter.js marking failed for pending photo:`, err.message);
-        }
-      }
-
-      // Fallback: try image-based marking
+      // Photo answer: read with AI vision, then mark with AI
       try {
-        marked = await marking.markTheoryImageAnswer(question, a.answer_text, a.answer_image, scheme);
-      } catch {
-        marked = { marksAwarded: 0, maxMarks: question.marks, needsReview: true, feedback: 'Photo answer could not be marked.', aiGenerated: false };
+        console.log(`[exam] Marking pending photo answer ${a.id} with AI vision...`);
+        const readText = await ai.readPhotoAnswer(a.answer_image, question.text);
+        if (readText && readText !== '[unreadable]') {
+          const textMarked = await marking.markTheoryAnswer({
+            id: question.id,
+            text: question.text,
+            passage: question.passage || '',
+            marks: question.marks,
+            type: 'theory',
+          }, readText, scheme);
+
+          db.prepare(
+            `UPDATE answers SET marked_by='ai', marks_awarded=?, ai_feedback=?, answer_text=?, needs_review=0, marked_at=datetime('now') WHERE id=?`
+          ).run(textMarked.marksAwarded, textMarked.feedback || `Photo read: ${readText.slice(0, 200)}`, readText, a.id);
+          console.log(`[exam] Pending photo marked: ${textMarked.marksAwarded}/${question.marks}`);
+          return;
+        }
+      } catch (err) {
+        console.error(`[exam] AI marking failed for pending photo:`, err.message);
       }
-      if (marked.needsReview) {
-        // Instead of leaving as pending forever, give 0 marks with explanation
-        db.prepare(
-          `UPDATE answers SET needs_review=1, marked_by='ai', marks_awarded=0, ai_feedback=?, marked_at=datetime('now') WHERE id=?`
-        ).run(marked.feedback || 'Photo answer could not be read by AI. 0 marks recorded.', a.id);
-        return;
-      }
+
+      // All attempts failed — mark as needing review with 0 marks
       db.prepare(
-        `UPDATE answers SET marked_by='ai', marks_awarded=?, ai_feedback=?, needs_review=0, ai_detected=?, marked_at=datetime('now') WHERE id=?`
-      ).run(marked.marksAwarded, marked.feedback, marked.aiGenerated ? 1 : 0, a.id);
+        `UPDATE answers SET needs_review=1, marked_by='ai', marks_awarded=0, ai_feedback=?, marked_at=datetime('now') WHERE id=?`
+      ).run('Photo answer could not be read by AI. 0 marks recorded.', a.id);
       return;
     }
     try {

@@ -1438,6 +1438,79 @@ function clamp(n, max) {
   return Math.max(0, Math.min(n, max));
 }
 
+/**
+ * Read a handwritten photo answer using the existing AI provider.
+ * Sends the image as base64 to the AI endpoint and gets back the transcribed text.
+ * Works with any OpenAI-compatible endpoint that supports vision (image_url).
+ */
+async function readPhotoAnswer(imagePath, questionText) {
+  if (!aiConfigured()) {
+    throw new AIError('AI is not configured');
+  }
+
+  const fs = require('fs');
+  const pathMod = require('path');
+  const uploadsDir = require('../config').uploadsDir;
+
+  const fullPath = pathMod.isAbsolute(imagePath) ? imagePath : pathMod.join(uploadsDir, imagePath);
+  if (!fs.existsSync(fullPath)) {
+    throw new AIError(`Image file not found: ${imagePath}`);
+  }
+
+  const imageBuffer = fs.readFileSync(fullPath);
+  const ext = pathMod.extname(fullPath).toLowerCase().replace('.', '');
+  const mimeType = ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : 'image/jpeg';
+  const base64 = imageBuffer.toString('base64');
+
+  const messages = [
+    {
+      role: 'system',
+      content: 'You are an exam answer reader. Read handwritten text from photos accurately and return ONLY the transcribed text.',
+    },
+    {
+      role: 'user',
+      content: [
+        {
+          type: 'text',
+          text: `Read EXACTLY what is written in this photo of a student's exam answer.
+
+Question: ${questionText}
+
+RULES:
+- Return ONLY the student's actual answer text as written
+- Do NOT correct spelling or grammar
+- Do NOT summarize or paraphrase
+- Do NOT add any explanation or prefix
+- If the handwriting is unclear, transcribe what you can read and mark unclear parts with [?]
+- If it's a drawing/diagram, describe what you see
+- If you cannot read anything, return exactly: [unreadable]`,
+        },
+        {
+          type: 'image_url',
+          image_url: { url: `data:${mimeType};base64,${base64}` },
+        },
+      ],
+    },
+  ];
+
+  // Use callEndpoint directly to get raw text (not parsed as JSON)
+  const content = await callEndpoint({
+    baseUrl: config.ai.baseUrl,
+    apiKey: config.ai.apiKey,
+    model: config.ai.model,
+    messages,
+    temperature: 0.1,
+    maxTokens: 1000,
+    timeoutMs: config.ai.timeoutMs,
+    maxRetries: 1,
+  });
+
+  // callEndpoint returns parseJSON result; for vision reads it should be plain text
+  const text = typeof content === 'string' ? content : JSON.stringify(content);
+  console.log(`[ai] Photo read: "${text.slice(0, 150)}..."`);
+  return text.trim();
+}
+
 module.exports = {
   AIError,
   aiConfigured,
@@ -1467,4 +1540,5 @@ module.exports = {
   attachMarkers,
   parseJSON,
   repairTruncatedJSON,
+  readPhotoAnswer,
 };
