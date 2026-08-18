@@ -40,6 +40,26 @@ function withHardTimeout(promise, ms) {
  * timeout surfaces immediately (never retried) so a hanging endpoint can never
  * stall a job forever.
  */
+async function callEndpointRaw({ baseUrl, apiKey, model, messages, temperature, maxTokens, timeoutMs }) {
+  const body = { model, messages, temperature, max_tokens: maxTokens };
+  const res = await withHardTimeout(
+    fetch(`${baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify(body),
+    }),
+    timeoutMs
+  );
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new AIError(`AI request failed (${res.status}): ${text.slice(0, 300)}`);
+  }
+  const data = await res.json();
+  const content = data?.choices?.[0]?.message?.content;
+  if (!content) throw new AIError('AI returned empty response');
+  return content;
+}
+
 async function callEndpoint({ baseUrl, apiKey, model, messages, temperature, maxTokens, timeoutMs, maxRetries }) {
   const body = {
     model,
@@ -1440,8 +1460,8 @@ function clamp(n, max) {
 
 /**
  * Read a handwritten photo answer using the existing AI provider.
- * Sends the image as base64 to the AI endpoint and gets back the transcribed text.
- * Works with any OpenAI-compatible endpoint that supports vision (image_url).
+ * Tries all configured providers (primary, secondary, tertiary) since
+ * the primary model may not support vision.
  */
 async function readPhotoAnswer(imagePath, questionText) {
   if (!aiConfigured()) {
@@ -1493,22 +1513,40 @@ RULES:
     },
   ];
 
-  // Use callEndpoint directly to get raw text (not parsed as JSON)
-  const content = await callEndpoint({
-    baseUrl: config.ai.baseUrl,
-    apiKey: config.ai.apiKey,
-    model: config.ai.model,
-    messages,
-    temperature: 0.1,
-    maxTokens: 1000,
-    timeoutMs: config.ai.timeoutMs,
-    maxRetries: 1,
-  });
+  const effectiveTimeout = Math.max(config.ai.timeoutMs, 60000);
 
-  // callEndpoint returns parseJSON result; for vision reads it should be plain text
-  const text = typeof content === 'string' ? content : JSON.stringify(content);
-  console.log(`[ai] Photo read: "${text.slice(0, 150)}..."`);
-  return text.trim();
+  // Try primary provider first
+  const providers = [
+    { baseUrl: config.ai.baseUrl, apiKey: config.ai.apiKey, model: config.ai.model, name: 'primary' },
+  ];
+  if (secondaryConfigured()) {
+    providers.push({ baseUrl: config.claude.baseUrl, apiKey: config.claude.apiKey, model: config.claude.model || config.ai.model, name: 'secondary' });
+  }
+  if (tertiaryConfigured()) {
+    providers.push({ baseUrl: config.xai.baseUrl, apiKey: config.xai.apiKey, model: config.xai.model, name: 'tertiary' });
+  }
+
+  let lastErr;
+  for (const p of providers) {
+    try {
+      console.log(`[ai] Trying ${p.name} provider (${p.model}) for photo read...`);
+      const text = await callEndpointRaw({
+        baseUrl: p.baseUrl,
+        apiKey: p.apiKey,
+        model: p.model,
+        messages,
+        temperature: 0.1,
+        maxTokens: 1000,
+        timeoutMs: effectiveTimeout,
+      });
+      console.log(`[ai] Photo read via ${p.name}: "${text.slice(0, 150)}..."`);
+      return text.trim();
+    } catch (err) {
+      console.error(`[ai] ${p.name} provider failed for photo read: ${err.message}`);
+      lastErr = err;
+    }
+  }
+  throw lastErr || new AIError('All providers failed for photo read');
 }
 
 module.exports = {
