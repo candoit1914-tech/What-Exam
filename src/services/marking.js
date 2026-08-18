@@ -193,19 +193,19 @@ async function markTheoryAnswer(question, studentAnswer, scheme) {
 
 /**
  * Grade a photo (written/drawn) theory answer.
- * Uses AI vision to read the text, then marks it against the scheme.
+ * Tries Puter.js vision first, then AI providers.
  * Never throws.
  */
 async function markTheoryImageAnswer(question, studentAnswer, imageFile, scheme) {
   const total = Number(question.marks) || 0;
   const review = { marksAwarded: 0, maxMarks: total, needsReview: true, feedback: 'Photo answer awaiting manual review.', aiGenerated: false };
 
-  // Try AI vision to read the text
-  if (ai.aiConfigured()) {
+  // Try Puter.js vision first
+  const puter = require('./puter');
+  if (puter.isConfigured()) {
     try {
-      const readText = await ai.readPhotoAnswer(imageFile, question.text);
+      const readText = await puter.readPhotoAnswer(imageFile, question.text);
       if (readText && readText !== '[unreadable]') {
-        // Mark the read text using the AI marking pipeline
         const textResult = await markTheoryAnswer({
           id: question.id,
           text: question.text,
@@ -213,7 +213,33 @@ async function markTheoryImageAnswer(question, studentAnswer, imageFile, scheme)
           marks: total,
           type: 'theory',
         }, readText, scheme);
+        return {
+          marksAwarded: textResult.marksAwarded,
+          maxMarks: textResult.maxMarks,
+          breakdown: textResult.breakdown || [],
+          feedback: textResult.feedback || `Photo read: ${readText.slice(0, 150)}`,
+          aiGenerated: true,
+          aiReason: 'puter_vision',
+          needsReview: false,
+        };
+      }
+    } catch (err) {
+      console.error('[marking] Puter.js vision failed:', err.message);
+    }
+  }
 
+  // Fallback to AI providers
+  if (ai.aiConfigured()) {
+    try {
+      const readText = await ai.readPhotoAnswer(imageFile, question.text);
+      if (readText && readText !== '[unreadable]') {
+        const textResult = await markTheoryAnswer({
+          id: question.id,
+          text: question.text,
+          passage: question.passage || '',
+          marks: total,
+          type: 'theory',
+        }, readText, scheme);
         return {
           marksAwarded: textResult.marksAwarded,
           maxMarks: textResult.maxMarks,
@@ -225,11 +251,10 @@ async function markTheoryImageAnswer(question, studentAnswer, imageFile, scheme)
         };
       }
     } catch (err) {
-      console.error('[marking] AI vision marking failed:', err.message);
+      console.error('[marking] AI vision failed:', err.message);
     }
   }
 
-  // No vision available — needs manual review
   return review;
 }
 

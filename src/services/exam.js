@@ -7,6 +7,7 @@ const marking = require('./marking');
 const results = require('./results');
 const certificate = require('./certificate');
 const ai = require('./ai');
+const puter = require('./puter');
 const { stripSourceWatermarks } = require('./textClean');
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -895,24 +896,38 @@ async function handleAnswer(exam, session, student, question, body, meta = {}) {
         console.log(`[exam] Saved photo answer as ${answerImage}`);
 
         // Use AI vision to read the handwritten answer from the photo
-        if (ai.aiConfigured()) {
-          console.log(`[exam] Using AI vision to read photo answer...`);
+        // Try Puter.js first (GPT-4o-mini supports vision), then AI providers
+        let readSuccess = false;
+        if (puter.isConfigured()) {
           try {
+            console.log(`[exam] Using Puter.js vision to read photo answer...`);
+            const readText = await puter.readPhotoAnswer(answerImage, question.text);
+            if (readText && readText !== '[unreadable]') {
+              answerText = readText;
+              puterRead = true;
+              readSuccess = true;
+              console.log(`[puter] Read answer: ${answerText.slice(0, 150)}...`);
+            }
+          } catch (err) {
+            console.error(`[puter] Vision read failed: ${err.message}`);
+          }
+        }
+        if (!readSuccess && ai.aiConfigured()) {
+          try {
+            console.log(`[exam] Falling back to AI providers for photo read...`);
             const readText = await ai.readPhotoAnswer(answerImage, question.text);
             if (readText && readText !== '[unreadable]') {
               answerText = readText;
               puterRead = true;
+              readSuccess = true;
               console.log(`[ai] Read answer: ${answerText.slice(0, 150)}...`);
-            } else {
-              console.log(`[ai] Vision read returned unreadable or empty`);
-              answerText = (body || '').trim() || '(photo answer - could not read)';
             }
-          } catch (readErr) {
-            console.error(`[ai] Vision read failed:`, readErr.message);
-            answerText = (body || '').trim() || '(photo answer - read failed)';
+          } catch (err) {
+            console.error(`[ai] Vision read failed: ${err.message}`);
           }
-        } else {
-          answerText = (body || '').trim() || '(photo answer)';
+        }
+        if (!readSuccess) {
+          answerText = (body || '').trim() || '(photo answer - could not read)';
         }
       } catch (err) {
         console.error('[exam] photo answer download/render failed:', err.message);
@@ -927,8 +942,8 @@ async function handleAnswer(exam, session, student, question, body, meta = {}) {
     }
     const context = [question.passage, question.text].filter(Boolean).join('\n\n');
 
-    // PHOTO ANSWER: Read with AI vision, then mark with AI
-    if (answerImage && ai.aiConfigured()) {
+    // PHOTO ANSWER: Read with vision, then mark with AI
+    if (answerImage) {
       let markedBy = 'pending';
       let marksAwarded = 0;
       let maxMarks = question.marks;
@@ -939,13 +954,30 @@ async function handleAnswer(exam, session, student, question, body, meta = {}) {
       try {
         // Step 1: If not already read, read the handwritten text from the photo
         if (!puterRead) {
-          console.log(`[exam] Reading photo answer with AI vision...`);
-          const readText = await ai.readPhotoAnswer(answerImage, question.text);
+          let readText = null;
+          // Try Puter.js first
+          if (puter.isConfigured()) {
+            try {
+              console.log(`[exam] Reading photo answer with Puter.js vision...`);
+              readText = await puter.readPhotoAnswer(answerImage, question.text);
+            } catch (err) {
+              console.error(`[puter] Read failed: ${err.message}`);
+            }
+          }
+          // Fallback to AI providers
+          if (!readText && ai.aiConfigured()) {
+            try {
+              console.log(`[exam] Falling back to AI providers...`);
+              readText = await ai.readPhotoAnswer(answerImage, question.text);
+            } catch (err) {
+              console.error(`[ai] Read failed: ${err.message}`);
+            }
+          }
           if (readText && readText !== '[unreadable]') {
             answerText = readText;
-            console.log(`[ai] Read: "${answerText.slice(0, 200)}"`);
+            console.log(`[exam] Read: "${answerText.slice(0, 200)}"`);
           } else {
-            console.log(`[ai] Could not read photo answer`);
+            console.log(`[exam] Could not read photo answer`);
             answerText = answerText || '(photo answer - could not read)';
           }
         }
@@ -1056,10 +1088,26 @@ async function markAllPendingTheory(sessionId) {
     }
     let marked;
     if (a.answer_image) {
-      // Photo answer: read with AI vision, then mark with AI
+      // Photo answer: read with vision, then mark with AI
       try {
-        console.log(`[exam] Marking pending photo answer ${a.id} with AI vision...`);
-        const readText = await ai.readPhotoAnswer(a.answer_image, question.text);
+        let readText = null;
+        console.log(`[exam] Marking pending photo answer ${a.id}...`);
+        // Try Puter.js first
+        if (puter.isConfigured()) {
+          try {
+            readText = await puter.readPhotoAnswer(a.answer_image, question.text);
+          } catch (err) {
+            console.error(`[puter] Pending read failed: ${err.message}`);
+          }
+        }
+        // Fallback to AI providers
+        if (!readText && ai.aiConfigured()) {
+          try {
+            readText = await ai.readPhotoAnswer(a.answer_image, question.text);
+          } catch (err) {
+            console.error(`[ai] Pending read failed: ${err.message}`);
+          }
+        }
         if (readText && readText !== '[unreadable]') {
           const textMarked = await marking.markTheoryAnswer({
             id: question.id,
