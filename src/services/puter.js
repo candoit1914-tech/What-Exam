@@ -59,11 +59,21 @@ async function readPhotoAnswer(imagePath, questionText, questionType = 'theory')
     const dataUrl = `data:${mimeType};base64,${base64}`;
 
     // Use Puter.js vision to analyze the image
-    const prompt = `You are an exam answer reader. A student has written or drawn their answer to an exam question on paper and taken a photo.
+    const prompt = `You are an exam answer reader. A student has written or drawn their answer to an exam question on paper and took a photo.
 
 Question: ${questionText}
 
-Please carefully read and transcribe the student's written answer from this image. If it's a drawing or diagram, describe it. Return ONLY the student's answer text, nothing else. If you cannot read it clearly, say what you can make out and note any unclear parts.`;
+TASK: Read EXACTLY what is written in this photo. Transcribe the student's handwritten answer word-for-word, preserving their exact wording, spelling, and grammar — even if it contains errors.
+
+RULES:
+- Return ONLY the student's actual answer text as written
+- Do NOT correct spelling or grammar
+- Do NOT summarize or paraphrase
+- Do NOT add your own interpretation
+- If the handwriting is unclear, transcribe what you can read and mark unclear parts with [?]
+- If it's a drawing/diagram, describe what you see
+- If you cannot read anything, return: [unreadable]
+- Be honest and precise — this is a real exam`;
 
     const response = await puter.ai.chat(prompt, dataUrl, {
       model: 'gpt-4o-mini',

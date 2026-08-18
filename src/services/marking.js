@@ -195,11 +195,44 @@ async function markTheoryAnswer(question, studentAnswer, scheme) {
  * Grade a photo (written/drawn) theory answer. With AI_VISION enabled the
  * image is sent to the vision-capable endpoint; any failure — or a text-only
  * provider — results in needsReview=true so the admin grades it manually.
+ * Uses Puter.js vision when configured for honest, precise reading.
  * Never throws.
  */
 async function markTheoryImageAnswer(question, studentAnswer, imageFile, scheme) {
   const total = Number(question.marks) || 0;
   const review = { marksAwarded: 0, maxMarks: total, needsReview: true, feedback: 'Photo answer awaiting manual review.', aiGenerated: false };
+
+  // Try Puter.js vision first for honest, precise reading
+  const puter = require('./puter');
+  if (puter.isConfigured()) {
+    try {
+      const visionResult = await puter.readPhotoAnswer(imageFile, question.text, question.type);
+      if (visionResult.success && visionResult.answerText && visionResult.answerText !== '[unreadable]') {
+        // Use Puter.js read text to mark against the scheme
+        const sch = scheme || getScheme(question.id);
+        const textResult = markTheoryAnswer({
+          text: question.text,
+          passage: question.passage || '',
+          marks: total,
+          type: 'theory',
+        }, visionResult.answerText, sch);
+
+        return {
+          marksAwarded: textResult.marksAwarded,
+          maxMarks: textResult.maxMarks,
+          breakdown: textResult.breakdown || [],
+          feedback: textResult.feedback || `Photo read: ${visionResult.answerText.slice(0, 100)}...`,
+          aiGenerated: true,
+          aiReason: 'puter_vision',
+          needsReview: false,
+        };
+      }
+    } catch (err) {
+      console.error('[marking] Puter.js vision marking failed, trying fallback:', err.message);
+    }
+  }
+
+  // Fallback to AI_VISION endpoint
   if (!config.ai.vision) return review;
   try {
     const full = imageFile && !path.isAbsolute(imageFile) ? path.join(config.uploadsDir, imageFile) : imageFile;
