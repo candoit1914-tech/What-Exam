@@ -7,6 +7,7 @@ const marking = require('./marking');
 const results = require('./results');
 const certificate = require('./certificate');
 const ai = require('./ai');
+const puter = require('./puter');
 const { stripSourceWatermarks } = require('./textClean');
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -872,6 +873,7 @@ async function handleAnswer(exam, session, student, question, body, meta = {}) {
     // The detection always finishes before the exam is finalized (drainSession).
     let answerText = body;
     let answerImage = '';
+    let puterRead = false;
     if (meta.mediaType === 'image') {
       console.log(`[exam] Received image from ${student.phone}, mediaId=${meta.mediaId}`);
       try {
@@ -891,8 +893,23 @@ async function handleAnswer(exam, session, student, question, body, meta = {}) {
           : 'jpg';
         answerImage = `${session.id}-${question.q_order}-${Date.now()}.${ext}`;
         fs.writeFileSync(path.join(config.uploadsDir, answerImage), buffer);
-        answerText = (body || '').trim() || '(photo answer)';
         console.log(`[exam] Saved photo answer as ${answerImage}`);
+
+        // Use Puter.js vision to read the handwritten answer from the photo
+        if (puter.isConfigured()) {
+          console.log(`[exam] Using Puter.js vision to read photo answer...`);
+          const visionResult = await puter.readPhotoAnswer(answerImage, question.text, question.type);
+          if (visionResult.success && visionResult.answerText) {
+            answerText = visionResult.answerText;
+            puterRead = true;
+            console.log(`[puter] Read answer: ${answerText.slice(0, 150)}...`);
+          } else {
+            console.log(`[puter] Vision read failed or empty: ${visionResult.error || 'no text found'}`);
+            answerText = (body || '').trim() || '(photo answer - awaiting manual review)';
+          }
+        } else {
+          answerText = (body || '').trim() || '(photo answer)';
+        }
       } catch (err) {
         console.error('[exam] photo answer download/render failed:', err.message);
         console.error('[exam] Full error:', err.stack);

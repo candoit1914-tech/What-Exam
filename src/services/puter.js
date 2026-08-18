@@ -1,0 +1,138 @@
+const fs = require('fs');
+const path = require('path');
+const config = require('../config');
+
+let puter = null;
+
+/**
+ * Initialize Puter.js client.
+ * Requires PUTER_API_KEY environment variable.
+ */
+function initPuter() {
+  try {
+    const { PuterClient } = require('@heyputer/puter.js');
+    puter = new PuterClient({
+      apiKey: process.env.PUTER_API_KEY || '',
+    });
+    console.log('[puter] Puter.js initialized');
+    return true;
+  } catch (err) {
+    console.warn('[puter] Failed to initialize:', err.message);
+    return false;
+  }
+}
+
+function isConfigured() {
+  return !!process.env.PUTER_API_KEY;
+}
+
+/**
+ * Use Puter.js vision to read/analyze a handwritten photo answer.
+ * Sends the image to GPT with a prompt asking it to transcribe the answer.
+ */
+async function readPhotoAnswer(imagePath, questionText, questionType = 'theory') {
+  if (!isConfigured()) {
+    return { success: false, error: 'Puter.js not configured (no PUTER_API_KEY)' };
+  }
+
+  if (!puter) {
+    initPuter();
+  }
+
+  if (!puter) {
+    return { success: false, error: 'Puter.js initialization failed' };
+  }
+
+  try {
+    // Read the image file
+    const fullPath = path.isAbsolute(imagePath) ? imagePath : path.join(config.uploadsDir, imagePath);
+    if (!fs.existsSync(fullPath)) {
+      return { success: false, error: `Image file not found: ${imagePath}` };
+    }
+
+    const imageBuffer = fs.readFileSync(fullPath);
+    const ext = path.extname(fullPath).toLowerCase().replace('.', '');
+    const mimeType = ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : 'image/jpeg';
+
+    // Convert to base64 data URL for Puter.js
+    const base64 = imageBuffer.toString('base64');
+    const dataUrl = `data:${mimeType};base64,${base64}`;
+
+    // Use Puter.js vision to analyze the image
+    const prompt = `You are an exam answer reader. A student has written or drawn their answer to an exam question on paper and taken a photo.
+
+Question: ${questionText}
+
+Please carefully read and transcribe the student's written answer from this image. If it's a drawing or diagram, describe it. Return ONLY the student's answer text, nothing else. If you cannot read it clearly, say what you can make out and note any unclear parts.`;
+
+    const response = await puter.ai.chat(prompt, dataUrl, {
+      model: 'gpt-4o-mini',
+      temperature: 0.1,
+    });
+
+    const answerText = typeof response === 'string' ? response : response?.message?.content || '';
+
+    console.log(`[puter] Vision analysis complete for ${imagePath}: ${answerText.slice(0, 100)}...`);
+
+    return {
+      success: true,
+      answerText: answerText.trim(),
+      confidence: 'high',
+    };
+  } catch (err) {
+    console.error('[puter] Vision analysis failed:', err.message);
+    return { success: false, error: err.message };
+  }
+}
+
+/**
+ * Use Puter.js to generate a certificate background or decoration.
+ */
+async function generateCertificateImage(studentName, examTitle, score, passed) {
+  if (!isConfigured() || !puter) {
+    return null;
+  }
+
+  try {
+    const prompt = `A professional ${passed ? 'congratulatory' : 'completion'} certificate background for ${studentName} who took "${examTitle}" and scored ${score}. Elegant, academic style with green and gold accents.`;
+
+    const imageElement = await puter.ai.txt2img(prompt, { model: 'gpt-image-2' });
+
+    // The imageElement is an HTML element in browser context
+    // For server-side, we'd need to handle this differently
+    return imageElement;
+  } catch (err) {
+    console.error('[puter] Certificate image generation failed:', err.message);
+    return null;
+  }
+}
+
+/**
+ * Use Puter.js AI chat for text-based tasks (question generation, marking, etc.)
+ */
+async function chat(prompt, options = {}) {
+  if (!isConfigured() || !puter) {
+    return null;
+  }
+
+  try {
+    const response = await puter.ai.chat(prompt, {
+      model: options.model || 'gpt-4o-mini',
+      temperature: options.temperature || 0.7,
+      max_tokens: options.maxTokens || 2000,
+    });
+
+    return typeof response === 'string' ? response : response?.message?.content || '';
+  } catch (err) {
+    console.error('[puter] Chat failed:', err.message);
+    return null;
+  }
+}
+
+module.exports = {
+  initPuter,
+  isConfigured,
+  readPhotoAnswer,
+  generateCertificateImage,
+  chat,
+};

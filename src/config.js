@@ -79,6 +79,10 @@ const config = {
     sendCertificates: process.env.SEND_CERTIFICATES !== 'false',
   },
 
+  puter: {
+    apiKey: process.env.PUTER_API_KEY || '',
+  },
+
   admin: {
     password: adminPassword,
     isGenerated: adminPasswordIsGenerated,
