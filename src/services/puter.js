@@ -118,6 +118,107 @@ async function generateCertificateImage(studentName, examTitle, score, passed) {
 }
 
 /**
+ * Use Puter.js vision to read AND mark a handwritten photo answer.
+ * This does everything in one call: reads the text, then grades it against the marking scheme.
+ */
+async function readAndMarkPhotoAnswer(imagePath, question, scheme) {
+  if (!isConfigured()) {
+    return { success: false, error: 'Puter.js not configured (no PUTER_API_KEY)' };
+  }
+
+  if (!puter) {
+    initPuter();
+  }
+
+  if (!puter) {
+    return { success: false, error: 'Puter.js initialization failed' };
+  }
+
+  try {
+    // Read the image file
+    const fullPath = path.isAbsolute(imagePath) ? imagePath : path.join(config.uploadsDir, imagePath);
+    if (!fs.existsSync(fullPath)) {
+      return { success: false, error: `Image file not found: ${imagePath}` };
+    }
+
+    const imageBuffer = fs.readFileSync(fullPath);
+    const ext = path.extname(fullPath).toLowerCase().replace('.', '');
+    const mimeType = ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : 'image/jpeg';
+
+    // Convert to base64 data URL for Puter.js
+    const base64 = imageBuffer.toString('base64');
+    const dataUrl = `data:${mimeType};base64,${base64}`;
+
+    // Build marking scheme context
+    const totalMarks = question.marks || 5;
+    let schemeContext = '';
+    if (scheme) {
+      if (scheme.model_answer) schemeContext += `\nModel answer: ${scheme.model_answer}`;
+      if (scheme.key_points?.length) schemeContext += `\nKey points to look for: ${scheme.key_points.join('; ')}`;
+      if (scheme.rubric?.length) {
+        schemeContext += '\nRubric:';
+        for (const r of scheme.rubric) {
+          schemeContext += `\n  - ${r.point} (${r.marks} marks): ${r.explanation || ''}`;
+        }
+      }
+    }
+
+    // Combined prompt: read the answer AND mark it
+    const prompt = `You are an honest, objective exam marker. A student has written/drawn their answer on paper and sent a photo.
+
+EXAM QUESTION: ${question.text}
+${question.passage ? `\nPassage/Context: ${question.passage}` : ''}
+TOTAL MARKS AVAILABLE: ${totalMarks}
+${schemeContext}
+
+YOUR TASK (two steps):
+STEP 1 - READ: Transcribe EXACTLY what the student wrote in this photo. Preserve their exact wording, spelling, grammar — even errors. If unclear, mark with [?]. If unreadable, return [unreadable].
+
+STEP 2 - MARK: Grade the transcribed answer honestly and objectively against the marking scheme.
+- Only award marks for content that correctly answers the question
+- Do NOT give marks for partially correct or vague answers unless the rubric allows it
+- Be strict but fair — match against key points and model answer
+- If the answer is blank or unreadable, award 0 marks
+
+RESPOND IN THIS EXACT FORMAT:
+TRANSCRIBED_ANSWER: [your transcription of what is written]
+MARKS_AWARDED: [number]
+FEEDBACK: [brief explanation of why those marks were given]`;
+
+    const response = await puter.ai.chat(prompt, dataUrl, {
+      model: 'gpt-4o-mini',
+      temperature: 0.1,
+    });
+
+    const responseText = typeof response === 'string' ? response : response?.message?.content || '';
+    console.log(`[puter] Raw response: ${responseText.slice(0, 300)}...`);
+
+    // Parse the response
+    const transcribedMatch = responseText.match(/TRANSCRIBED_ANSWER:\s*(.+?)(?=\nMARKS_AWARDED:|$)/s);
+    const marksMatch = responseText.match(/MARKS_AWARDED:\s*(\d+)/);
+    const feedbackMatch = responseText.match(/FEEDBACK:\s*(.+?)$/s);
+
+    const transcribedAnswer = transcribedMatch?.[1]?.trim() || '';
+    const marksAwarded = Math.min(parseInt(marksMatch?.[1] || '0'), totalMarks);
+    const feedback = feedbackMatch?.[1]?.trim() || '';
+
+    console.log(`[puter] Marked: ${marksAwarded}/${totalMarks} — "${transcribedAnswer.slice(0, 100)}..."`);
+
+    return {
+      success: true,
+      answerText: transcribedAnswer || '[unreadable]',
+      marksAwarded,
+      maxMarks: totalMarks,
+      feedback,
+      needsReview: false,
+    };
+  } catch (err) {
+    console.error('[puter] readAndMark failed:', err.message);
+    return { success: false, error: err.message };
+  }
+}
+
+/**
  * Use Puter.js AI chat for text-based tasks (question generation, marking, etc.)
  */
 async function chat(prompt, options = {}) {
@@ -143,6 +244,7 @@ module.exports = {
   initPuter,
   isConfigured,
   readPhotoAnswer,
+  readAndMarkPhotoAnswer,
   generateCertificateImage,
   chat,
 };

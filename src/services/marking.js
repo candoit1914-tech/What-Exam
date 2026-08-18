@@ -206,22 +206,33 @@ async function markTheoryImageAnswer(question, studentAnswer, imageFile, scheme)
   const puter = require('./puter');
   if (puter.isConfigured()) {
     try {
-      const visionResult = await puter.readPhotoAnswer(imageFile, question.text, question.type);
-      if (visionResult.success && visionResult.answerText && visionResult.answerText !== '[unreadable]') {
-        // Use Puter.js read text to mark against the scheme
-        const sch = scheme || getScheme(question.id);
+      const visionResult = await puter.readAndMarkPhotoAnswer(imageFile, question, scheme);
+      if (visionResult.success) {
+        return {
+          marksAwarded: visionResult.marksAwarded,
+          maxMarks: visionResult.maxMarks,
+          breakdown: [],
+          feedback: visionResult.feedback || `Photo read: ${visionResult.answerText?.slice(0, 150) || ''}`,
+          aiGenerated: true,
+          aiReason: 'puter_vision',
+          needsReview: false,
+        };
+      }
+      // Fallback: just read the text, then mark it
+      const readResult = await puter.readPhotoAnswer(imageFile, question.text, question.type);
+      if (readResult.success && readResult.answerText && readResult.answerText !== '[unreadable]') {
         const textResult = markTheoryAnswer({
           text: question.text,
           passage: question.passage || '',
           marks: total,
           type: 'theory',
-        }, visionResult.answerText, sch);
+        }, readResult.answerText, scheme);
 
         return {
           marksAwarded: textResult.marksAwarded,
           maxMarks: textResult.maxMarks,
           breakdown: textResult.breakdown || [],
-          feedback: textResult.feedback || `Photo read: ${visionResult.answerText.slice(0, 100)}...`,
+          feedback: textResult.feedback || `Photo read: ${readResult.answerText.slice(0, 150)}`,
           aiGenerated: true,
           aiReason: 'puter_vision',
           needsReview: false,

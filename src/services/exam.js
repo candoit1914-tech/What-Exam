@@ -922,13 +922,72 @@ async function handleAnswer(exam, session, student, question, body, meta = {}) {
       }
     }
     const context = [question.passage, question.text].filter(Boolean).join('\n\n');
-    db.prepare(
-      `INSERT INTO answers (session_id, question_id, q_order, answer_text, answer_image, is_correct, marks_awarded, max_marks, marked_by, ai_feedback, needs_review, ai_detected)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`
-    ).run(
-      session.id, question.id, question.q_order, answerText, answerImage,
-      null, 0, question.marks, 'pending', '', 0, 0
-    );
+
+    // PHOTO ANSWER: Mark immediately using Puter.js vision
+    if (answerImage && puter.isConfigured()) {
+      let markedBy = 'pending';
+      let marksAwarded = 0;
+      let maxMarks = question.marks;
+      let aiFeedback = '';
+      let needsReview = 1;
+      let aiDetected = 0;
+
+      try {
+        console.log(`[exam] Marking photo answer immediately with Puter.js...`);
+        const scheme = marking.getScheme(question.id);
+        const markResult = await puter.readAndMarkPhotoAnswer(answerImage, question, scheme);
+
+        if (markResult.success) {
+          markedBy = 'ai';
+          marksAwarded = markResult.marksAwarded;
+          maxMarks = markResult.maxMarks;
+          aiFeedback = markResult.feedback || `Read: ${markResult.answerText?.slice(0, 200) || ''}`;
+          needsReview = 0;
+          console.log(`[exam] Photo marked: ${marksAwarded}/${maxMarks} — ${aiFeedback.slice(0, 100)}`);
+        } else {
+          console.log(`[exam] Puter.js marking failed: ${markResult.error}`);
+          // Try fallback: read text first, then mark with AI
+          const readResult = await puter.readPhotoAnswer(answerImage, question.text, question.type);
+          if (readResult.success && readResult.answerText && readResult.answerText !== '[unreadable]') {
+            // Mark the read text using marking service
+            const scheme = marking.getScheme(question.id);
+            const textMark = marking.markTheoryAnswer({
+              text: question.text,
+              passage: question.passage || '',
+              marks: question.marks,
+              type: 'theory',
+            }, readResult.answerText, scheme);
+
+            markedBy = 'ai';
+            marksAwarded = textMark.marksAwarded;
+            maxMarks = textMark.maxMarks;
+            aiFeedback = textMark.feedback || `Photo read: ${readResult.answerText.slice(0, 200)}`;
+            needsReview = 0;
+            console.log(`[exam] Photo read+marked: ${marksAwarded}/${maxMarks}`);
+          }
+        }
+      } catch (err) {
+        console.error('[exam] Photo marking failed:', err.message);
+      }
+
+      // Store the answer with marks
+      db.prepare(
+        `INSERT INTO answers (session_id, question_id, q_order, answer_text, answer_image, is_correct, marks_awarded, max_marks, marked_by, ai_feedback, needs_review, ai_detected)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`
+      ).run(
+        session.id, question.id, question.q_order, answerText, answerImage,
+        marksAwarded > 0 ? 1 : 0, marksAwarded, maxMarks, markedBy, aiFeedback, needsReview, aiDetected
+      );
+    } else {
+      // TEXT ANSWER or no Puter.js: store as pending, mark later
+      db.prepare(
+        `INSERT INTO answers (session_id, question_id, q_order, answer_text, answer_image, is_correct, marks_awarded, max_marks, marked_by, ai_feedback, needs_review, ai_detected)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`
+      ).run(
+        session.id, question.id, question.q_order, answerText, answerImage,
+        null, 0, question.marks, 'pending', '', 0, 0
+      );
+    }
 
     if (ai.aiConfigured() && !answerImage) {
       trackSessionTask(session.id, (async () => {
