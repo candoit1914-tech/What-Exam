@@ -926,7 +926,7 @@ async function handleAnswer(exam, session, student, question, body, meta = {}) {
           }
         }
         if (!readSuccess) {
-          answerText = (body || '').trim() || '(photo answer - could not read)';
+          answerText = (body || '').trim() || '(photo answer)';
         }
       } catch (err) {
         console.error('[exam] photo answer download/render failed:', err.message);
@@ -951,7 +951,7 @@ async function handleAnswer(exam, session, student, question, body, meta = {}) {
       let aiDetected = 0;
 
       try {
-        // Step 1: If not already read, read the handwritten text from the photo
+        // Step 1: Read the handwritten text from the photo
         if (!puterRead) {
           let readText = null;
           // Try local OCR first (tesseract.js)
@@ -978,8 +978,7 @@ async function handleAnswer(exam, session, student, question, body, meta = {}) {
             answerText = readText;
             console.log(`[exam] Read: "${answerText.slice(0, 200)}"`);
           } else {
-            console.log(`[exam] Could not read photo answer`);
-            answerText = answerText || '(photo answer - could not read)';
+            answerText = (body || '').trim() || '(photo answer - could not read)';
           }
         }
 
@@ -1089,51 +1088,31 @@ async function markAllPendingTheory(sessionId) {
     }
     let marked;
     if (a.answer_image) {
-      // Photo answer: read with local OCR, then mark with AI
+      // Photo answer: use image-based marking via marking service
       try {
-        let readText = null;
         console.log(`[exam] Marking pending photo answer ${a.id}...`);
-        // Try local OCR first
-        try {
-          const ocrResult = await ocr.readPhotoAnswer(a.answer_image, question.text);
-          if (ocrResult.success && ocrResult.text && ocrResult.text !== '[unreadable]' && ocrResult.text.length > 1) {
-            readText = ocrResult.text;
-            console.log(`[ocr] Pending read (${ocrResult.confidence}% conf): "${readText.slice(0, 150)}"`);
-          }
-        } catch (err) {
-          console.error(`[ocr] Pending read failed: ${err.message}`);
-        }
-        // Fallback to AI vision providers
-        if (!readText && ai.aiConfigured()) {
-          try {
-            readText = await ai.readPhotoAnswer(a.answer_image, question.text);
-          } catch (err) {
-            console.error(`[ai] Pending read failed: ${err.message}`);
-          }
-        }
-        if (readText && readText !== '[unreadable]') {
-          const textMarked = await marking.markTheoryAnswer({
-            id: question.id,
-            text: question.text,
-            passage: question.passage || '',
-            marks: question.marks,
-            type: 'theory',
-          }, readText, scheme);
+        const imgResult = await marking.markTheoryImageAnswer(question, a.answer_text || '(photo answer)', a.answer_image, scheme);
 
-          db.prepare(
-            `UPDATE answers SET marked_by='ai', marks_awarded=?, ai_feedback=?, answer_text=?, needs_review=0, marked_at=datetime('now') WHERE id=?`
-          ).run(textMarked.marksAwarded, textMarked.feedback || `Photo read: ${readText.slice(0, 200)}`, readText, a.id);
-          console.log(`[exam] Pending photo marked: ${textMarked.marksAwarded}/${question.marks}`);
-          return;
-        }
+        db.prepare(
+          `UPDATE answers SET marked_by=?, marks_awarded=?, ai_feedback=?, answer_text=?, needs_review=?, marked_at=datetime('now') WHERE id=?`
+        ).run(
+          imgResult.needsReview ? 'pending' : 'ai',
+          imgResult.marksAwarded,
+          imgResult.feedback || '',
+          a.answer_text || '(photo answer)',
+          imgResult.needsReview ? 1 : 0,
+          a.id
+        );
+        console.log(`[exam] Pending photo marked: ${imgResult.marksAwarded}/${question.marks}`);
+        return;
       } catch (err) {
         console.error(`[exam] AI marking failed for pending photo:`, err.message);
       }
 
       // All attempts failed — mark as needing review with 0 marks
       db.prepare(
-        `UPDATE answers SET needs_review=1, marked_by='ai', marks_awarded=0, ai_feedback=?, marked_at=datetime('now') WHERE id=?`
-      ).run('Photo answer could not be read by AI. 0 marks recorded.', a.id);
+        `UPDATE answers SET needs_review=1, marked_by='pending', marks_awarded=0, ai_feedback=?, marked_at=datetime('now') WHERE id=?`
+      ).run('Photo answer could not be read by AI. Awaiting manual review.', a.id);
       return;
     }
     try {

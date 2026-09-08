@@ -66,6 +66,12 @@ function buildCertificateSvg({
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${WIDTH} ${HEIGHT}">
+  <defs>
+    <filter id="pen-ink" x="-5%" y="-5%" width="110%" height="110%">
+      <feTurbulence type="fractalNoise" baseFrequency="0.04" numOctaves="4" result="noise"/>
+      <feDisplacementMap in="SourceGraphic" in2="noise" scale="1.5" xChannelSelector="R" yChannelSelector="G"/>
+    </filter>
+  </defs>
   <rect width="${WIDTH}" height="${HEIGHT}" fill="#FFFDF6"/>
   <rect x="40" y="40" width="${WIDTH - 80}" height="${HEIGHT - 80}" rx="26" fill="none" stroke="#C9A227" stroke-width="6"/>
   <rect x="62" y="62" width="${WIDTH - 124}" height="${HEIGHT - 124}" rx="16" fill="none" stroke="#16AB52" stroke-width="2"/>
@@ -91,13 +97,13 @@ function buildCertificateSvg({
   </g>
 
   <g font-family="Georgia, 'Times New Roman', serif">
-    <g id="signature" transform="translate(1088 942)" fill="none" stroke="#0b2545" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round">
+    <g id="signature" transform="translate(1088 942)" fill="none" stroke="#1a56db" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" style="filter: url(#pen-ink)">
       <path d="M10 52 C8 16 36 4 46 20 C53 31 44 46 32 44 C24 43 22 34 30 30"/>
       <path d="M30 30 C54 20 74 24 84 34 C93 42 88 52 76 50 C66 48 62 40 70 34"/>
       <path d="M70 34 C84 20 102 10 114 26 C121 35 112 48 100 45"/>
       <path d="M96 36 L134 29"/>
       <path d="M100 45 C132 40 160 45 178 53 C193 60 214 59 230 51 C246 43 262 45 272 51"/>
-      <circle cx="279" cy="30" r="3" fill="#0b2545" stroke="none"/>
+      <circle cx="279" cy="30" r="2.5" fill="#1a56db" stroke="none"/>
       <path d="M12 62 C92 58 212 61 284 57"/>
     </g>
     <text x="1230" y="1048" text-anchor="middle" font-size="20" fill="#6b7280">Authorized Signature</text>
