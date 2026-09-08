@@ -288,8 +288,8 @@ function parseWebhook(body) {
       replyId: isInteractive
         ? m.interactive?.button_reply?.id || m.interactive?.list_reply?.id || ''
         : '',
-      mediaType: m.type === 'image' ? 'image' : '',
-      mediaId: m.type === 'image' ? m.image?.id || '' : '',
+      mediaType: m.type === 'image' ? 'image' : m.type === 'audio' ? 'audio' : '',
+      mediaId: m.type === 'image' ? m.image?.id || '' : m.type === 'audio' ? m.audio?.id || '' : '',
       body:
         m.text?.body ||
         (isInteractive ? m.interactive?.button_reply?.text || m.interactive?.list_reply?.title : '') ||

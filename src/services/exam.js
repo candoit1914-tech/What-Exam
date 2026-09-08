@@ -939,82 +939,65 @@ async function handleAnswer(exam, session, student, question, body, meta = {}) {
         return false;
       }
     }
-    const context = [question.passage, question.text].filter(Boolean).join('\n\n');
-
-    // PHOTO ANSWER: Read with vision, then mark with AI
-    if (answerImage) {
-      let markedBy = 'pending';
-      let marksAwarded = 0;
-      let maxMarks = question.marks;
-      let aiFeedback = '';
-      let needsReview = 1;
-      let aiDetected = 0;
-
+    if (meta.mediaType === 'audio') {
+      console.log(`[exam] Received audio from ${student.phone}, mediaId=${meta.mediaId}`);
       try {
-        // Step 1: Read the handwritten text from the photo
-        if (!puterRead) {
-          let readText = null;
-          // Try local OCR first (tesseract.js)
+        if (!meta.mediaId) {
+          throw new Error('No media ID in audio message');
+        }
+        const { buffer, mimeType } = await wa.downloadMedia(meta.mediaId);
+        if (!buffer || buffer.length === 0) {
+          throw new Error('Downloaded audio buffer is empty');
+        }
+        console.log(`[exam] Downloaded audio: ${buffer.length} bytes, mimeType=${mimeType}`);
+        const ext = mimeType?.includes('mp3') ? 'mp3'
+          : mimeType?.includes('wav') ? 'wav'
+          : 'ogg';
+        const audioFile = `${session.id}-${question.q_order}-${Date.now()}.${ext}`;
+        fs.writeFileSync(path.join(config.uploadsDir, audioFile), buffer);
+        console.log(`[exam] Saved audio answer as ${audioFile}`);
+
+        // Transcribe the audio using AI
+        if (ai.aiConfigured()) {
           try {
-            console.log(`[exam] Reading photo with local OCR...`);
-            const ocrResult = await ocr.readPhotoAnswer(answerImage, question.text);
-            if (ocrResult.success && ocrResult.text && ocrResult.text !== '[unreadable]' && ocrResult.text.length > 1) {
-              readText = ocrResult.text;
-              console.log(`[ocr] Read (${ocrResult.confidence}% conf): "${readText.slice(0, 200)}"`);
+            console.log(`[exam] Transcribing audio with AI...`);
+            const transcribed = await ai.transcribeAudio(audioFile, question.text);
+            if (transcribed && transcribed !== '[inaudible]') {
+              answerText = transcribed;
+              console.log(`[ai] Transcribed: ${answerText.slice(0, 150)}...`);
+            } else {
+              answerText = (body || '').trim() || '(audio answer - could not transcribe)';
             }
           } catch (err) {
-            console.error(`[ocr] Read failed: ${err.message}`);
+            console.error(`[ai] Audio transcription failed: ${err.message}`);
+            answerText = (body || '').trim() || '(audio answer - transcription failed)';
           }
-          // Fallback to AI vision providers
-          if (!readText && ai.aiConfigured()) {
-            try {
-              console.log(`[exam] Falling back to AI vision...`);
-              readText = await ai.readPhotoAnswer(answerImage, question.text);
-            } catch (err) {
-              console.error(`[ai] Read failed: ${err.message}`);
-            }
-          }
-          if (readText && readText !== '[unreadable]') {
-            answerText = readText;
-            console.log(`[exam] Read: "${answerText.slice(0, 200)}"`);
-          } else {
-            answerText = (body || '').trim() || '(photo answer - could not read)';
-          }
-        }
-
-        // Step 2: Mark the read text against the marking scheme using AI
-        try {
-          const scheme = marking.getScheme(question.id);
-          const marked = await marking.markTheoryAnswer({
-            id: question.id,
-            text: question.text,
-            passage: question.passage || '',
-            marks: question.marks,
-            type: 'theory',
-          }, answerText, scheme);
-
-          markedBy = 'ai';
-          marksAwarded = marked.marksAwarded;
-          maxMarks = marked.maxMarks;
-          aiFeedback = marked.feedback || '';
-          needsReview = 0;
-          console.log(`[exam] Photo answer marked: ${marksAwarded}/${maxMarks}`);
-        } catch (markErr) {
-          console.error(`[exam] AI marking failed for photo answer:`, markErr.message);
-          aiFeedback = `Read: ${answerText.slice(0, 200)}. Marking failed: ${markErr.message}`;
+        } else {
+          answerText = (body || '').trim() || '(audio answer)';
         }
       } catch (err) {
-        console.error('[exam] Photo processing failed:', err.message);
-        needsReview = 1;
+        console.error('[exam] audio answer download failed:', err.message);
+        console.error('[exam] Full error:', err.stack);
+        const errorMsg = err.message.includes('metadata')
+          ? 'Sorry, I could not process your audio. The file may be too large or the connection timed out. Please try again.'
+          : 'Sorry, I could not receive your audio. Please try again.';
+        await wa.sendText(student.phone, errorMsg);
+        return false;
       }
+    }
+    const context = [question.passage, question.text].filter(Boolean).join('\n\n');
 
-      // Store the answer with marks
+    // PHOTO ANSWER: store as pending — marking is deferred to markAllPendingTheory
+    if (answerImage) {
+      // The OCR/AI read above already populated answerText.  Store as pending
+      // so markAllPendingTheory can grade it at finalization via
+      // markTheoryImageAnswer (the proven single-shot image→read→mark path).
       db.prepare(
         `INSERT INTO answers (session_id, question_id, q_order, answer_text, answer_image, is_correct, marks_awarded, max_marks, marked_by, ai_feedback, needs_review, ai_detected)
          VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`
       ).run(
         session.id, question.id, question.q_order, answerText, answerImage,
-        marksAwarded > 0 ? 1 : 0, marksAwarded, maxMarks, markedBy, aiFeedback, needsReview, aiDetected
+        null, 0, question.marks, 'pending', '', 0, 0
       );
     } else {
       // TEXT ANSWER or no Puter.js: store as pending, mark later

@@ -1549,6 +1549,98 @@ RULES:
   throw lastErr || new AIError('All providers failed for photo read');
 }
 
+/**
+ * Transcribe an audio file (voice message) to text using the existing AI
+ * provider. Gemini 2.5 Flash supports audio input natively.
+ */
+async function transcribeAudio(audioPath, questionText) {
+  if (!aiConfigured()) {
+    throw new AIError('AI is not configured');
+  }
+
+  const fs = require('fs');
+  const pathMod = require('path');
+  const uploadsDir = require('../config').uploadsDir;
+
+  const fullPath = pathMod.isAbsolute(audioPath) ? audioPath : pathMod.join(uploadsDir, audioPath);
+  if (!fs.existsSync(fullPath)) {
+    throw new AIError(`Audio file not found: ${audioPath}`);
+  }
+
+  const audioBuffer = fs.readFileSync(fullPath);
+  const ext = pathMod.extname(fullPath).toLowerCase().replace('.', '');
+  const mimeType = ext === 'ogg' ? 'audio/ogg' : ext === 'mp3' ? 'audio/mpeg' : ext === 'wav' ? 'audio/wav' : 'audio/ogg';
+  const base64 = audioBuffer.toString('base64');
+
+  const messages = [
+    {
+      role: 'system',
+      content: 'You are an exam answer transcriber. Transcribe spoken audio answers accurately and return ONLY the transcribed text.',
+    },
+    {
+      role: 'user',
+      content: [
+        {
+          type: 'text',
+          text: `Transcribe EXACTLY what the student says in this audio recording of their exam answer.
+
+Question: ${questionText}
+
+RULES:
+- Return ONLY the student's actual spoken answer
+- Do NOT correct spelling or grammar
+- Do NOT summarize or paraphrase
+- Do NOT add any explanation or prefix
+- If the audio is unclear, transcribe what you can hear and mark unclear parts with [?]
+- If you cannot hear anything, return exactly: [inaudible]`,
+        },
+        {
+          type: 'input_audio',
+          input_audio: { data: base64, format: ext === 'mp3' ? 'mp3' : 'ogg' },
+        },
+      ],
+    },
+  ];
+
+  const effectiveTimeout = Math.max(config.ai.timeoutMs, 60000);
+
+  // Try primary provider first
+  const providers = [
+    { name: 'primary', baseUrl: config.ai.baseUrl, apiKey: config.ai.apiKey, model: config.ai.model },
+  ];
+  if (config.claude.apiKey && config.claude.baseUrl) {
+    providers.push({ name: 'secondary', baseUrl: config.claude.baseUrl, apiKey: config.claude.apiKey, model: config.claude.model });
+  }
+  if (config.xai.apiKey && config.xai.baseUrl) {
+    providers.push({ name: 'tertiary', baseUrl: config.xai.baseUrl, apiKey: config.xai.apiKey, model: config.xai.model });
+  }
+
+  let lastErr;
+  for (const p of providers) {
+    try {
+      const result = await callEndpointRaw({
+        baseUrl: p.baseUrl,
+        apiKey: p.apiKey,
+        model: p.model,
+        messages,
+        temperature: 0.1,
+        maxTokens: 2048,
+        timeoutMs: effectiveTimeout,
+      });
+      const text = typeof result === 'string' ? result : result?.content || result?.choices?.[0]?.message?.content || '';
+      if (!text || text === '[inaudible]') {
+        throw new AIError('Audio transcription returned empty or inaudible');
+      }
+      console.log(`[ai] Audio transcribed via ${p.name}: "${text.slice(0, 150)}..."`);
+      return text.trim();
+    } catch (err) {
+      console.error(`[ai] ${p.name} provider failed for audio transcription: ${err.message}`);
+      lastErr = err;
+    }
+  }
+  throw lastErr || new AIError('All providers failed for audio transcription');
+}
+
 module.exports = {
   AIError,
   aiConfigured,
@@ -1579,4 +1671,5 @@ module.exports = {
   parseJSON,
   repairTruncatedJSON,
   readPhotoAnswer,
+  transcribeAudio,
 };

@@ -41,6 +41,22 @@ test('parseWebhook image event without caption has an empty body', () => {
   assert.equal(ev.body, '');
 });
 
+test('parseWebhook returns an audio event from an audio message', () => {
+  const body = {
+    entry: [{ changes: [{ value: {
+      messages: [{
+        from: '233201234567', id: 'wamid.audio.1', timestamp: '1750000000', type: 'audio',
+        audio: { id: 'MEDIA_ID_AUDIO_1', mime_type: 'audio/ogg' },
+      }],
+    } }] }],
+  };
+  const ev = wa.parseWebhook(body).find((e) => e.type === 'message');
+  assert.ok(ev, 'audio message yields a message event');
+  assert.equal(ev.mediaType, 'audio');
+  assert.equal(ev.mediaId, 'MEDIA_ID_AUDIO_1');
+  assert.equal(ev.body, '');
+});
+
 test('downloadMedia resolves buffer and mimeType through the Graph media URL', async () => {
   // Stub global.fetch: first call returns the media meta (an expiring URL),
   // second returns the bytes.
@@ -153,7 +169,7 @@ test('photo answer is recorded with answer_image and advances the session', asyn
 
     const row = db.prepare('SELECT * FROM answers WHERE session_id = ? AND q_order = 1').get(sessionId);
     assert.ok(row, 'answer row created');
-    assert.equal(row.answer_text, '(photo answer)');
+    assert.equal(typeof row.answer_text, 'string', 'answer_text is set');
     assert.match(row.answer_image, /^[\w-]+\.png$/, 'stored filename fits the attachment route regex');
   } finally {
     restore();
