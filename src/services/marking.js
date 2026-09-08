@@ -164,31 +164,43 @@ function markObjective(question, studentAnswer) {
   };
 }
 
-/** AI theory marking against the scheme + rubric. */
+/** AI theory marking against the scheme + rubric. Falls back to heuristic keyword matching if AI fails. */
 async function markTheoryAnswer(question, studentAnswer, scheme) {
-  if (!ai.aiConfigured()) {
-    throw new ai.AIError('AI is not configured. Set AI_API_KEY and AI_BASE_URL in .env to mark theory questions.');
-  }
   const sch = scheme || getScheme(question.id);
   const total = Number(question.marks) || 0;
-  const result = await ai.markTheory({
-    questionText: question.text,
-    modelAnswer: sch?.model_answer || '',
-    keyPoints: sch?.key_points || [],
-    rubric: sch?.rubric || [],
-    presentationMarks: sch?.presentation_marks || 0,
-    grammarMarks: sch?.grammar_marks || 0,
-    maxMarks: total,
-    studentAnswer,
-  });
-  return {
-    marksAwarded: result.marksAwarded,
-    maxMarks: result.maxMarks,
-    breakdown: result.breakdown || [],
-    feedback: result.feedback || '',
-    aiGenerated: !!result.aiGenerated,
-    aiReason: result.aiReason || '',
-  };
+
+  if (!ai.aiConfigured()) {
+    // AI not configured — use heuristic directly
+    console.log('[marking] AI not configured, using heuristic fallback');
+    return heuristicMark(question, studentAnswer, sch);
+  }
+
+  try {
+    const result = await ai.markTheory({
+      questionText: question.text,
+      modelAnswer: sch?.model_answer || '',
+      keyPoints: sch?.key_points || [],
+      rubric: sch?.rubric || [],
+      presentationMarks: sch?.presentation_marks || 0,
+      grammarMarks: sch?.grammar_marks || 0,
+      maxMarks: total,
+      studentAnswer,
+    });
+    return {
+      marksAwarded: result.marksAwarded,
+      maxMarks: result.maxMarks,
+      breakdown: result.breakdown || [],
+      feedback: result.feedback || '',
+      aiGenerated: !!result.aiGenerated,
+      aiReason: result.aiReason || '',
+    };
+  } catch (err) {
+    // AI failed (quota, timeout, etc.) — use heuristic as fallback
+    console.error(`[marking] AI marking failed, using heuristic fallback: ${err.message}`);
+    const h = heuristicMark(question, studentAnswer, sch);
+    h.feedback = `[AI unavailable — heuristic fallback] ${h.feedback}`;
+    return h;
+  }
 }
 
 /**
@@ -285,8 +297,141 @@ async function markTheoryImageAnswer(question, studentAnswer, imageFile, scheme)
     }
   }
 
-  // Nothing worked — mark with 0 but still AI-graded so it doesn't block results
-  return { marksAwarded: 0, maxMarks: total, needsReview: false, feedback: 'Photo answer could not be read; 0 marks awarded.', aiGenerated: true, aiReason: 'unreadable' };
+  // Nothing worked — use heuristic keyword matching as last resort
+  const sch = scheme || getScheme(question.id);
+  const h = heuristicMark(question, studentAnswer, sch);
+  h.feedback = `[Photo unreadable — heuristic fallback] ${h.feedback}`;
+  h.aiReason = 'photo_heuristic_fallback';
+  return h;
+}
+
+// ── Heuristic keyword marking (AI fallback) ───────────────────────────
+
+/**
+ * Common English stop words to exclude from keyword matching.
+ */
+const STOP_WORDS = new Set([
+  'a', 'an', 'the', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
+  'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could',
+  'should', 'may', 'might', 'shall', 'can', 'need', 'dare', 'ought',
+  'used', 'to', 'of', 'in', 'for', 'on', 'with', 'at', 'by', 'from',
+  'as', 'into', 'through', 'during', 'before', 'after', 'above', 'below',
+  'between', 'out', 'off', 'over', 'under', 'again', 'further', 'then',
+  'once', 'here', 'there', 'when', 'where', 'why', 'how', 'all', 'each',
+  'every', 'both', 'few', 'more', 'most', 'other', 'some', 'such', 'no',
+  'nor', 'not', 'only', 'own', 'same', 'so', 'than', 'too', 'very',
+  'just', 'because', 'but', 'and', 'or', 'if', 'while', 'about', 'it',
+  'its', 'this', 'that', 'these', 'those', 'i', 'me', 'my', 'we', 'our',
+  'you', 'your', 'he', 'him', 'his', 'she', 'her', 'they', 'them', 'their',
+  'what', 'which', 'who', 'whom', 'there', 'their', 'been', 'also',
+  'make', 'like', 'even', 'well', 'back', 'much', 'go', 'good', 'much',
+]);
+
+/**
+ * Extract meaningful keywords from a string: tokenize, lowercase, strip
+ * stop words and very short tokens, return a Set.
+ */
+function extractKeywords(text) {
+  if (!text) return new Set();
+  const tokens = String(text)
+    .toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, ' ')
+    .split(/\s+/)
+    .map((t) => t.replace(/^-+|-+$/g, ''))
+    .filter((t) => t.length >= 3 && !STOP_WORDS.has(t));
+  return new Set(tokens);
+}
+
+/**
+ * Compute Jaccard-style overlap between student keywords and scheme keywords.
+ * Returns a ratio 0..1.
+ */
+function keywordOverlap(studentSet, schemeSet) {
+  if (!schemeSet.size) return 0;
+  let matches = 0;
+  for (const kw of schemeSet) {
+    if (studentSet.has(kw)) matches++;
+    // also check partial stem match (e.g. "govern" matches "governance")
+    else {
+      for (const sk of studentSet) {
+        if (sk.length >= 5 && kw.length >= 5 && (sk.includes(kw) || kw.includes(sk))) {
+          matches++;
+          break;
+        }
+      }
+    }
+  }
+  return matches / schemeSet.size;
+}
+
+/**
+ * Heuristic keyword-based marking fallback.  Used when ALL AI providers
+ * fail (Gemini quota, NVIDIA errors, etc.) so that students still earn
+ * partial marks for relevant content instead of a blanket 0.
+ *
+ * Awards marks proportionally based on keyword overlap with the marking
+ * scheme's key_points and model_answer.  Capped at 60% of total to
+ * ensure AI marking is always preferred when available.
+ */
+function heuristicMark(question, studentAnswer, scheme) {
+  const total = Number(question.marks) || 0;
+  if (!total || !studentAnswer) {
+    return { marksAwarded: 0, maxMarks: total, breakdown: [], feedback: '', aiGenerated: false, aiReason: 'no_answer', needsReview: false };
+  }
+
+  const cap = Math.ceil(total * 0.6); // max 60% via heuristic
+
+  // Build scheme keyword set from key_points + model_answer
+  const schemeKeywords = new Set();
+  const kp = scheme?.key_points || [];
+  for (const point of kp) {
+    for (const kw of extractKeywords(point)) schemeKeywords.add(kw);
+  }
+  for (const kw of extractKeywords(scheme?.model_answer || '')) schemeKeywords.add(kw);
+
+  // Also extract from rubric points
+  const rubric = scheme?.rubric || [];
+  for (const r of rubric) {
+    for (const kw of extractKeywords(r.point || '')) schemeKeywords.add(kw);
+    for (const kw of extractKeywords(r.explanation || '')) schemeKeywords.add(kw);
+  }
+
+  const studentKeywords = extractKeywords(studentAnswer);
+
+  if (!schemeKeywords.size) {
+    // No scheme keywords available — award 0 but don't block
+    return { marksAwarded: 0, maxMarks: total, breakdown: [], feedback: 'No marking scheme available for heuristic marking.', aiGenerated: false, aiReason: 'no_scheme', needsReview: false };
+  }
+
+  const overlap = keywordOverlap(studentKeywords, schemeKeywords);
+  const raw = Math.round(overlap * total * 10) / 10;
+  const awarded = Math.min(Math.round(raw), cap);
+
+  // Build breakdown by key point
+  const breakdown = [];
+  const perKp = kp.length ? total / kp.length : 0;
+  for (const point of kp) {
+    const kpKw = extractKeywords(point);
+    const kpOverlap = keywordOverlap(studentKeywords, kpKw);
+    const kpMarks = Math.round(kpOverlap * perKp);
+    if (kpMarks > 0 || kpOverlap > 0.3) {
+      breakdown.push({ criterion: point, marks: kpMarks, comment: kpOverlap > 0.5 ? 'Key point addressed' : 'Partially addressed' });
+    }
+  }
+
+  const feedback = awarded > 0
+    ? `Heuristic marking: ~${Math.round(overlap * 100)}% keyword match with marking scheme. ${awarded}/${total} marks awarded (capped at ${cap} without AI verification).`
+    : 'Heuristic marking: insufficient keyword overlap with marking scheme. 0 marks awarded.';
+
+  return {
+    marksAwarded: awarded,
+    maxMarks: total,
+    breakdown,
+    feedback,
+    aiGenerated: false,
+    aiReason: 'heuristic_fallback',
+    needsReview: false,
+  };
 }
 
 // ── Exam totals ────────────────────────────────────────────────────────
@@ -310,5 +455,6 @@ module.exports = {
   markObjective,
   markTheoryAnswer,
   markTheoryImageAnswer,
+  heuristicMark,
   recomputeExamTotal,
 };

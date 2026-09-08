@@ -1105,9 +1105,23 @@ async function markAllPendingTheory(sessionId) {
       try {
         marked = await marking.markTheoryAnswer(question, a.answer_text, scheme);
       } catch (err2) {
+        // AI failed twice — try heuristic keyword fallback
+        console.log(`[exam] AI marking failed for answer ${a.id}, trying heuristic fallback`);
+        const sch = scheme || marking.getScheme(question.id);
+        const h = marking.heuristicMark(question, a.answer_text, sch);
         db.prepare(
-          `UPDATE answers SET marked_by='ai', marks_awarded=0, needs_review=0, ai_feedback='The examiner could not mark this answer; 0 marks were recorded.', marked_at=datetime('now') WHERE id=?`
-        ).run(a.id);
+          `UPDATE answers SET marked_by=?, marks_awarded=0, needs_review=0, ai_feedback=?, marked_at=datetime('now') WHERE id=?`
+        ).run(
+          h.marksAwarded > 0 ? 'ai' : 'pending',
+          h.marksAwarded > 0 ? h.feedback : 'AI unavailable and heuristic found no matching keywords. Awaiting manual review.',
+          a.id
+        );
+        // If heuristic awarded marks, update them
+        if (h.marksAwarded > 0) {
+          db.prepare(
+            `UPDATE answers SET marks_awarded=?, marked_by='ai' WHERE id=?`
+          ).run(h.marksAwarded, a.id);
+        }
         return;
       }
     }
