@@ -193,68 +193,100 @@ async function markTheoryAnswer(question, studentAnswer, scheme) {
 
 /**
  * Grade a photo (written/drawn) theory answer.
- * Uses local OCR (tesseract.js) to read text, then marks against scheme.
- * Never throws.
+ * If studentAnswer already contains a meaningful reading (from inbound OCR/AI),
+ * marks it directly via markTheoryAnswer.  Otherwise tries local OCR and AI
+ * vision to re-read from the image file.  Never throws.
  */
 async function markTheoryImageAnswer(question, studentAnswer, imageFile, scheme) {
   const total = Number(question.marks) || 0;
   const review = { marksAwarded: 0, maxMarks: total, needsReview: true, feedback: 'Photo answer awaiting manual review.', aiGenerated: false };
 
-  // Try local OCR first (tesseract.js)
-  const ocr = require('./ocr');
-  try {
-    const ocrResult = await ocr.readPhotoAnswer(imageFile, question.text);
-    if (ocrResult.success && ocrResult.text && ocrResult.text !== '[unreadable]' && ocrResult.text.length > 1) {
+  // If the inbound read already produced meaningful text, mark it directly
+  // without re-reading the image (avoids duplicate OCR/vision calls that may
+  // fail on Render).
+  const PLACEHOLDERS = ['(photo answer)', '(photo answer - could not read)', '(photo answer - transcription failed)', '(audio answer)', '(audio answer - could not transcribe)', '(audio answer - transcription failed)'];
+  const preReadText = (studentAnswer || '').trim();
+  if (preReadText && !PLACEHOLDERS.includes(preReadText)) {
+    try {
       const textResult = await markTheoryAnswer({
         id: question.id,
         text: question.text,
         passage: question.passage || '',
         marks: total,
         type: 'theory',
-      }, ocrResult.text, scheme);
+      }, preReadText, scheme);
       return {
         marksAwarded: textResult.marksAwarded,
         maxMarks: textResult.maxMarks,
         breakdown: textResult.breakdown || [],
-        feedback: textResult.feedback || `OCR read (${ocrResult.confidence}% conf): ${ocrResult.text.slice(0, 150)}`,
+        feedback: textResult.feedback || `Student answer: ${preReadText.slice(0, 150)}`,
         aiGenerated: true,
-        aiReason: 'local_ocr',
+        aiReason: 'pre_read_text',
         needsReview: false,
       };
+    } catch (err) {
+      console.error('[marking] Text marking of pre-read answer failed:', err.message);
     }
-  } catch (err) {
-    console.error('[marking] Local OCR failed:', err.message);
   }
 
-  // Fallback to AI vision providers
-  if (ai.aiConfigured()) {
+  // No pre-read text or marking failed — try re-reading from the image
+  if (imageFile) {
+    // Try local OCR first (tesseract.js)
+    const ocr = require('./ocr');
     try {
-      const readText = await ai.readPhotoAnswer(imageFile, question.text);
-      if (readText && readText !== '[unreadable]') {
+      const ocrResult = await ocr.readPhotoAnswer(imageFile, question.text);
+      if (ocrResult.success && ocrResult.text && ocrResult.text !== '[unreadable]' && ocrResult.text.length > 1) {
         const textResult = await markTheoryAnswer({
           id: question.id,
           text: question.text,
           passage: question.passage || '',
           marks: total,
           type: 'theory',
-        }, readText, scheme);
+        }, ocrResult.text, scheme);
         return {
           marksAwarded: textResult.marksAwarded,
           maxMarks: textResult.maxMarks,
           breakdown: textResult.breakdown || [],
-          feedback: textResult.feedback || `AI read: ${readText.slice(0, 150)}`,
+          feedback: textResult.feedback || `OCR read (${ocrResult.confidence}% conf): ${ocrResult.text.slice(0, 150)}`,
           aiGenerated: true,
-          aiReason: 'ai_vision',
+          aiReason: 'local_ocr',
           needsReview: false,
         };
       }
     } catch (err) {
-      console.error('[marking] AI vision failed:', err.message);
+      console.error('[marking] Local OCR failed:', err.message);
+    }
+
+    // Fallback to AI vision providers
+    if (ai.aiConfigured()) {
+      try {
+        const readText = await ai.readPhotoAnswer(imageFile, question.text);
+        if (readText && readText !== '[unreadable]') {
+          const textResult = await markTheoryAnswer({
+            id: question.id,
+            text: question.text,
+            passage: question.passage || '',
+            marks: total,
+            type: 'theory',
+          }, readText, scheme);
+          return {
+            marksAwarded: textResult.marksAwarded,
+            maxMarks: textResult.maxMarks,
+            breakdown: textResult.breakdown || [],
+            feedback: textResult.feedback || `AI read: ${readText.slice(0, 150)}`,
+            aiGenerated: true,
+            aiReason: 'ai_vision',
+            needsReview: false,
+          };
+        }
+      } catch (err) {
+        console.error('[marking] AI vision failed:', err.message);
+      }
     }
   }
 
-  // No vision available — needs manual review
-  return review;
+  // Nothing worked — mark with 0 but still AI-graded so it doesn't block results
+  return { marksAwarded: 0, maxMarks: total, needsReview: false, feedback: 'Photo answer could not be read; 0 marks awarded.', aiGenerated: true, aiReason: 'unreadable' };
 }
 
 // ── Exam totals ────────────────────────────────────────────────────────

@@ -80,7 +80,7 @@ test('downloadMedia resolves buffer and mimeType through the Graph media URL', a
   }
 });
 
-test('markTheoryImageAnswer flags for manual review when vision is off', async () => {
+test('markTheoryImageAnswer gives 0 marks when vision is off and pre-read is placeholder', async () => {
   const wasVision = config.ai.vision;
   config.ai.vision = false;
   try {
@@ -88,31 +88,25 @@ test('markTheoryImageAnswer flags for manual review when vision is off', async (
       { id: 1, text: 'Draw the water cycle.', marks: 4, passage: '' },
       '(photo answer)', 'nonexistent.png', { model_answer: '', key_points: [], rubric: [], presentation_marks: 0, grammar_marks: 0 }
     );
-    assert.equal(out.needsReview, true);
+    assert.equal(out.needsReview, false, 'never blocks on manual review');
     assert.equal(out.marksAwarded, 0);
   } finally {
     config.ai.vision = wasVision;
   }
 });
 
-test('markTheoryImageAnswer flags for manual review when the AI call fails', async () => {
+test('markTheoryImageAnswer gives 0 marks when AI call fails', async () => {
   const wasVision = config.ai.vision;
-  const wasRead = require('fs').readFileSync;
   config.ai.vision = true;
-  require('fs').readFileSync = () => 'fake-base64';
-  const ai = require('../src/services/ai');
-  const orig = ai.markImageTheory;
-  ai.markImageTheory = async () => { throw new Error('vision endpoint exploded'); };
   try {
     const out = await marking.markTheoryImageAnswer(
       { id: 1, text: 'Draw the water cycle.', marks: 4, passage: '' },
-      '(photo answer)', 'f.png', {}
+      '(photo answer)', 'nonexistent.png', {}
     );
-    assert.equal(out.needsReview, true, 'AI failure falls back to manual review');
+    assert.equal(out.needsReview, false, 'never blocks on manual review');
+    assert.equal(out.marksAwarded, 0);
   } finally {
     config.ai.vision = wasVision;
-    require('fs').readFileSync = wasRead;
-    ai.markImageTheory = orig;
   }
 });
 
@@ -244,7 +238,7 @@ test('markAllPendingTheory grades a photo answer via vision when available', asy
   }
 });
 
-test('markAllPendingTheory flags a photo answer for manual review without vision', async () => {
+test('markAllPendingTheory gives 0 marks for unreadable photo answer without vision', async () => {
   db.exec('BEGIN');
   const wasVision = config.ai.vision;
   config.ai.vision = false;
@@ -266,9 +260,9 @@ test('markAllPendingTheory flags a photo answer for manual review without vision
     await exam.markAllPendingTheory(sessionId);
 
     const row = db.prepare('SELECT * FROM answers WHERE session_id = ? AND q_order = 1').get(sessionId);
-    assert.equal(row.needs_review, 1, 'flagged for manual review');
-    assert.equal(row.marked_by, 'pending');
-    assert.match(row.ai_feedback, /awaiting manual review/i);
+    assert.equal(row.needs_review, 0, 'never blocks on manual review');
+    assert.equal(row.marks_awarded, 0, 'unreadable gets 0 marks');
+    assert.equal(row.marked_by, 'ai', 'still AI-graded');
   } finally {
     config.ai.vision = wasVision;
     db.exec('ROLLBACK');
