@@ -147,7 +147,10 @@ async function chatJSON(messages, { temperature = 0.4, maxRetries = 2, timeoutMs
       ...common,
     });
 
-  if (!secondaryConfigured() && !tertiaryConfigured()) return primary();
+  if (!secondaryConfigured() && !tertiaryConfigured()) {
+    console.log('[ai] Using single provider:', config.ai.model);
+    return primary();
+  }
 
   const secondary = () =>
     callEndpoint({
@@ -170,10 +173,26 @@ async function chatJSON(messages, { temperature = 0.4, maxRetries = 2, timeoutMs
   // Race all configured providers; first success wins. When all fail,
   // surface the primary provider's error.
   const providers = [primary];
-  if (secondaryConfigured()) providers.push(secondary);
-  if (tertiaryConfigured()) providers.push(tertiary);
+  const providerNames = [config.ai.model];
+  if (secondaryConfigured()) {
+    providers.push(secondary);
+    providerNames.push(config.claude.model || 'secondary');
+  }
+  if (tertiaryConfigured()) {
+    providers.push(tertiary);
+    providerNames.push(config.xai.model || 'tertiary');
+  }
 
-  return Promise.any(providers.map((fn) => fn())).catch((agg) => {
+  console.log('[ai] Racing providers:', providerNames.join(', '));
+  const startTime = Date.now();
+  
+  return Promise.any(providers.map((fn) => fn())).then((result) => {
+    const elapsed = Date.now() - startTime;
+    console.log(`[ai] Provider responded in ${elapsed}ms`);
+    return result;
+  }).catch((agg) => {
+    const elapsed = Date.now() - startTime;
+    console.error(`[ai] All providers failed after ${elapsed}ms:`, agg?.errors?.map(e => e.message).join(', '));
     const err = agg && agg.errors ? agg.errors[0] : agg;
     throw err instanceof Error ? err : new AIError(`All AI providers failed: ${String(agg && agg.message)}`);
   });
@@ -418,7 +437,7 @@ Theory question schema:
 
 CRITICAL RULES:
 - You MUST return EXACTLY ${objN} objective questions and EXACTLY ${theoN} theory questions. Count them before returning. If you return fewer, the exam is broken.
-- ORDER: List all objective questions FIRST, then all theory questions. Do NOT mix them.
+- ORDER: List ALL objective questions FIRST, then ALL theory questions. Do NOT mix them. The output MUST start with objective questions and end with theory questions.
 - Options must have exactly one correct answer; distractors must be plausible.
 - correct_index is the 0-based index of the correct option.
 - CORRECTNESS IS NON-NEGOTIABLE: the option at correct_index must be the ONLY defensible correct answer. These keys are used to grade students, so a wrong key marks innocent students wrong.
@@ -456,11 +475,15 @@ ${avoidBlock}`;
       { temperature: 0.9, maxRetries: 3, maxTokens: 16384 }
     )
   );
-  // Low concurrency (3) to avoid rate-limiting on shared/free AI endpoints.
+  // Increase concurrency to utilize multiple AI providers.
+  // With 2-3 providers racing, we can handle more concurrent requests.
   // A small delay between batches further reduces 429 errors.
   // Individual batch failures are caught so a single 429 doesn't kill the
   // entire generation — we collect however many batches succeed.
-  const settled = await mapLimit(tasks, 3, async (run) => {
+  const providerCount = (secondaryConfigured() ? 1 : 0) + (tertiaryConfigured() ? 1 : 0) + 1;
+  const concurrency = Math.min(maxCalls, providerCount * 3);
+  console.log(`[generate] Using concurrency ${concurrency} with ${providerCount} providers`);
+  const settled = await mapLimit(tasks, concurrency, async (run) => {
     try {
       const result = await run();
       await delay(300);
@@ -499,6 +522,13 @@ ${avoidBlock}`;
     const dupRest = rest.some((p) => textSimilarity(p.text, q.text) > 0.8);
     if (!dupActive && !dupRest) rest.push(q);
   }
+  // Ensure objective questions always come before theory questions
+  const sortFn = (a, b) => {
+    if (a.type === b.type) return 0;
+    return a.type === 'objective' ? -1 : 1;
+  };
+  active.sort(sortFn);
+  rest.sort(sortFn);
   return active.concat(rest).slice(0, target);
 }
 
@@ -1588,6 +1618,12 @@ RULES:
   const providers = [
     { name: 'primary', baseUrl: config.ai.baseUrl, apiKey: config.ai.apiKey, model: config.ai.model },
   ];
+  if (secondaryConfigured()) {
+    providers.push({ name: 'secondary', baseUrl: config.claude.baseUrl, apiKey: config.claude.apiKey, model: config.claude.model || config.ai.model });
+  }
+  if (tertiaryConfigured()) {
+    providers.push({ name: 'tertiary', baseUrl: config.xai.baseUrl, apiKey: config.xai.apiKey, model: config.xai.model });
+  }
 
   let lastErr;
   for (const p of providers) {

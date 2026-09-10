@@ -146,6 +146,11 @@ router.get('/exams/:id', (req, res) => {
     .prepare('SELECT * FROM questions WHERE exam_id = ? ORDER BY q_order')
     .all(exam.id)
     .map(qWithScheme);
+  // Ensure objective questions always come before theory questions in the UI
+  questions.sort((a, b) => {
+    if (a.type === b.type) return a.q_order - b.q_order;
+    return a.type === 'objective' ? -1 : 1;
+  });
   const recipients = db
     .prepare(
       `SELECT s.*, r.sent_at FROM exam_recipients r JOIN students s ON s.id = r.student_id WHERE r.exam_id = ?`
@@ -723,6 +728,42 @@ router.get('/results/:sessionId/report-url', (req, res) => {
   const session = db.prepare('SELECT * FROM sessions WHERE id = ?').get(req.params.sessionId);
   if (!session) return res.status(404).json({ error: 'Session not found' });
   res.json({ url: auth.reportUrl(session.id) });
+});
+
+// ── Review queue ─────────────────────────────────────────────────
+
+router.get('/reviews', (req, res) => {
+  const rows = db
+    .prepare(
+      `SELECT a.id, a.q_order, a.answer_text, a.answer_image, a.marks_awarded, a.max_marks,
+              a.marked_by, a.ai_feedback, a.needs_review, a.ai_detected, a.marked_at,
+              q.type AS question_type, q.text AS question_text, q.marks AS question_marks,
+              s.id AS session_id, s.status AS session_status,
+              e.title AS exam_title, e.subject AS exam_subject,
+              st.name AS student_name, st.phone AS student_phone
+       FROM answers a
+       JOIN questions q ON q.id = a.question_id
+       JOIN sessions s ON s.id = a.session_id
+       JOIN exams e ON e.id = s.exam_id
+       JOIN students st ON st.id = s.student_id
+       WHERE a.needs_review = 1
+       ORDER BY a.marked_at DESC`
+    )
+    .all();
+  res.json(rows);
+});
+
+router.patch('/reviews/:answerId', (req, res) => {
+  const { marks_awarded } = req.body;
+  const answer = db.prepare('SELECT * FROM answers WHERE id = ?').get(req.params.answerId);
+  if (!answer) return res.status(404).json({ error: 'Answer not found' });
+  const m = parseFloat(marks_awarded);
+  const clamped = Number.isFinite(m) ? Math.min(Math.max(m, 0), answer.max_marks || 0) : answer.marks_awarded;
+  db.prepare(
+    `UPDATE answers SET marks_awarded=?, needs_review=0, reviewed=1, ai_detected=0, marked_by='manual', marked_at=datetime('now') WHERE id=?`
+  ).run(clamped, answer.id);
+  const updated = results.persistSessionTotals(answer.session_id);
+  res.json({ ok: true, score: updated.score, percentage: updated.percentage, passed: updated.passed });
 });
 
 // ── Exam attendance (participation list) ──────────────────────────

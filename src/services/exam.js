@@ -117,10 +117,22 @@ function drawSessionQuestions(sessionId, examId) {
   if (!n) return 0;
   const pool = db.prepare('SELECT id, text FROM question_pool WHERE exam_id = ?').all(examId);
   if (pool.length < n) topUpPool(examId, pool, n);
-  // Present the paper in the uploaded PDF order (pool rows are inserted in that
-  // order), never shuffled.
-  const ids = db.prepare('SELECT id FROM question_pool WHERE exam_id = ? ORDER BY id').all(examId);
-  const chosen = ids.slice(0, n);
+  // Sort pool questions: objective first, then theory, maintaining original order within each type
+  // Deduplicate by question text to prevent the same question appearing twice in one exam
+  const poolRows = db.prepare('SELECT id, type, text FROM question_pool WHERE exam_id = ? ORDER BY id').all(examId);
+  const seenTexts = new Set();
+  const uniqueRows = [];
+  for (const row of poolRows) {
+    const key = String(row.text || '').trim().toLowerCase();
+    if (key && seenTexts.has(key)) continue;
+    if (key) seenTexts.add(key);
+    uniqueRows.push(row);
+  }
+  uniqueRows.sort((a, b) => {
+    if (a.type === b.type) return 0;
+    return a.type === 'objective' ? -1 : 1;
+  });
+  const chosen = uniqueRows.slice(0, n);
   const ins = db.prepare(
     'INSERT INTO session_questions (session_id, question_id, q_order) VALUES (?,?,?)'
   );
@@ -187,9 +199,10 @@ function sessionQuestionSequence(session) {
   const drawn = db
     .prepare('SELECT q_order, question_id FROM session_questions WHERE session_id = ? ORDER BY q_order')
     .all(session.id);
+  let questions;
   if (drawn.length) {
     const get = db.prepare('SELECT * FROM question_pool WHERE id = ?');
-    return drawn
+    questions = drawn
       .map((m) => {
         const row = get.get(m.question_id);
         if (row) {
@@ -199,8 +212,15 @@ function sessionQuestionSequence(session) {
         return row;
       })
       .filter(Boolean);
+  } else {
+    questions = db.prepare('SELECT * FROM questions WHERE exam_id = ? ORDER BY q_order').all(s.exam_id);
   }
-  return db.prepare('SELECT * FROM questions WHERE exam_id = ? ORDER BY q_order').all(s.exam_id);
+  // Ensure objective questions always come before theory questions
+  questions.sort((a, b) => {
+    if (a.type === b.type) return a.q_order - b.q_order;
+    return a.type === 'objective' ? -1 : 1;
+  });
+  return questions;
 }
 
 /**
@@ -1076,25 +1096,27 @@ async function markAllPendingTheory(sessionId) {
         console.log(`[exam] Marking pending photo answer ${a.id}...`);
         const imgResult = await marking.markTheoryImageAnswer(question, a.answer_text || '(photo answer)', a.answer_image, scheme);
 
+        // Always set marked_by='ai' so the answer is never reprocessed in a loop.
+        // needs_review=1 flags it for admin attention when marking failed or was uncertain.
         db.prepare(
-          `UPDATE answers SET marked_by=?, marks_awarded=?, ai_feedback=?, answer_text=?, needs_review=?, marked_at=datetime('now') WHERE id=?`
+          `UPDATE answers SET marked_by='ai', marks_awarded=?, ai_feedback=?, answer_text=?, needs_review=?, marked_at=datetime('now') WHERE id=?`
         ).run(
-          imgResult.needsReview ? 'pending' : 'ai',
           imgResult.marksAwarded,
           imgResult.feedback || '',
           a.answer_text || '(photo answer)',
           imgResult.needsReview ? 1 : 0,
           a.id
         );
-        console.log(`[exam] Pending photo marked: ${imgResult.marksAwarded}/${question.marks}`);
+        console.log(`[exam] Pending photo marked: ${imgResult.marksAwarded}/${question.marks} (needsReview=${imgResult.needsReview})`);
         return;
       } catch (err) {
         console.error(`[exam] AI marking failed for pending photo:`, err.message);
       }
 
-      // All attempts failed — mark as needing review with 0 marks
+      // All attempts failed — mark as needing review with 0 marks, but mark as 'ai'
+      // so it is not reprocessed in an infinite loop
       db.prepare(
-        `UPDATE answers SET needs_review=1, marked_by='pending', marks_awarded=0, ai_feedback=?, marked_at=datetime('now') WHERE id=?`
+        `UPDATE answers SET needs_review=1, marked_by='ai', marks_awarded=0, ai_feedback=?, marked_at=datetime('now') WHERE id=?`
       ).run('Photo answer could not be read by AI. Awaiting manual review.', a.id);
       return;
     }
@@ -1110,18 +1132,12 @@ async function markAllPendingTheory(sessionId) {
         const sch = scheme || marking.getScheme(question.id);
         const h = marking.heuristicMark(question, a.answer_text, sch);
         db.prepare(
-          `UPDATE answers SET marked_by=?, marks_awarded=0, needs_review=0, ai_feedback=?, marked_at=datetime('now') WHERE id=?`
+          `UPDATE answers SET marked_by='ai', marks_awarded=?, needs_review=0, ai_feedback=?, marked_at=datetime('now') WHERE id=?`
         ).run(
-          h.marksAwarded > 0 ? 'ai' : 'pending',
-          h.marksAwarded > 0 ? h.feedback : 'AI unavailable and heuristic found no matching keywords. Awaiting manual review.',
+          h.marksAwarded,
+          h.marksAwarded > 0 ? h.feedback : `Heuristic fallback awarded ${h.marksAwarded}/${question.marks} marks. ${h.feedback}`,
           a.id
         );
-        // If heuristic awarded marks, update them
-        if (h.marksAwarded > 0) {
-          db.prepare(
-            `UPDATE answers SET marks_awarded=?, marked_by='ai' WHERE id=?`
-          ).run(h.marksAwarded, a.id);
-        }
         return;
       }
     }

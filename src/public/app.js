@@ -76,6 +76,7 @@ function landingHTML(anon = false) {
               <div class="stat-chip reveal" style="--d:200ms"><b data-count="0">0</b><span>Live</span></div>
               <div class="stat-chip reveal" style="--d:300ms"><b data-count="0">0</b><span>Questions</span></div>
               <div class="stat-chip reveal" style="--d:400ms"><b data-count="0">0</b><span>Students</span></div>
+              <div class="stat-chip reveal" style="--d:500ms;cursor:pointer" onclick="location.hash='#/reviews'"><b data-count="0">0</b><span>Reviews</span></div>
             </div>`}
           </div>
           <div class="hero-visual reveal" style="--d:150ms">
@@ -456,6 +457,7 @@ const routes = {
   '/exams/:id/attendance': renderAttendance,
   '/results': renderResults,
   '/results/:id': renderResultDetail,
+  '/reviews': renderReviews,
   '/students': renderStudents,
   '/messages': renderMessages,
 };
@@ -498,7 +500,8 @@ async function renderDashboard() {
   $view.innerHTML = landingHTML();
   const s = await api('/api/stats');
   document.querySelectorAll('.stat-chip b[data-count]').forEach((el) => {
-    const val = { exams: s.exams, live: s.published, questions: s.questions, students: s.students }[el.parentElement.querySelector('span').textContent.toLowerCase()] ?? 0;
+    const label = el.parentElement.querySelector('span').textContent.toLowerCase();
+    const val = { exams: s.exams, live: s.published, questions: s.questions, students: s.students, reviews: s.reviews }[label] ?? 0;
     el.dataset.count = val;
     animateCountUp(el, val);
   });
@@ -1517,6 +1520,63 @@ async function saveMarks(sessionId, answerId) {
   invalidateCache(`/api/results`);
   toast('Marks saved.');
   renderResultDetail(sessionId);
+}
+
+// ── Review queue ─────────────────────────────────────────────────
+
+async function renderReviews() {
+  $view.innerHTML = `
+    ${pageHead('pen', 'REVI<span class="gr">EW</span> QUEUE', 'Answers flagged for admin review')}
+    <div class="card table-card"><div class="skeleton skeleton-row" style="margin:10px"></div></div>`;
+
+  const reviews = await api('/api/reviews');
+  $view.innerHTML = `
+    ${pageHead('pen', 'REVI<span class="gr">EW</span> QUEUE', reviews.length ? `${reviews.length} answer(s) awaiting review` : 'All clear — no answers need review')}
+    ${reviews.length === 0
+      ? `<div class="card" style="text-align:center;padding:60px 20px">
+          <div style="font-size:2.5rem;margin-bottom:12px">${I.check}</div>
+          <h3 style="margin:0 0 8px">All caught up</h3>
+          <p class="muted" style="margin:0">No answers are pending review right now.</p>
+        </div>`
+      : `<div class="card table-card reveal">
+        <table>
+          <thead><tr><th>Student</th><th>Exam</th><th>Q#</th><th>Question</th><th>Answer</th><th>Type</th><th>Marks</th><th>Reason</th><th></th></tr></thead>
+          <tbody>
+            ${reviews.map((a) => `<tr>
+              <td>${esc(a.student_name || a.student_phone)}</td>
+              <td><a href="#/exams/${a.session_id ? '' : ''}">${esc(a.exam_title)}</a></td>
+              <td>${a.q_order}</td>
+              <td style="max-width:220px">${esc(a.question_text)}</td>
+              <td style="max-width:200px">${
+                a.answer_image
+                  ? `<a href="${API_BASE}/api/results/${a.session_id}/image/${encodeURIComponent(a.answer_image)}" target="_blank"><img src="${API_BASE}/api/results/${a.session_id}/image/${encodeURIComponent(a.answer_image)}" alt="photo" style="max-height:60px;border-radius:6px"></a>`
+                  : esc((a.answer_text || '').slice(0, 120))
+              }</td>
+              <td>${a.question_type === 'objective' ? badge('objective') : badge('theory')}</td>
+              <td>
+                <input type="number" data-rev="${a.id}" value="${a.marks_awarded}" step="0.5" style="width:60px" min="0" max="${a.max_marks}"> / ${a.max_marks}
+              </td>
+              <td style="max-width:200px;font-size:.82rem">${esc(a.ai_feedback || '').slice(0, 100)}</td>
+              <td>
+                <button class="small ghost" onclick="saveReview(${a.id}, ${a.session_id})">Save</button>
+                <a href="#/results/${a.session_id}"><button class="small ghost">Session</button></a>
+              </td>
+            </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>`}`;
+  observeReveals();
+}
+
+async function saveReview(answerId, sessionId) {
+  const input = document.querySelector(`[data-rev="${answerId}"]`);
+  if (!input) return;
+  await api(`/api/reviews/${answerId}`, {
+    method: 'PATCH',
+    body: { marks_awarded: parseFloat(input.value) },
+  });
+  toast('Mark saved and review cleared.');
+  renderReviews();
 }
 
 async function resendResult(id) {

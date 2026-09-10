@@ -218,7 +218,8 @@ async function markTheoryImageAnswer(question, studentAnswer, imageFile, scheme)
   // fail on Render).
   const PLACEHOLDERS = ['(photo answer)', '(photo answer - could not read)', '(photo answer - transcription failed)', '(audio answer)', '(audio answer - could not transcribe)', '(audio answer - transcription failed)'];
   const preReadText = (studentAnswer || '').trim();
-  if (preReadText && !PLACEHOLDERS.includes(preReadText)) {
+  const isPlaceholder = !preReadText || PLACEHOLDERS.includes(preReadText) || preReadText.length < 3;
+  if (!isPlaceholder) {
     try {
       const textResult = await markTheoryAnswer({
         id: question.id,
@@ -273,7 +274,7 @@ async function markTheoryImageAnswer(question, studentAnswer, imageFile, scheme)
     if (ai.aiConfigured()) {
       try {
         const readText = await ai.readPhotoAnswer(imageFile, question.text);
-        if (readText && readText !== '[unreadable]') {
+        if (readText && readText !== '[unreadable]' && readText.length > 1) {
           const textResult = await markTheoryAnswer({
             id: question.id,
             text: question.text,
@@ -297,12 +298,18 @@ async function markTheoryImageAnswer(question, studentAnswer, imageFile, scheme)
     }
   }
 
-  // Nothing worked — use heuristic keyword matching as last resort
-  const sch = scheme || getScheme(question.id);
-  const h = heuristicMark(question, studentAnswer, sch);
-  h.feedback = `[Photo unreadable — heuristic fallback] ${h.feedback}`;
-  h.aiReason = 'photo_heuristic_fallback';
-  return h;
+  // Nothing worked — the photo could not be read. Return 0 marks with
+  // needsReview so the admin can manually grade it. We do NOT run heuristic
+  // keyword matching on placeholder text since it always yields 0 and wastes time.
+  return {
+    marksAwarded: 0,
+    maxMarks: total,
+    breakdown: [],
+    feedback: 'Photo answer could not be read by OCR or AI vision. Awaiting manual review by administrator.',
+    aiGenerated: false,
+    aiReason: 'photo_unreadable',
+    needsReview: true,
+  };
 }
 
 // ── Heuristic keyword marking (AI fallback) ───────────────────────────
@@ -376,7 +383,7 @@ function keywordOverlap(studentSet, schemeSet) {
 function heuristicMark(question, studentAnswer, scheme) {
   const total = Number(question.marks) || 0;
   if (!total || !studentAnswer) {
-    return { marksAwarded: 0, maxMarks: total, breakdown: [], feedback: '', aiGenerated: false, aiReason: 'no_answer', needsReview: false };
+    return { marksAwarded: 0, maxMarks: total, breakdown: [], feedback: 'No answer provided.', aiGenerated: false, aiReason: 'no_answer', needsReview: false };
   }
 
   const cap = Math.ceil(total * 0.6); // max 60% via heuristic
@@ -399,7 +406,22 @@ function heuristicMark(question, studentAnswer, scheme) {
   const studentKeywords = extractKeywords(studentAnswer);
 
   if (!schemeKeywords.size) {
-    // No scheme keywords available — award 0 but don't block
+    // No scheme keywords available — give partial credit for substantive answers.
+    // A student who writes a multi-sentence answer with real words (not just
+    // placeholders) deserves something instead of a blanket 0.
+    const wordCount = studentAnswer.split(/\s+/).filter(w => w.length > 2).length;
+    if (wordCount >= 10) {
+      const awarded = Math.min(Math.ceil(total * 0.25), cap);
+      return {
+        marksAwarded: awarded,
+        maxMarks: total,
+        breakdown: [],
+        feedback: `No marking scheme available. Awarded ${awarded}/${total} marks for a substantive answer (${wordCount} words). Admin review recommended.`,
+        aiGenerated: false,
+        aiReason: 'no_scheme_partial',
+        needsReview: true,
+      };
+    }
     return { marksAwarded: 0, maxMarks: total, breakdown: [], feedback: 'No marking scheme available for heuristic marking.', aiGenerated: false, aiReason: 'no_scheme', needsReview: false };
   }
 

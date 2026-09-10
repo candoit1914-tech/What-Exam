@@ -88,7 +88,7 @@ test('markTheoryImageAnswer gives 0 marks when vision is off and pre-read is pla
       { id: 1, text: 'Draw the water cycle.', marks: 4, passage: '' },
       '(photo answer)', 'nonexistent.png', { model_answer: '', key_points: [], rubric: [], presentation_marks: 0, grammar_marks: 0 }
     );
-    assert.equal(out.needsReview, false, 'never blocks on manual review');
+    assert.equal(out.needsReview, true, 'unreadable photo needs admin review');
     assert.equal(out.marksAwarded, 0);
   } finally {
     config.ai.vision = wasVision;
@@ -103,7 +103,7 @@ test('markTheoryImageAnswer gives 0 marks when AI call fails', async () => {
       { id: 1, text: 'Draw the water cycle.', marks: 4, passage: '' },
       '(photo answer)', 'nonexistent.png', {}
     );
-    assert.equal(out.needsReview, false, 'never blocks on manual review');
+    assert.equal(out.needsReview, true, 'unreadable photo needs admin review');
     assert.equal(out.marksAwarded, 0);
   } finally {
     config.ai.vision = wasVision;
@@ -260,7 +260,7 @@ test('markAllPendingTheory gives 0 marks for unreadable photo answer without vis
     await exam.markAllPendingTheory(sessionId);
 
     const row = db.prepare('SELECT * FROM answers WHERE session_id = ? AND q_order = 1').get(sessionId);
-    assert.equal(row.needs_review, 0, 'never blocks on manual review');
+    assert.equal(row.needs_review, 1, 'unreadable photo flagged for admin review');
     assert.equal(row.marks_awarded, 0, 'unreadable gets 0 marks');
     assert.equal(row.marked_by, 'ai', 'still AI-graded');
   } finally {
