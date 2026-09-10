@@ -29,6 +29,158 @@ async function extractText(buffer) {
   return stripMarkers((await extractDocument(buffer)).text);
 }
 
+/**
+ * Render a full PDF page to a PNG buffer at the given scale.
+ * Used for OCR of scanned/image-only PDFs.
+ */
+async function renderPageToBuffer(buffer, pageNum, scale = 2) {
+  const { createCanvas } = require('@napi-rs/canvas');
+  const doc = await openDoc(buffer);
+  const page = await doc.getPage(pageNum);
+  const vp = page.getViewport({ scale });
+  const canvas = createCanvas(Math.ceil(vp.width), Math.ceil(vp.height));
+  const ctx = canvas.getContext('2d');
+  // Use replayPageOps to render the page (vector + raster, skips text glyphs)
+  const full = await replayPageOps(page, page.getViewport({ scale: 1 }));
+  ctx.drawImage(full, 0, 0, canvas.width, canvas.height);
+  return canvas.toBuffer('image/png');
+}
+
+/**
+ * OCR a single rendered page image buffer using Tesseract.js.
+ * Returns the extracted text string.
+ */
+async function ocrPageBuffer(pageBuffer) {
+  const Tesseract = require('tesseract.js');
+  const worker = await Tesseract.createWorker('eng', 1, {
+    logger: () => {},
+  });
+  try {
+    const { data: { text } } = await worker.recognize(pageBuffer);
+    return text || '';
+  } finally {
+    await worker.terminate();
+  }
+}
+
+/**
+ * For scanned/image-only PDFs: render each page as an image, OCR it,
+ * and return text lines + image list (same shape as analyzeDocument).
+ * This is the fallback when getTextContent() returns nothing.
+ */
+async function ocrDocument(buffer) {
+  const { createCanvas } = require('@napi-rs/canvas');
+  const doc = await openDoc(buffer);
+  const Tesseract = require('tesseract.js');
+  const worker = await Tesseract.createWorker('eng', 1, {
+    logger: () => {},
+  });
+
+  const textLines = [];
+  const images = [];
+  const rowsByPage = [];
+
+  try {
+    for (let p = 1; p <= doc.numPages; p++) {
+      const page = await doc.getPage(p);
+      const vp = page.getViewport({ scale: 2 }); // 2x for better OCR
+      // Render the full page to a canvas
+      const full = await replayPageOps(page, page.getViewport({ scale: 1 }));
+      const canvas = createCanvas(Math.ceil(vp.width), Math.ceil(vp.height));
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(full, 0, 0, canvas.width, canvas.height);
+      const pageBuffer = canvas.toBuffer('image/png');
+
+      // OCR the rendered page
+      const { data: { text } } = await worker.recognize(pageBuffer);
+      const lines = (text || '').split('\n').filter((l) => l.trim());
+      textLines.push(...lines);
+
+      // Create synthetic row entries for marker placement (one row per OCR line)
+      const pageRows = lines.map((line, i) => ({
+        y: vp.height - ((i + 0.5) * vp.height / lines.length), // approximate y position
+        line,
+      }));
+      rowsByPage.push(pageRows);
+
+      // Also detect images from the operator list (diagrams in scanned PDFs)
+      const { OPS } = loadPdfjs();
+      const ops = await page.getOperatorList();
+      const paints = [];
+      let ctm = [1, 0, 0, 1, 0, 0];
+      const stack = [];
+      let lineWidth = 1;
+      let pathPts = null;
+
+      const seal = () => {
+        if (pathPts && pathPts.length >= 4) {
+          const bb = pointsAABB(pathPts, ctm);
+          if (bb.w > 0 && bb.h > 0) {
+            paints.push({ kind: 'vector', page: p, ...bb, userMid: bb.y + bb.h / 2, strokePad: lineWidth / 2 });
+          }
+        }
+        pathPts = null;
+      };
+
+      for (let i = 0; i < ops.fnArray.length; i++) {
+        const fn = ops.fnArray[i];
+        const args = ops.argsArray[i];
+        if (fn === OPS.transform) ctm = mul(ctm, args);
+        else if (fn === OPS.save) stack.push(ctm);
+        else if (fn === OPS.restore) ctm = stack.pop() || [1, 0, 0, 1, 0, 0];
+        else if (fn === OPS.setLineWidth) lineWidth = args[0];
+        else if (fn === OPS.constructPath) {
+          const codes = args[0] || [];
+          const nums = args[1] || [];
+          let ni = 0;
+          let pts = pathPts || [];
+          for (const code of codes) {
+            if (code === OPS.rectangle) { pts.push(nums[ni], nums[ni + 1], nums[ni] + nums[ni + 2], nums[ni + 1] + nums[ni + 3]); ni += 4; }
+            else if (code === OPS.moveTo || code === OPS.lineTo) { pts.push(nums[ni], nums[ni + 1]); ni += 2; }
+            else if (code === OPS.curveTo) { pts.push(nums[ni], nums[ni + 1], nums[ni + 2], nums[ni + 3], nums[ni + 4], nums[ni + 5]); ni += 6; }
+            else if (code === OPS.curveTo2 || code === OPS.curveTo3) { pts.push(nums[ni], nums[ni + 1], nums[ni + 2], nums[ni + 3]); ni += 4; }
+          }
+          pathPts = pts;
+        } else if (fn === OPS.rectangle) {
+          pathPts = (pathPts || []).concat([args[0], args[1], args[0] + args[2], args[1] + args[3]]);
+        } else if (fn === OPS.ellipse) {
+          const [x, y, rx, ry] = args;
+          pathPts = (pathPts || []).concat([x - rx, y - ry, x + rx, y + ry]);
+        } else if (fn === OPS.fill || fn === OPS.eoFill || fn === OPS.fillStroke || fn === OPS.stroke || fn === OPS.closeFillStroke || fn === OPS.closeStroke || fn === OPS.endPath) {
+          seal();
+        } else if (fn === OPS.paintImageXObject || fn === OPS.paintInlineImageXObject || fn === OPS.paintImageMaskXObject) {
+          const bb = unitSquareAABB(ctm);
+          paints.push({ kind: 'raster', page: p, ...bb, userMid: bb.y + bb.h / 2, rasterId: fn === OPS.paintImageXObject ? args[0] : null });
+        }
+      }
+      seal();
+
+      // Filter and convert paints to canvas-space images
+      const pageArea = vp.width / 2 * vp.height / 2; // actual page size at scale 1
+      for (const q of paints) {
+        const box = q.kind === 'vector' ? vectorBox(q) : q;
+        const ratio = (box.w * box.h) / pageArea;
+        if (ratio < PAGE_AREA_MIN || ratio > PAGE_AREA_MAX) continue;
+        images.push({
+          page: p,
+          x: box.x,
+          y: (vp.height / 2) - box.y - box.h, // user (y-up) → canvas (y-down)
+          w: box.w,
+          h: box.h,
+          kind: q.kind,
+          userBox: { x: box.x, y: box.y, w: box.w, h: box.h },
+          userMid: q.userMid,
+          rasterId: q.rasterId ?? null,
+        });
+      }
+    }
+  } finally {
+    await worker.terminate();
+  }
+
+  return { textLines, images, rowsByPage };
+}
+
 // Helper: multiply 3x3-affine matrices [a,b,c,d,e,f]
 function mul(A, B) {
   return [
@@ -231,7 +383,14 @@ async function analyzeDocument(buffer) {
     }
   }
   const text = merged.join('\n').replace(/[ \t]+/g, ' ');
-  if (!text.trim()) throw new Error('No readable text found in PDF (scanned/image PDFs are not supported yet).');
+  if (!text.trim()) {
+    // No extractable text — this is likely a scanned/image-only PDF.
+    // Fall back to OCR: render each page as an image and run Tesseract.
+    console.log('[pdf] No extractable text found, falling back to OCR...');
+    const ocrResult = await ocrDocument(buffer);
+    ocrResult._ocr = true;
+    return ocrResult;
+  }
 
   // Assemble images page by page with the size filters applied per page, then
   // drop two classes of phantom vectors:
@@ -322,7 +481,7 @@ async function extractDocument(buffer) {
  * n = the figure's index into the extractDocument images array.
  */
 async function textWithMarkers(buffer) {
-  const { textLines, images, rowsByPage } = await analyzeDocument(buffer);
+  const { textLines, images, rowsByPage, _ocr } = await analyzeDocument(buffer);
   const pageStarts = [];
   {
     let n = 0;
@@ -384,7 +543,7 @@ async function textWithMarkers(buffer) {
     markers.push({ idx: ins.idx, page: ins.page });
   }
   markers.sort((a, b) => a.idx - b.idx);
-  return { text: lines.join('\n'), markers };
+  return { text: lines.join('\n'), markers, images, _ocr: !!_ocr };
 }
 
 // A canvas 2D context that accepts every call pdfjs's renderer makes but
@@ -443,9 +602,12 @@ function rgbaFromPixels(img) {
 /**
  * Render one raster figure to a PNG file: decodes the raw bitmap through a
  * no-op page render, then draws it stretched into the figure's box at 2x.
+ * Falls back to replayPageOps (full page render + crop) for scanned PDFs
+ * where the raster isn't in page.objs.
  * Returns outPath (side effect: writes the file).
  */
 async function renderImage(buffer, image, outPath) {
+  const { createCanvas } = require('@napi-rs/canvas');
   const doc = await openDoc(buffer);
   const page = await doc.getPage(image.page);
   const vp = page.getViewport({ scale: 1 });
@@ -459,7 +621,6 @@ async function renderImage(buffer, image, outPath) {
       if (v && v.width && v.height) { img = v; break; }
     }
   }
-  const { createCanvas } = require('@napi-rs/canvas');
   const cw = Math.max(1, Math.round((image.w || 1) * 2));
   const ch = Math.max(1, Math.round((image.h || 1) * 2));
   const out = createCanvas(cw, ch);
@@ -473,10 +634,18 @@ async function renderImage(buffer, image, outPath) {
     sctx.putImageData(id, 0, 0);
     octx.drawImage(src, 0, 0, cw, ch);
   } else {
-    // 1bpp mask / undecodable: a light box is better than a missing figure.
-    console.warn('[pdf] image kind unsupported, drawing placeholder:', img && img.kind);
-    octx.fillStyle = '#d9d9d9';
-    octx.fillRect(0, 0, cw, ch);
+    // Raster not in page.objs (scanned PDF) — fall back to replayPageOps
+    // which renders the full page vector+raster ops, then crop to the figure box.
+    try {
+      const full = await replayPageOps(page, vp);
+      const pad = 4;
+      octx.drawImage(full, image.x - pad, image.y - pad, image.w + pad * 2, image.h + pad * 2, 0, 0, cw, ch);
+    } catch {
+      // Last resort: grey placeholder
+      console.warn('[pdf] image render fallback failed, drawing placeholder');
+      octx.fillStyle = '#d9d9d9';
+      octx.fillRect(0, 0, cw, ch);
+    }
   }
   fs.writeFileSync(outPath, out.toBuffer('image/png'));
   return outPath;
@@ -669,4 +838,4 @@ function saveUpload(buffer, originalName) {
   return filePath;
 }
 
-module.exports = { extractText, extractDocument, textWithMarkers, stripMarkers, renderImage, renderVectorRegion, saveUpload, loadPdfjs, openDoc };
+module.exports = { extractText, extractDocument, textWithMarkers, stripMarkers, renderImage, renderVectorRegion, renderPageToBuffer, saveUpload, loadPdfjs, openDoc };

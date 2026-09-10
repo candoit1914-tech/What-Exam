@@ -143,8 +143,15 @@ async function startJob(jobId, buffer) {
   const created = [];
   try {
     const sourceText = await pdf.textWithMarkers(buffer);
-    const { images } = await pdf.extractDocument(buffer);
+    // textWithMarkers already calls analyzeDocument internally which includes
+    // the image list. Use that instead of a second extractDocument call.
+    const images = sourceText.images || [];
     const text = sourceText.text;
+    const isOcr = sourceText._ocr || false;
+    if (isOcr) {
+      console.log('[pdfImport] Document was scanned/image-based — used OCR to extract text');
+      updateJob(jobId, { warning: 'This PDF was scanned/image-based. Text was extracted via OCR and may contain minor errors.' });
+    }
     updateJob(jobId, { stage: 'Parsing questions…', progress: 10 });
 
     let blockWarning = '';
@@ -158,7 +165,12 @@ async function startJob(jobId, buffer) {
       { markers: sourceText.markers }
     );
     if (!parsed.length) {
-      throw new Error('No questions could be parsed from this PDF. Is the document text-based?');
+      throw new Error(
+        'No questions could be parsed from this PDF. ' +
+        (isOcr
+          ? 'The scanned text may be too unclear for the AI to identify question patterns. Try a clearer scan or manually add questions.'
+          : 'The document may not contain exam questions in a recognizable format.')
+      );
     }
 
     // Estimate from the parseable (cleaned) text — the raw text still contains
