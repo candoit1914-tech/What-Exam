@@ -67,16 +67,18 @@ RULES:
 
 /**
  * Fast AI chat via Puter.js (used for question generation).
+ * Supports both a plain prompt string and an OpenAI-style messages array.
  */
 async function chat(prompt, options = {}) {
   if (!isConfigured()) return null;
   const client = initPuter();
   if (!client) return null;
   try {
-    const response = await client.ai.chat(prompt, {
+    const input = Array.isArray(prompt) ? prompt : prompt;
+    const response = await client.ai.chat(input, {
       model: options.model || 'gpt-4o-mini',
       temperature: options.temperature ?? 0.7,
-      max_tokens: options.maxTokens || 2000,
+      max_tokens: options.maxTokens || 4096,
     });
     return typeof response === 'string' ? response : response?.message?.content || '';
   } catch (err) {

@@ -146,8 +146,13 @@ function tertiaryConfigured() {
   return !!(config.xai && config.xai.apiKey && config.xai.baseUrl);
 }
 
+function puterConfigured() {
+  const puter = require('./puter');
+  return puter.isConfigured();
+}
+
 async function chatJSON(messages, { temperature = 0.4, maxRetries = 2, timeoutMs = config.ai.timeoutMs, maxTokens = 8192 } = {}) {
-  if (!aiConfigured()) {
+  if (!aiConfigured() && !puterConfigured()) {
     throw new AIError('AI is not configured. Set AI_API_KEY and AI_BASE_URL in .env');
   }
 
@@ -155,15 +160,27 @@ async function chatJSON(messages, { temperature = 0.4, maxRetries = 2, timeoutMs
   // never block the whole flow. 0 means "no timeout" in withHardTimeout.
   const effectiveTimeout = Math.max(timeoutMs, 60000);
   const common = { messages, temperature, maxRetries, maxTokens, timeoutMs: effectiveTimeout };
-  const primary = () =>
+  const primary = aiConfigured() ? () =>
     callEndpoint({
       baseUrl: config.ai.baseUrl,
       apiKey: config.ai.apiKey,
       model: config.ai.model,
       ...common,
-    });
+    }) : null;
 
-  if (!secondaryConfigured() && !tertiaryConfigured()) {
+  // Puter.js provider — wraps puter.ai.chat in the same callEndpoint shape
+  const puterProvider = async () => {
+    const puter = require('./puter');
+    const startTime = Date.now();
+    const response = await puter.chat(messages, { temperature, maxTokens });
+    if (!response) throw new AIError('Puter.js returned empty response');
+    const parsed = parseJSON(response);
+    const elapsed = Date.now() - startTime;
+    console.log(`[puter] Responded in ${elapsed}ms`);
+    return parsed;
+  };
+
+  if (!secondaryConfigured() && !tertiaryConfigured() && !puterConfigured()) {
     console.log('[ai] Using single provider:', config.ai.model);
     return primary();
   }
@@ -188,8 +205,12 @@ async function chatJSON(messages, { temperature = 0.4, maxRetries = 2, timeoutMs
 
   // Race all configured providers; first success wins. When all fail,
   // surface the primary provider's error.
-  const providers = [primary];
-  const providerNames = [config.ai.model];
+  const providers = [];
+  const providerNames = [];
+  if (primary) {
+    providers.push(primary);
+    providerNames.push(config.ai.model);
+  }
   if (secondaryConfigured()) {
     providers.push(secondary);
     providerNames.push(config.claude.model || 'secondary');
@@ -197,6 +218,14 @@ async function chatJSON(messages, { temperature = 0.4, maxRetries = 2, timeoutMs
   if (tertiaryConfigured()) {
     providers.push(tertiary);
     providerNames.push(config.xai.model || 'tertiary');
+  }
+  if (puterConfigured()) {
+    providers.push(puterProvider);
+    providerNames.push('puter.js');
+  }
+
+  if (!providers.length) {
+    throw new AIError('No AI providers configured');
   }
 
   console.log('[ai] Racing providers:', providerNames.join(', '));
@@ -1593,6 +1622,22 @@ RULES:
       lastErr = err;
     }
   }
+
+  // Fallback: Puter.js vision (GPT-4o-mini) — always supports vision
+  if (puterConfigured()) {
+    try {
+      const puter = require('./puter');
+      console.log('[ai] Trying Puter.js vision for photo read...');
+      const puterText = await puter.readPhotoAnswer(imagePath, questionText);
+      if (puterText && puterText !== '[unreadable]') {
+        console.log(`[ai] Photo read via puter.js: "${puterText.slice(0, 150)}..."`);
+        return puterText.trim();
+      }
+    } catch (err) {
+      console.error(`[ai] Puter.js vision failed: ${err.message}`);
+    }
+  }
+
   throw lastErr || new AIError('All providers failed for photo read');
 }
 
