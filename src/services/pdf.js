@@ -79,14 +79,16 @@ async function ocrDocument(buffer) {
   const textLines = [];
   const images = [];
   const rowsByPage = [];
+  const pageData = [];
 
   try {
     for (let p = 1; p <= doc.numPages; p++) {
       const page = await doc.getPage(p);
-      const vp = page.getViewport({ scale: 2 }); // 2x for better OCR
-      // Render the full page to a canvas
-      const full = await replayPageOps(page, page.getViewport({ scale: 1 }));
-      const canvas = createCanvas(Math.ceil(vp.width), Math.ceil(vp.height));
+      const vp1 = page.getViewport({ scale: 1 });
+      const vp2 = page.getViewport({ scale: 2 });
+      // Render at scale 2 directly for crisp OCR input
+      const full = await replayPageOps(page, vp2);
+      const canvas = createCanvas(Math.ceil(vp2.width), Math.ceil(vp2.height));
       const ctx = canvas.getContext('2d');
       ctx.drawImage(full, 0, 0, canvas.width, canvas.height);
       const pageBuffer = canvas.toBuffer('image/png');
@@ -96,14 +98,14 @@ async function ocrDocument(buffer) {
       const lines = (text || '').split('\n').filter((l) => l.trim());
       textLines.push(...lines);
 
-      // Create synthetic row entries for marker placement (one row per OCR line)
+      // Create synthetic row entries in scale-1 user space for marker placement
       const pageRows = lines.map((line, i) => ({
-        y: vp.height - ((i + 0.5) * vp.height / lines.length), // approximate y position
+        y: vp1.height - ((i + 0.5) * vp1.height / lines.length),
         line,
       }));
       rowsByPage.push(pageRows);
 
-      // Also detect images from the operator list (diagrams in scanned PDFs)
+      // Detect images from the operator list (diagrams in scanned PDFs)
       const { OPS } = loadPdfjs();
       const ops = await page.getOperatorList();
       const paints = [];
@@ -154,17 +156,29 @@ async function ocrDocument(buffer) {
         }
       }
       seal();
+      pageData.push({ paints, width: vp1.width, height: vp1.height, rows: pageRows });
+    }
 
-      // Filter and convert paints to canvas-space images
-      const pageArea = vp.width / 2 * vp.height / 2; // actual page size at scale 1
-      for (const q of paints) {
+    // Apply the same image filtering as analyzeDocument
+    const filtered = [];
+    for (let p = 0; p < pageData.length; p++) {
+      const { paints, width, height } = pageData[p];
+      const pageArea = width * height;
+      const perPage = paints.filter((q) => {
         const box = q.kind === 'vector' ? vectorBox(q) : q;
         const ratio = (box.w * box.h) / pageArea;
-        if (ratio < PAGE_AREA_MIN || ratio > PAGE_AREA_MAX) continue;
-        images.push({
-          page: p,
+        if (ratio < PAGE_AREA_MIN) return false;
+        if (ratio > PAGE_AREA_MAX) {
+          return paints.length === 1;
+        }
+        return true;
+      });
+      for (const q of perPage) {
+        const box = q.kind === 'vector' ? vectorBox(q) : q;
+        filtered.push({
+          page: p + 1,
           x: box.x,
-          y: (vp.height / 2) - box.y - box.h, // user (y-up) → canvas (y-down)
+          y: height - box.y - box.h,
           w: box.w,
           h: box.h,
           kind: q.kind,
@@ -173,6 +187,32 @@ async function ocrDocument(buffer) {
           rasterId: q.rasterId ?? null,
         });
       }
+    }
+
+    // Drop frame/outline vectors overlapping rasters, repeating headers, text-in-box
+    const rasters = filtered.filter((q) => q.kind === 'raster');
+    const overlap = (a, b) => {
+      const ix = Math.max(0, Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x));
+      const iy = Math.max(0, Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y));
+      return ix * iy;
+    };
+    const seenBoxes = new Map();
+    for (const q of filtered) {
+      if (q.kind !== 'vector') continue;
+      const key = [Math.round(q.x / 2) * 2, Math.round(q.y / 2) * 2, Math.round(q.w / 2) * 2, Math.round(q.h / 2) * 2].join(',');
+      if (!seenBoxes.has(key)) seenBoxes.set(key, new Set());
+      seenBoxes.get(key).add(q.page);
+    }
+    for (const q of filtered) {
+      if (q.kind === 'vector') {
+        const covered = rasters.some((r) => r.page === q.page && overlap(r, q) >= 0.5 * Math.min(r.w * r.h, q.w * q.h));
+        if (covered) continue;
+        const key = [Math.round(q.x / 2) * 2, Math.round(q.y / 2) * 2, Math.round(q.w / 2) * 2, Math.round(q.h / 2) * 2].join(',');
+        if ((seenBoxes.get(key) || new Set()).size >= 2) continue;
+        const qRows = pageData[q.page - 1].rows;
+        if (qRows.some((row) => row.y >= q.userBox.y && row.y <= q.userBox.y + q.userBox.h)) continue;
+      }
+      images.push(q);
     }
   } finally {
     await worker.terminate();
@@ -389,6 +429,23 @@ async function analyzeDocument(buffer) {
     console.log('[pdf] No extractable text found, falling back to OCR...');
     const ocrResult = await ocrDocument(buffer);
     ocrResult._ocr = true;
+    // Sentence-join the raw OCR lines (same algorithm as below)
+    const merged = [];
+    for (const line of ocrResult.textLines) {
+      const trimmed = line.trim();
+      if (!trimmed) { merged.push(''); continue; }
+      const prev = merged.length > 0 ? merged[merged.length - 1] : '';
+      const prevEndsSentence = /[.!?;:]\s*$/.test(prev);
+      const curStartsNewSentence = /^[A-Z(]/.test(trimmed) && !prevEndsSentence;
+      const looksLikeOption = /^\(?[A-Da-d]\)?[.\-:\])]/.test(trimmed);
+      const looksLikeNumber = /^\d{1,3}\s*[.)]/.test(trimmed);
+      if (prev && !prevEndsSentence && !curStartsNewSentence && !looksLikeOption && !looksLikeNumber && prev.length > 0) {
+        merged[merged.length - 1] = prev + ' ' + trimmed;
+      } else {
+        merged.push(trimmed);
+      }
+    }
+    ocrResult.textLines = merged;
     return ocrResult;
   }
 
