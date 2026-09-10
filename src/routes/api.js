@@ -493,7 +493,7 @@ router.post('/exams/:id/generate', asyncWrap(async (req, res) => {
   }
   console.log(`[generate] got ${generated.length} questions from AI`);
   if (generated.length === 0) {
-    return res.status(502).json({ error: 'AI returned no questions. The provider may be rate-limited — try again in a few seconds.' });
+    return res.status(502).json({ error: 'AI returned no questions. The provider may be rate-limited or out of quota — check your AI API key and billing status, then try again.' });
   }
 
   // Sort so objective questions come first, then theory — matches WhatsApp

@@ -55,8 +55,16 @@ async function callEndpointRaw({ baseUrl, apiKey, model, messages, temperature, 
     throw new AIError(`AI request failed (${res.status}): ${text.slice(0, 300)}`);
   }
   const data = await res.json();
+  // Gemini wraps errors in a 200 OK as an array: [{error: {code: 429, ...}}]
+  if (Array.isArray(data) && data[0]?.error) {
+    const e = data[0].error;
+    throw new AIError(`AI request failed (${e.code || 'error'}): ${e.message || JSON.stringify(e).slice(0, 200)}`);
+  }
+  if (data?.error) {
+    throw new AIError(`AI request failed (${data.error.code || 'error'}): ${data.error.message || JSON.stringify(data.error).slice(0, 200)}`);
+  }
   const content = data?.choices?.[0]?.message?.content;
-  if (!content) throw new AIError('AI returned empty response');
+  if (!content) throw new AIError('AI returned empty response — no choices in payload');
   return content;
 }
 
@@ -89,8 +97,16 @@ async function callEndpoint({ baseUrl, apiKey, model, messages, temperature, max
       }
 
       const data = await res.json();
+      // Gemini wraps errors in a 200 OK as an array: [{error: {code: 429, ...}}]
+      if (Array.isArray(data) && data[0]?.error) {
+        const e = data[0].error;
+        throw new AIError(`AI request failed (${e.code || 'error'}): ${e.message || JSON.stringify(e).slice(0, 200)}`);
+      }
+      if (data?.error) {
+        throw new AIError(`AI request failed (${data.error.code || 'error'}): ${data.error.message || JSON.stringify(data.error).slice(0, 200)}`);
+      }
       const content = data?.choices?.[0]?.message?.content;
-      if (!content) throw new AIError('AI returned empty response');
+      if (!content) throw new AIError('AI returned empty response — no choices in payload');
 
       return parseJSON(content);
     } catch (err) {
@@ -283,8 +299,9 @@ const BLOCK_MAX_CHARS = 5000;
 // Blocks run several at a time: enough parallelism to collapse a long paper's
 // wall-clock time, so a slow block does not stall the whole wave. The cap is
 // still bounded so a single upload never floods a shared endpoint.
-// Increased to 20 for faster extraction.
-const BLOCK_CONCURRENCY = 20;
+// With 2 providers racing, concurrency = providerCount * 3 = 6; this is
+// high enough for fast providers but won't overwhelm slow ones.
+const BLOCK_CONCURRENCY = 6;
 const BLOCK_MAX_TOKENS = 6000;
 // A single extraction block runs on its own clock with a couple of retries
 // (flaky shared endpoints drop requests under concurrency). A block that still

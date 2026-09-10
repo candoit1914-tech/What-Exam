@@ -981,8 +981,8 @@ test('markAllPendingTheory uses heuristic fallback when AI marking fails', async
   db.exec('BEGIN');
   try {
     const examId = db
-      .prepare('INSERT INTO exams (title, subject, duration_minutes) VALUES (?,?)')
-      .run('__theory_fail_exam__', 'Test', 30).lastInsertRowid;
+      .prepare('INSERT INTO exams (title, subject, description, duration_minutes) VALUES (?,?,?,?)')
+      .run('__theory_fail_exam__', 'Test', '', 30).lastInsertRowid;
     const qid = db
       .prepare("INSERT INTO questions (exam_id, q_order, type, text, marks) VALUES (?,1,'theory','Explain.',5)")
       .run(examId).lastInsertRowid;
@@ -1227,7 +1227,7 @@ test('extractQuestionsFromText caps concurrent extraction blocks at BLOCK_CONCUR
     const lines = [];
     for (let i = 1; i <= 200; i++) lines.push(`${i}. Guard question ${i}?`, 'A. X', 'B. Y', 'C. Z', 'D. W');
     const out = await ai.extractQuestionsFromText(lines.join('\n'));
-    assert.equal(state.max, 20, `extraction fires no more than 20 blocks at once (saw ${state.max})`);
+    assert.equal(state.max, 6, `extraction fires no more than 6 blocks at once (saw ${state.max})`);
     assert.ok(out.length >= 1, 'capped extraction still parses questions');
   } finally {
     ai.chatJSON = orig;
