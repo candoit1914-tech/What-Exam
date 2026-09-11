@@ -160,6 +160,19 @@ async function chatJSON(messages, { temperature = 0.4, maxRetries = 2, timeoutMs
   // never block the whole flow. 0 means "no timeout" in withHardTimeout.
   const effectiveTimeout = Math.max(timeoutMs, 60000);
   const common = { messages, temperature, maxRetries, maxTokens, timeoutMs: effectiveTimeout };
+
+  // Puter.js is only used as a standalone fallback when no other provider is
+  // configured.  It is NOT raced with other providers because its internal
+  // xhr polyfill can crash the process via unhandled rejections on error
+  // responses (see @heyputer/puter.js xhrshim.js:190).
+  if (!aiConfigured() && puterConfigured()) {
+    console.log('[ai] Using Puter.js as sole provider');
+    return require('./puter').chat(messages, { temperature, maxTokens }).then((res) => {
+      if (!res) throw new AIError('Puter.js returned empty response');
+      return parseJSON(res);
+    });
+  }
+
   const primary = aiConfigured() ? () =>
     callEndpoint({
       baseUrl: config.ai.baseUrl,
@@ -168,19 +181,7 @@ async function chatJSON(messages, { temperature = 0.4, maxRetries = 2, timeoutMs
       ...common,
     }) : null;
 
-  // Puter.js provider — wraps puter.ai.chat in the same callEndpoint shape
-  const puterProvider = async () => {
-    const puter = require('./puter');
-    const startTime = Date.now();
-    const response = await puter.chat(messages, { temperature, maxTokens });
-    if (!response) throw new AIError('Puter.js returned empty response');
-    const parsed = parseJSON(response);
-    const elapsed = Date.now() - startTime;
-    console.log(`[puter] Responded in ${elapsed}ms`);
-    return parsed;
-  };
-
-  if (!secondaryConfigured() && !tertiaryConfigured() && !puterConfigured()) {
+  if (!secondaryConfigured() && !tertiaryConfigured()) {
     console.log('[ai] Using single provider:', config.ai.model);
     return primary();
   }
@@ -218,10 +219,6 @@ async function chatJSON(messages, { temperature = 0.4, maxRetries = 2, timeoutMs
   if (tertiaryConfigured()) {
     providers.push(tertiary);
     providerNames.push(config.xai.model || 'tertiary');
-  }
-  if (puterConfigured()) {
-    providers.push(puterProvider);
-    providerNames.push('puter.js');
   }
 
   if (!providers.length) {

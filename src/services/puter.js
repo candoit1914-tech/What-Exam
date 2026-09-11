@@ -3,13 +3,16 @@ const path = require('path');
 const config = require('../config');
 
 let puter = null;
+let _initAttempted = false;
 
 function initPuter() {
   if (puter) return puter;
+  if (_initAttempted) return null;
   if (!config.puter?.apiKey) return null;
+  _initAttempted = true;
   try {
-    const { PuterClient } = require('@heyputer/puter.js');
-    puter = new PuterClient({ apiKey: config.puter.apiKey });
+    const { Puter } = require('@heyputer/puter.js');
+    puter = new Puter({ apiKey: config.puter.apiKey });
     console.log('[puter] Puter.js initialized');
   } catch (err) {
     console.warn('[puter] Failed to initialize:', err.message);
@@ -19,7 +22,9 @@ function initPuter() {
 }
 
 function isConfigured() {
-  return !!(config.puter?.apiKey);
+  if (!config.puter?.apiKey) return false;
+  initPuter();
+  return !!puter;
 }
 
 /**
@@ -74,7 +79,7 @@ async function chat(prompt, options = {}) {
   const client = initPuter();
   if (!client) return null;
   try {
-    const input = Array.isArray(prompt) ? prompt : prompt;
+    const input = prompt;
     const response = await client.ai.chat(input, {
       model: options.model || 'gpt-4o-mini',
       temperature: options.temperature ?? 0.7,
