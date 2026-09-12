@@ -1496,7 +1496,50 @@ async function markImageTheory({ questionText, passage, modelAnswer, keyPoints, 
 /**
  * Mark a theory answer against the scheme + rubric using AI.
  */
-async function markTheory({ questionText, modelAnswer, keyPoints, rubric, presentationMarks, grammarMarks, maxMarks, studentAnswer }) {
+async function markTheory({ questionText, modelAnswer, keyPoints, rubric, presentationMarks, grammarMarks, maxMarks, studentAnswer, hasScheme }) {
+  // When no scheme is available, use a simpler prompt that grades based on
+  // general knowledge of the subject — instead of failing with 0 marks.
+  if (!hasScheme) {
+    const system = examinerPrompt(SYSTEM_BASE + `
+You are marking a student's answer where NO MARKING SCHEME is available.
+Grade based on your general knowledge of the subject and the question.
+Assess correctness, completeness, relevance, and quality of explanation.
+
+Return exactly:
+{
+  "marks_awarded": number,
+  "max_marks": number,
+  "breakdown": [{"criterion": "...", "marks": number, "comment": "..."}],
+  "feedback": "2-3 sentences of constructive feedback",
+  "ai_generated": boolean,
+  "ai_reason": "short explanation"
+}
+
+Rules:
+- marks_awarded MUST be between 0 and max_marks (${maxMarks}).
+- Be fair and generous: award credit for correct, relevant content even if it differs from a specific textbook answer.
+- Award partial marks for partially correct answers.
+- Set ai_generated=true ONLY if the answer is clearly AI-generated (suspiciously perfect, generic AI phrasing).
+`);
+    const user = [
+      `QUESTION:\n${questionText}`,
+      `\nMAX MARKS: ${maxMarks}`,
+      `\nSTUDENT ANSWER:\n${studentAnswer}`,
+    ].join('\n');
+    const result = await chatJSON([
+      { role: 'system', content: system },
+      { role: 'user', content: user },
+    ], { temperature: 0.2 });
+    return {
+      marksAwarded: clamp(result.marks_awarded, maxMarks),
+      maxMarks,
+      breakdown: result.breakdown || [],
+      feedback: (result.feedback || '') + ' [No marking scheme available — graded on general knowledge]',
+      aiGenerated: !!result.ai_generated,
+      aiReason: String(result.ai_reason || '').slice(0, 300),
+    };
+  }
+
   const system = examinerPrompt(SYSTEM_BASE + `
 You are a strict but fair examiner. Mark a student's theory answer against the marking scheme.
 

@@ -1104,21 +1104,35 @@ async function markAllPendingTheory(sessionId) {
         scheme = null;
       }
     }
-    // If no scheme (non-pool question or pool scheme missing), try to load or generate one
-    if (!scheme || !scheme.model_answer) {
-      scheme = marking.getScheme(question.id);
-    }
-    // If still no scheme or scheme is empty, generate it now (for manually created questions)
+    // If no scheme (non-pool question or pool scheme missing), try to load from DB
     if (!scheme || (!scheme.model_answer && !scheme.correct_answer)) {
+      const dbScheme = marking.getScheme(question.id);
+      if (dbScheme) scheme = dbScheme;
+    }
+    // Check if the scheme has meaningful content
+    const schemeHasContent = scheme && (
+      (scheme.model_answer && scheme.model_answer.trim()) ||
+      (Array.isArray(scheme.key_points) && scheme.key_points.length > 0 && scheme.key_points.some(kp => kp && kp.trim())) ||
+      (Array.isArray(scheme.rubric) && scheme.rubric.length > 0 && scheme.rubric.some(r => r && r.point && r.point.trim()))
+    );
+    // If still no usable scheme, generate it now (for manually created questions)
+    if (!schemeHasContent) {
       if (question.type === 'theory' && ai.aiConfigured()) {
         try {
-          console.log(`[exam] Generating missing marking scheme for question ${question.id}...`);
+          console.log(`[exam] Generating marking scheme for question ${question.id} (text: "${(question.text || '').slice(0, 80)}")...`);
           scheme = await marking.buildMarkingScheme(question);
-          console.log(`[exam] Generated scheme for question ${question.id}`);
+          const newHasContent = scheme && (
+            (scheme.model_answer && scheme.model_answer.trim()) ||
+            (Array.isArray(scheme.key_points) && scheme.key_points.length > 0 && scheme.key_points.some(kp => kp && kp.trim()))
+          );
+          console.log(`[exam] Scheme generated for question ${question.id}: hasContent=${newHasContent}`);
         } catch (err) {
           console.error(`[exam] Failed to generate scheme for question ${question.id}:`, err.message);
-          scheme = scheme || { type: 'theory', model_answer: '', key_points: [], rubric: [], presentation_marks: 0, grammar_marks: 0 };
+          scheme = null; // Will trigger no-scheme grading mode in markTheoryAnswer
         }
+      } else if (question.type === 'theory' && !ai.aiConfigured()) {
+        console.log(`[exam] AI not configured, cannot generate scheme for question ${question.id}`);
+        scheme = null; // Will trigger heuristic fallback
       }
     }
     let marked;

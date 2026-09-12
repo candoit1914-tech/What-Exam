@@ -168,6 +168,13 @@ function markObjective(question, studentAnswer) {
 async function markTheoryAnswer(question, studentAnswer, scheme) {
   const sch = scheme || getScheme(question.id);
   const total = Number(question.marks) || 0;
+  
+  // Determine if we have a usable scheme (must have model_answer or rubric with content)
+  const hasScheme = sch && (
+    (sch.model_answer && sch.model_answer.trim()) ||
+    (Array.isArray(sch.key_points) && sch.key_points.length > 0 && sch.key_points.some(kp => kp && kp.trim())) ||
+    (Array.isArray(sch.rubric) && sch.rubric.length > 0 && sch.rubric.some(r => r && r.point && r.point.trim()))
+  );
 
   if (!ai.aiConfigured()) {
     // AI not configured — use heuristic directly
@@ -185,6 +192,7 @@ async function markTheoryAnswer(question, studentAnswer, scheme) {
       grammarMarks: sch?.grammar_marks || 0,
       maxMarks: total,
       studentAnswer,
+      hasScheme,
     });
     return {
       marksAwarded: result.marksAwarded,
