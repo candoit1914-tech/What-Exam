@@ -191,6 +191,9 @@ function showLanding() {
   requestAnimationFrame(() => {
     observeReveals();
     initHeroScene();
+    initRevealAnimations();
+    animateWhatsAppMockup();
+    animateCounters();
   });
 }
 
@@ -1851,6 +1854,72 @@ document.addEventListener('mouseover', (e) => {
     });
   }
 });
+
+// ── 3D Card Tilt Effect ──────────────────────────────────────
+document.addEventListener('mousemove', (e) => {
+  document.querySelectorAll('.card, .stat-chip, .feature-card, .step, .panel').forEach((card) => {
+    if (!card.matches(':hover')) {
+      card.style.transform = '';
+      return;
+    }
+    const rect = card.getBoundingClientRect();
+    const x = (e.clientX - rect.left) / rect.width - 0.5;
+    const y = (e.clientY - rect.top) / rect.height - 0.5;
+    const tiltX = y * -8;
+    const tiltY = x * 8;
+    const scale = 1.02;
+    card.style.transform = `perspective(800px) rotateX(${tiltX}deg) rotateY(${tiltY}deg) scale(${scale})`;
+    card.style.transition = 'transform 0.1s ease-out';
+  });
+}, { passive: true });
+
+// ── Floating WhatsApp mockup animation ──
+function animateWhatsAppMockup() {
+  const mockup = document.querySelector('.wapp');
+  if (!mockup) return;
+  let t = 0;
+  function tick() {
+    t += 0.02;
+    const y = Math.sin(t) * 6;
+    const r = Math.sin(t * 0.7) * 1.5;
+    mockup.style.transform = `translateY(${y}px) rotate(${r}deg)`;
+    requestAnimationFrame(tick);
+  }
+  tick();
+}
+
+// ── Smooth section reveals with staggered children ──
+function initRevealAnimations() {
+  document.querySelectorAll('.reveal').forEach((el) => {
+    if (el._revealInit) return;
+    el._revealInit = true;
+    const observer = new IntersectionObserver((entries) => {
+      entries.forEach((entry) => {
+        if (entry.isIntersecting) {
+          entry.target.classList.add('revealed');
+          observer.unobserve(entry.target);
+        }
+      });
+    }, { threshold: 0.1 });
+    observer.observe(el);
+  });
+}
+
+// ── Animated counter for stats ──
+function animateCounters() {
+  document.querySelectorAll('[data-count]').forEach((el) => {
+    const target = parseInt(el.dataset.count, 10);
+    if (isNaN(target) || el._counted) return;
+    el._counted = true;
+    let current = 0;
+    const step = Math.max(1, Math.floor(target / 40));
+    const interval = setInterval(() => {
+      current = Math.min(current + step, target);
+      el.textContent = current.toLocaleString();
+      if (current >= target) clearInterval(interval);
+    }, 30);
+  });
+}
 
 // ── Search filter (filters the visible table) ──────────────────
 function applySearchFilter() {

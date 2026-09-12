@@ -1932,3 +1932,128 @@ body.anon .topbar-actions .btn-primary { display: none; }
   outline: 2px solid var(--green);
   outline-offset: 3px;
 }
+
+/* ═══════════════════════════════════════════════════════════════
+   3D UI EFFECTS — Three.js enhanced
+   ═══════════════════════════════════════════════════════════════ */
+
+/* ── Three.js canvas ── */
+#three-bg {
+  opacity: 0.7;
+  transition: opacity 0.8s ease;
+}
+body.anon #three-bg { opacity: 1; }
+
+/* ── 3D Card tilt base ── */
+.card, .stat-chip, .feature-card, .step, .panel {
+  transform-style: preserve-3d;
+  will-change: transform;
+  transition: transform 0.3s var(--ease-out), box-shadow 0.3s var(--ease-out);
+}
+.card:hover, .stat-chip:hover, .feature-card:hover, .step:hover, .panel:hover {
+  box-shadow: var(--shadow-card-hover), 0 0 40px rgba(37, 211, 102, 0.08);
+}
+
+/* ── Floating WhatsApp mockup ── */
+.wapp {
+  will-change: transform;
+  filter: drop-shadow(0 20px 40px rgba(0, 0, 0, 0.4));
+}
+
+/* ── Reveal animations ── */
+.reveal {
+  opacity: 0;
+  transform: translateY(30px);
+  transition: opacity 0.7s var(--ease-out), transform 0.7s var(--ease-out);
+  transition-delay: var(--d, 0ms);
+}
+.reveal.revealed {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+/* ── Staggered children ── */
+.reveal.revealed > * {
+  animation: revealUp 0.5s var(--ease-out) forwards;
+  opacity: 0;
+  transform: translateY(20px);
+}
+.reveal.revealed > *:nth-child(1) { animation-delay: 0.05s; }
+.reveal.revealed > *:nth-child(2) { animation-delay: 0.1s; }
+.reveal.revealed > *:nth-child(3) { animation-delay: 0.15s; }
+.reveal.revealed > *:nth-child(4) { animation-delay: 0.2s; }
+.reveal.revealed > *:nth-child(5) { animation-delay: 0.25s; }
+.reveal.revealed > *:nth-child(6) { animation-delay: 0.3s; }
+
+@keyframes revealUp {
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* ── Glowing border effect on cards ── */
+.card, .stat-chip, .feature-card {
+  position: relative;
+  overflow: hidden;
+}
+.card::after, .stat-chip::after, .feature-card::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: radial-gradient(
+    350px circle at var(--glow-x, 50%) var(--glow-y, 50%),
+    rgba(37, 211, 102, 0.08) 0%,
+    transparent 60%
+  );
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.3s ease;
+}
+.card:hover::after, .stat-chip:hover::after, .feature-card:hover::after {
+  opacity: 1;
+}
+
+/* ── Pulse dot animation ── */
+.dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--green);
+  animation: dotPulse 2s ease-in-out infinite;
+  box-shadow: 0 0 8px var(--green-glow);
+}
+@keyframes dotPulse {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.4); opacity: 0.6; }
+}
+
+/* ── Gradient text shimmer ── */
+.grad {
+  background: linear-gradient(135deg, var(--green) 0%, var(--green-bright) 50%, var(--green-light) 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-size: 200% 200%;
+  animation: shimmer 4s ease-in-out infinite;
+}
+@keyframes shimmer {
+  0%, 100% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+}
+
+/* ── Button press effect ── */
+.btn:active {
+  transform: scale(0.96) translateY(1px);
+}
+
+/* ── Floating orbs depth ── */
+.orb {
+  animation: orbFloat 12s ease-in-out infinite alternate;
+}
+.orb--green { animation-delay: 0s; }
+.orb--teal { animation-delay: -6s; }
+@keyframes orbFloat {
+  0% { transform: translate(0, 0) scale(1); }
+  100% { transform: translate(30px, -40px) scale(1.1); }
+}
+}
