@@ -115,7 +115,6 @@ router.get('/dashboard/recent', (req, res) => {
   `).all();
   res.json(exams);
 });
-});
 
 // ── Webhook diagnostics ───────────────────────────────────────────────
 router.get('/webhook-events', (req, res) => {
