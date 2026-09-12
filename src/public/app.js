@@ -828,6 +828,7 @@ function schemeHTML(q, id) {
 function questionFormHTML(q, id) {
   const type = q?.type || 'objective';
   const opts = (q?.options || [{ key: 'A', text: '' }, { key: 'B', text: '' }, { key: 'C', text: '' }, { key: 'D', text: '' }]);
+  const hasImage = q?.image && id;
   return `
     <label>Type</label>
     <div class="row" style="margin:6px 0 12px">
@@ -835,7 +836,12 @@ function questionFormHTML(q, id) {
       <label style="display:flex;gap:6px;align-items:center"><input type="radio" name="q_type" value="theory" ${type === 'theory' ? 'checked' : ''} onchange="toggleType()"> Theory</label>
     </div>
     <div class="field"><label>Question</label><textarea id="qf_text">${esc(q?.text || '')}</textarea></div>
-    ${q?.image && id ? `<div class="field"><label>Diagram</label><img class="qimg" style="max-width:320px" src="${API_BASE}/api/exams/${id}/images/${encodeURIComponent(q.image)}" alt="diagram"></div>` : ''}
+    <div class="field">
+      <label>Diagram / Image (optional)</label>
+      ${hasImage ? `<div class="qimg-preview" id="qimg_preview"><img class="qimg" src="${API_BASE}/api/exams/${id}/images/${encodeURIComponent(q.image)}" alt="diagram"><button type="button" class="qimg-remove" onclick="removeQuestionImage()" title="Remove image">&times;</button></div>` : '<div id="qimg_preview" class="qimg-preview qimg-preview--empty"></div>'}
+      <input type="file" id="qf_image" accept="image/png,image/jpeg" style="display:none" onchange="previewImage(this)">
+      <button type="button" class="btn btn-ghost" onclick="document.getElementById('qf_image').click()" style="margin-top:8px" id="qf_image_btn">${hasImage ? 'Replace Image' : 'Choose Image (PNG/JPG)'}</button>
+    </div>
     <div class="field"><label>Passage (reading comprehension) — optional</label><textarea id="qf_passage" placeholder="Text the question is based on...">${esc(q?.passage || '')}</textarea></div>
     <div id="qf_opts">
       ${opts.map((o) => `<div class="row" style="margin:4px 0">
@@ -866,13 +872,61 @@ function toggleType() {
   if (m && !theory && m.value === '5') m.value = 1;
 }
 
+let _pendingImageFile = null;
+let _removeImageFlag = false;
+
+function previewImage(input) {
+  const preview = document.getElementById('qimg_preview');
+  if (!preview || !input.files.length) return;
+  const file = input.files[0];
+  _pendingImageFile = file;
+  _removeImageFlag = false;
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    preview.className = 'qimg-preview';
+    preview.innerHTML = `<img class="qimg" src="${e.target.result}" alt="preview"><button type="button" class="qimg-remove" onclick="removeQuestionImage()" title="Remove image">&times;</button>`;
+  };
+  reader.readAsDataURL(file);
+}
+
+function removeQuestionImage() {
+  _removeImageFlag = true;
+  _pendingImageFile = null;
+  const preview = document.getElementById('qimg_preview');
+  if (preview) {
+    preview.className = 'qimg-preview qimg-preview--empty';
+    preview.innerHTML = '';
+  }
+  const input = document.getElementById('qf_image');
+  if (input) input.value = '';
+}
+
+function resetImageState() {
+  _pendingImageFile = null;
+  _removeImageFlag = false;
+  const preview = document.getElementById('qimg_preview');
+  if (preview) {
+    preview.className = 'qimg-preview qimg-preview--empty';
+    preview.innerHTML = '';
+  }
+  const input = document.getElementById('qf_image');
+  if (input) input.value = '';
+}
+
 async function addQuestionForm(id) {
+  resetImageState();
   const body = `<div class="field" style="margin:0"><label>Type</label>
     <div class="row" style="margin:6px 0 12px">
       <label style="display:flex;gap:6px;align-items:center"><input type="radio" name="q_type" value="objective" checked onchange="toggleType()"> Objective</label>
       <label style="display:flex;gap:6px;align-items:center"><input type="radio" name="q_type" value="theory" onchange="toggleType()"> Theory</label>
     </div></div>
     <div class="field"><label>Question</label><textarea id="qf_text" placeholder="What is the capital of Ghana?"></textarea></div>
+    <div class="field">
+      <label>Diagram / Image (optional)</label>
+      <div id="qimg_preview" class="qimg-preview qimg-preview--empty"></div>
+      <input type="file" id="qf_image" accept="image/png,image/jpeg" style="display:none" onchange="previewImage(this)">
+      <button type="button" class="btn btn-ghost" onclick="document.getElementById('qf_image').click()" style="margin-top:8px" id="qf_image_btn">Choose Image (PNG/JPG)</button>
+    </div>
     <div class="field"><label>Passage (reading comprehension) — optional</label><textarea id="qf_passage" placeholder="Text the question is based on..."></textarea></div>
     <div id="qf_opts">
       ${['A', 'B', 'C', 'D'].map((k) => `<div class="row" style="margin:4px 0">
@@ -898,41 +952,67 @@ async function addQuestionForm(id) {
 
   const saveHandler = async () => {
     const type = document.querySelector('input[name="q_type"]:checked').value;
-    const payload = {
-      type,
-      text: document.querySelector('#qf_text').value,
-      passage: document.querySelector('#qf_passage').value,
-      marks: parseFloat(document.querySelector('#qf_marks').value) || 1,
-      difficulty: document.querySelector('#qf_diff').value,
-      learning_objective: '',
-      explanation: '',
-    };
-    if (type === 'objective') {
-      payload.options = ['A', 'B', 'C', 'D'].map((k) => document.querySelector(`[data-opt="${k}"]`).value.trim());
-      const sel = document.querySelector('input[name="qf_correct"]:checked');
-      payload.correct_answer = sel ? sel.value : '';
-    }
-    try {
-      await api(`/api/exams/${id}/questions`, { method: 'POST', body: payload });
-      invalidateCache(`/api/exams/${id}`);
+    const fileInput = document.getElementById('qf_image');
+    const hasFile = fileInput && fileInput.files.length > 0;
 
-      if (document.querySelector('#qf_add_another')?.checked) {
-        // Clear form for next question
-        document.querySelector('#qf_text').value = '';
-        document.querySelector('#qf_passage').value = '';
-        ['A', 'B', 'C', 'D'].forEach((k) => {
-          const opt = document.querySelector(`[data-opt="${k}"]`);
-          if (opt) opt.value = '';
-        });
+    if (hasFile) {
+      const formData = new FormData();
+      formData.append('type', type);
+      formData.append('text', document.querySelector('#qf_text').value);
+      formData.append('passage', document.querySelector('#qf_passage').value);
+      formData.append('marks', parseFloat(document.querySelector('#qf_marks').value) || 1);
+      formData.append('difficulty', document.querySelector('#qf_diff').value);
+      formData.append('learning_objective', '');
+      formData.append('explanation', '');
+      if (type === 'objective') {
+        const opts = ['A', 'B', 'C', 'D'].map((k) => document.querySelector(`[data-opt="${k}"]`).value.trim());
+        opts.forEach((text, i) => formData.append(`options[${i}][key]`, ['A','B','C','D'][i]));
+        opts.forEach((text, i) => formData.append(`options[${i}][text]`, text));
         const sel = document.querySelector('input[name="qf_correct"]:checked');
-        if (sel) sel.checked = false;
-        document.querySelector('#qf_text').focus();
-        toast('Question added! Enter the next one.');
-      } else {
-        div.remove();
-        renderExam(id);
+        formData.append('correct_answer', sel ? sel.value : '');
       }
-    } catch (e) { toast(e.message, true); }
+      formData.append('file', fileInput.files[0]);
+      try {
+        await api(`/api/exams/${id}/questions`, { method: 'POST', body: formData });
+        invalidateCache(`/api/exams/${id}`);
+      } catch (e) { toast(e.message, true); return; }
+    } else {
+      const payload = {
+        type,
+        text: document.querySelector('#qf_text').value,
+        passage: document.querySelector('#qf_passage').value,
+        marks: parseFloat(document.querySelector('#qf_marks').value) || 1,
+        difficulty: document.querySelector('#qf_diff').value,
+        learning_objective: '',
+        explanation: '',
+      };
+      if (type === 'objective') {
+        payload.options = ['A', 'B', 'C', 'D'].map((k) => document.querySelector(`[data-opt="${k}"]`).value.trim());
+        const sel = document.querySelector('input[name="qf_correct"]:checked');
+        payload.correct_answer = sel ? sel.value : '';
+      }
+      try {
+        await api(`/api/exams/${id}/questions`, { method: 'POST', body: payload });
+        invalidateCache(`/api/exams/${id}`);
+      } catch (e) { toast(e.message, true); return; }
+    }
+
+    if (document.querySelector('#qf_add_another')?.checked) {
+      document.querySelector('#qf_text').value = '';
+      document.querySelector('#qf_passage').value = '';
+      ['A', 'B', 'C', 'D'].forEach((k) => {
+        const opt = document.querySelector(`[data-opt="${k}"]`);
+        if (opt) opt.value = '';
+      });
+      const sel = document.querySelector('input[name="qf_correct"]:checked');
+      if (sel) sel.checked = false;
+      resetImageState();
+      document.querySelector('#qf_text').focus();
+      toast('Question added! Enter the next one.');
+    } else {
+      div.remove();
+      renderExam(id);
+    }
   };
 
   document.querySelector('#qf_save').addEventListener('click', saveHandler);
@@ -949,26 +1029,61 @@ async function editQuestionForm(id, qid) {
   div.querySelector('.modal-actions').appendChild(addBtn);
   document.querySelector('#qf_save').addEventListener('click', async () => {
     const type = document.querySelector('input[name="q_type"]:checked').value;
-    const payload = {
-      type,
-      text: document.querySelector('#qf_text').value,
-      passage: document.querySelector('#qf_passage').value,
-      marks: parseFloat(document.querySelector('#qf_marks').value) || 1,
-      difficulty: document.querySelector('#qf_diff').value,
-      learning_objective: document.querySelector('#qf_lo').value,
-      explanation: document.querySelector('#qf_expl').value,
-    };
-    if (type === 'objective') {
-      payload.options = ['A', 'B', 'C', 'D'].map((k) => document.querySelector(`[data-opt="${k}"]`).value.trim());
-      const sel = document.querySelector('input[name="qf_correct"]:checked');
-      payload.correct_answer = sel ? sel.value : '';
+    const fileInput = document.getElementById('qf_image');
+    const hasFile = fileInput && fileInput.files.length > 0;
+
+    if (hasFile) {
+      const formData = new FormData();
+      formData.append('type', type);
+      formData.append('text', document.querySelector('#qf_text').value);
+      formData.append('passage', document.querySelector('#qf_passage').value);
+      formData.append('marks', parseFloat(document.querySelector('#qf_marks').value) || 1);
+      formData.append('difficulty', document.querySelector('#qf_diff').value);
+      formData.append('learning_objective', document.querySelector('#qf_lo').value);
+      formData.append('explanation', document.querySelector('#qf_expl').value);
+      if (type === 'objective') {
+        const opts = ['A', 'B', 'C', 'D'].map((k) => document.querySelector(`[data-opt="${k}"]`).value.trim());
+        opts.forEach((text, i) => formData.append(`options[${i}][key]`, ['A','B','C','D'][i]));
+        opts.forEach((text, i) => formData.append(`options[${i}][text]`, text));
+        const sel = document.querySelector('input[name="qf_correct"]:checked');
+        formData.append('correct_answer', sel ? sel.value : '');
+      }
+      formData.append('file', fileInput.files[0]);
+      try {
+        await api(`/api/exams/${id}/questions/${qid}`, { method: 'PUT', body: formData });
+        invalidateCache(`/api/exams/${id}`);
+        div.remove();
+        renderExam(id);
+      } catch (e) { toast(e.message, true); }
+    } else {
+      const payload = {
+        type,
+        text: document.querySelector('#qf_text').value,
+        passage: document.querySelector('#qf_passage').value,
+        marks: parseFloat(document.querySelector('#qf_marks').value) || 1,
+        difficulty: document.querySelector('#qf_diff').value,
+        learning_objective: document.querySelector('#qf_lo').value,
+        explanation: document.querySelector('#qf_expl').value,
+      };
+      if (type === 'objective') {
+        payload.options = ['A', 'B', 'C', 'D'].map((k) => document.querySelector(`[data-opt="${k}"]`).value.trim());
+        const sel = document.querySelector('input[name="qf_correct"]:checked');
+        payload.correct_answer = sel ? sel.value : '';
+      }
+      try {
+        await api(`/api/exams/${id}/questions/${qid}`, { method: 'PUT', body: payload });
+        invalidateCache(`/api/exams/${id}`);
+        div.remove();
+        renderExam(id);
+      } catch (e) { toast(e.message, true); }
     }
-    try {
-      await api(`/api/exams/${id}/questions/${qid}`, { method: 'PUT', body: payload });
-      invalidateCache(`/api/exams/${id}`);
-      div.remove();
-      renderExam(id);
-    } catch (e) { toast(e.message, true); }
+
+    if (_removeImageFlag && !hasFile) {
+      try {
+        await api(`/api/exams/${id}/questions/${qid}/image`, { method: 'DELETE' });
+        invalidateCache(`/api/exams/${id}`);
+      } catch (e) { /* image removal may fail if no image exists, ignore */ }
+    }
   });
 }
 
