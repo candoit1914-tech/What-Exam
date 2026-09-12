@@ -101,8 +101,20 @@ router.get('/stats', (req, res) => {
     students: db.prepare('SELECT COUNT(*) c FROM students').get().c,
     sessions: db.prepare('SELECT COUNT(*) c FROM sessions').get().c,
     active: db.prepare(`SELECT COUNT(*) c FROM sessions WHERE status='in_progress'`).get().c,
-    reviews: db.prepare('SELECT COUNT(*) c FROM answers WHERE needs_review=1').get().c,
+    reviews: db.prepare(`SELECT COUNT(*) c FROM answers WHERE needs_review=1`).get().c,
   });
+});
+
+router.get('/dashboard/recent', (req, res) => {
+  const exams = db.prepare(`
+    SELECT e.id, e.title, e.subject, e.status, e.created_at,
+      (SELECT COUNT(*) FROM questions WHERE exam_id = e.id) AS question_count,
+      (SELECT COUNT(DISTINCT r.student_id) FROM exam_recipients r WHERE r.exam_id = e.id) AS student_count,
+      (SELECT COUNT(*) FROM sessions WHERE exam_id = e.id AND status='completed') AS completed_count
+    FROM exams e ORDER BY e.created_at DESC LIMIT 5
+  `).all();
+  res.json(exams);
+});
 });
 
 // ── Webhook diagnostics ───────────────────────────────────────────────
@@ -496,11 +508,11 @@ router.post('/exams/:id/generate', asyncWrap(async (req, res) => {
     return res.status(502).json({ error: 'AI returned no questions. The provider may be rate-limited or out of quota — check your AI API key and billing status, then try again.' });
   }
 
-  // Sort so objective questions come first, then theory — matches WhatsApp
+  // Hard sort: ALL objective questions first, then ALL theory — matches WhatsApp
   // section delivery order (OBJECTIVE header, then THEORY header).
   const sorted = [...generated].sort((a, b) => {
-    if (a.type === b.type) return 0;
-    return a.type === 'objective' ? -1 : 1;
+    if (a.type !== b.type) return a.type === 'objective' ? -1 : 1;
+    return 0;
   });
   const active = sorted.slice(0, n);
   const variants = pool ? sorted.slice(n) : [];

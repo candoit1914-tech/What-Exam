@@ -435,11 +435,29 @@ async function generateQuestions({ subject, topics, count, objectiveCount, theor
     '- Never reuse the same facts, figures, names, examples, or scenarios across questions or across batches.\n' +
     '- Vary stems and framing so no two questions feel alike.';
 
+  const VARIETY_TAGS =
+    'VARY QUESTION STRUCTURES across the set. Use a mix of:\n' +
+    '- Direct recall ("What is...?", "Which of these...?")\n' +
+    '- Scenario-based ("A farmer notices...", "Kofi measures...")\n' +
+    "- If/Then predictions ('If X happens, what will Y be?')\n" +
+    '- Compare and contrast ("How does A differ from B?")\n' +
+    '- Data interpretation (table, chart description, measurements)\n' +
+    '- Cause and effect ("Why does...?", "What causes...?")\n' +
+    '- True/False with justification (objective: "Which statement is correct?")\n' +
+    '- Fill in the missing piece ("Complete the following...")\n' +
+    'Do NOT use the same structure for consecutive questions.';
+
   const SPINS = [
     'Frame every question as a concrete real-world situation (a farmer, shopkeeper, school science club, health worker, community, market, lab) with a specific detail the student must reason about. No abstract, definition-style, or fill-in-the-blank stems.',
     'Make every question an application or analysis task: present a short scenario, measurement, or data snippet and ask the student to apply the concept. Never ask for a memorised definition, list, or label.',
     'Use fresh, believable but uncommon contexts and numbers. Rotate the setting so no two questions share a setting, and avoid familiar examples and standard figures.',
     'Ask from a decision or problem-solving angle: each question presents a mini-case and asks what happens, why, or what should be done, with exam-appropriate clarity for a JHS candidate.',
+    'Present data-driven questions: include a small table, chart description, or measurement set and ask the student to read, calculate, or interpret from it. Vary the data type (prices, distances, temperatures, population, scores).',
+    'Use chronological or sequencing reasoning: place events, steps, or measurements in time order and ask what comes before, after, or during. Avoid simple "first/last" framing.',
+    'Frame questions as compare-and-contrast tasks: present two similar items, methods, or situations and ask the student to identify the difference, advantage, or relationship between them.',
+    'Use cause-and-effect framing: describe an outcome or observation and ask the student to identify the cause, or describe a cause and ask for the predicted effect. Ground it in a believable scenario.',
+    'Pose questions from a "what if" counterfactual angle: change one variable in a familiar scenario and ask the student to predict the new outcome. This tests deep understanding, not memorisation.',
+    'Frame questions around a short dialogue, announcement, or notice (a school notice, market price list, health poster) and ask the student to extract, calculate, or infer from it.',
   ];
   const spin = SPINS[Math.floor(Math.random() * SPINS.length)];
 
@@ -488,6 +506,7 @@ CRITICAL RULES:
 - Difficulty overall: ${difficulty || 'mixed'}.
 - Style: write like the Ghana BECE for a JHS candidate. Use clear, age-appropriate English.
 ${NOVELTY_RULE}
+${VARIETY_TAGS}
 ${spin}
 ${variety || ''}
 ${avoidBlock}`;
@@ -515,7 +534,7 @@ ${avoidBlock}`;
         { role: 'system', content: system(perBatchObjective, perBatchTheory, variety) },
         { role: 'user', content: user(batchSize) },
       ],
-      { temperature: 0.9, maxRetries: 3, maxTokens: 16384 }
+      { temperature: 0.95, maxRetries: 3, maxTokens: 16384 }
     )
   );
   // Increase concurrency to utilize multiple AI providers.
@@ -565,10 +584,10 @@ ${avoidBlock}`;
     const dupRest = rest.some((p) => textSimilarity(p.text, q.text) > 0.8);
     if (!dupActive && !dupRest) rest.push(q);
   }
-  // Ensure objective questions always come before theory questions
+  // Hard sort: ALL objective questions first, then ALL theory questions.
   const sortFn = (a, b) => {
-    if (a.type === b.type) return 0;
-    return a.type === 'objective' ? -1 : 1;
+    if (a.type !== b.type) return a.type === 'objective' ? -1 : 1;
+    return 0;
   };
   active.sort(sortFn);
   rest.sort(sortFn);

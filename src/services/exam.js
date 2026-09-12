@@ -128,9 +128,11 @@ function drawSessionQuestions(sessionId, examId) {
     if (key) seenTexts.add(key);
     uniqueRows.push(row);
   }
+  // Hard sort: ALL objective questions first, then ALL theory questions.
+  // Within each type, preserve pool insertion order (by id).
   uniqueRows.sort((a, b) => {
-    if (a.type === b.type) return 0;
-    return a.type === 'objective' ? -1 : 1;
+    if (a.type !== b.type) return a.type === 'objective' ? -1 : 1;
+    return (a.id || 0) - (b.id || 0);
   });
   const chosen = uniqueRows.slice(0, n);
   const ins = db.prepare(
@@ -215,10 +217,11 @@ function sessionQuestionSequence(session) {
   } else {
     questions = db.prepare('SELECT * FROM questions WHERE exam_id = ? ORDER BY q_order').all(s.exam_id);
   }
-  // Ensure objective questions always come before theory questions
+  // Hard sort: ALL objective questions first, then ALL theory questions.
+  // Within each type, preserve q_order.
   questions.sort((a, b) => {
-    if (a.type === b.type) return a.q_order - b.q_order;
-    return a.type === 'objective' ? -1 : 1;
+    if (a.type !== b.type) return a.type === 'objective' ? -1 : 1;
+    return (a.q_order || 0) - (b.q_order || 0);
   });
   return questions;
 }

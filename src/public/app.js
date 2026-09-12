@@ -55,7 +55,8 @@ function invalidateCache(pattern) {
 
 // ── Auth ────────────────────────────────────────────────────────
 function landingHTML(anon = false) {
-  return `
+  if (anon) {
+    return `
     <div class="landing">
       <section class="hero">
         <div class="hero-grid">
@@ -64,20 +65,9 @@ function landingHTML(anon = false) {
             <h1>EXAMS THAT<br><span class="grad">MARK THEMSELVES</span></h1>
             <p>Create AI-marked exams, deliver them over WhatsApp, and let the bot run the whole session — question by question, live timer, instant results.</p>
             <div class="hero-actions">
-              ${anon
-                ? `<button class="btn btn-primary" onclick="showLoginCard()">Admin Sign In ${I.arrow}</button>`
-                : `<button class="btn btn-primary" onclick="location.hash='#/exams'">Create an Exam ${I.arrow}</button>
-                   <button class="btn btn-ghost" onclick="location.hash='#/results'">View Results</button>`}
+              <button class="btn btn-primary" onclick="showLoginCard()">Admin Sign In ${I.arrow}</button>
             </div>
-            ${anon ? `<p class="anon-note">Exams are created by your school administrator. Students take exams directly on WhatsApp.</p>` : ''}
-            ${anon ? '' : `
-            <div class="hero-stats">
-              <div class="stat-chip reveal" style="--d:100ms"><b data-count="0">0</b><span>Exams</span></div>
-              <div class="stat-chip reveal" style="--d:200ms"><b data-count="0">0</b><span>Live</span></div>
-              <div class="stat-chip reveal" style="--d:300ms"><b data-count="0">0</b><span>Questions</span></div>
-              <div class="stat-chip reveal" style="--d:400ms"><b data-count="0">0</b><span>Students</span></div>
-              <div class="stat-chip reveal" style="--d:500ms;cursor:pointer" onclick="location.hash='#/reviews'"><b data-count="0">0</b><span>Reviews</span></div>
-            </div>`}
+            <p class="anon-note">Exams are created by your school administrator. Students take exams directly on WhatsApp.</p>
           </div>
           <div class="hero-visual reveal" style="--d:150ms">
             <div class="wapp">
@@ -102,7 +92,6 @@ function landingHTML(anon = false) {
         </div>
       </section>
 
-      ${anon ? `
       <section class="section reveal">
         <div class="section-head">
           <div class="eyebrow"><span class="dot"></span>Request an exam</div>
@@ -132,34 +121,6 @@ function landingHTML(anon = false) {
             <p>Text your details and the admin will reply.</p>
           </div>
         </div>
-      </section>` : ''}
-
-      <section class="section reveal">
-        <div class="section-head">
-          <div class="eyebrow"><span class="dot"></span>How it works</div>
-          <h2>PAPER IN. <span class="grad">GRADED</span> OUT.</h2>
-          <p>Results, printable reports, and live delivery activity roll into your dashboard in real time.</p>
-        </div>
-        <div class="features-grid">
-          <div class="feature-card reveal" style="--d:0ms">
-            <div class="f-icon">${I.pen}</div>
-            <h3>Create it your way</h3>
-            <p>Draft by hand, import a PDF, or let AI build the paper — every question ships with an editable marking scheme.</p>
-            <span class="f-tag">Hand · PDF · AI</span>
-          </div>
-          <div class="feature-card reveal" style="--d:100ms">
-            <div class="f-icon">${I.wa}</div>
-            <h3>Delivered in WhatsApp</h3>
-            <p>Exams land in the class chat and flow one question at a time against a live timer. Answers lock the moment they send.</p>
-            <span class="f-tag">One question · one answer</span>
-          </div>
-          <div class="feature-card reveal" style="--d:200ms">
-            <div class="f-icon">${I.spark}</div>
-            <h3>Marked as it lands</h3>
-            <p>AI scores objective and theory answers the moment they arrive — no waiting, no piles of scripts.</p>
-            <span class="f-tag">Instant AI marking</span>
-          </div>
-        </div>
       </section>
 
       <footer class="footer reveal">
@@ -172,7 +133,6 @@ function landingHTML(anon = false) {
         <div class="footer-copy">WhatsApp Examination System · AI marking · © ${new Date().getFullYear()} What Exam</div>
       </footer>
 
-      ${anon ? `
       <div class="login-wrap login-wrap--hidden">
         <div class="login-card">
           <div class="login-brand"><img src="/icon.svg" alt="What Exam"><span>WHAT&nbsp;EXAM</span></div>
@@ -185,7 +145,42 @@ function landingHTML(anon = false) {
             <button class="btn btn-primary btn-block" type="submit" id="login_btn">Sign In</button>
           </form>
         </div>
-      </div>` : ''}
+      </div>
+    </div>`;
+  }
+
+  return `
+    <div class="dashboard">
+      <section class="dash-hero">
+        <div class="dash-welcome reveal" style="--d:0ms">
+          <h1>Welcome back</h1>
+          <p>Here's what's happening with your exams today.</p>
+        </div>
+        <div class="dash-actions reveal" style="--d:100ms">
+          <button class="btn btn-primary" onclick="location.hash='#/exams'">New Exam ${I.arrow}</button>
+          <button class="btn btn-ghost" onclick="location.hash='#/results'">View Results</button>
+        </div>
+      </section>
+
+      <section class="dash-stats reveal" style="--d:150ms">
+        <div class="stat-chip"><b data-count="0">0</b><span>Exams</span></div>
+        <div class="stat-chip"><b data-count="0">0</b><span>Live</span></div>
+        <div class="stat-chip"><b data-count="0">0</b><span>Questions</span></div>
+        <div class="stat-chip"><b data-count="0">0</b><span>Students</span></div>
+        <div class="stat-chip stat-chip--warn" onclick="location.hash='#/reviews'"><b data-count="0">0</b><span>Reviews</span></div>
+      </section>
+
+      <section class="dash-recent reveal" style="--d:250ms">
+        <div class="dash-recent-head">
+          <h2>Recent Activity</h2>
+          <a class="dash-recent-link" href="#/exams">View all ${I.arrow}</a>
+        </div>
+        <div class="dash-activity" id="dash-activity">
+          <div class="dash-skeleton"></div>
+          <div class="dash-skeleton"></div>
+          <div class="dash-skeleton"></div>
+        </div>
+      </section>
     </div>`;
 }
 
@@ -498,13 +493,32 @@ window.addEventListener('hashchange', router);
 // ── Overview / Landing ───────────────────────────────────────────
 async function renderDashboard() {
   $view.innerHTML = landingHTML();
-  const s = await api('/api/stats');
+  const [s, recent] = await Promise.all([api('/api/stats'), api('/api/dashboard/recent')]);
   document.querySelectorAll('.stat-chip b[data-count]').forEach((el) => {
     const label = el.parentElement.querySelector('span').textContent.toLowerCase();
     const val = { exams: s.exams, live: s.published, questions: s.questions, students: s.students, reviews: s.reviews }[label] ?? 0;
     el.dataset.count = val;
     animateCountUp(el, val);
   });
+  const actEl = document.getElementById('dash-activity');
+  if (actEl && recent.length) {
+    actEl.innerHTML = recent.map((e) => {
+      const status = e.status || 'draft';
+      const date = e.created_at ? new Date(e.created_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }) : '';
+      return `<a class="dash-activity-row" href="#/exams/${e.id}">
+        <div class="dash-activity-info">
+          <span class="dash-activity-title">${esc(e.title || 'Untitled')}</span>
+          <span class="dash-activity-meta">${esc(e.subject || 'General')} · ${e.question_count || 0} questions · ${e.student_count || 0} students</span>
+        </div>
+        <div class="dash-activity-right">
+          <span class="badge badge--${status}">${status}</span>
+          <span class="dash-activity-date">${date}</span>
+        </div>
+      </a>`;
+    }).join('');
+  } else if (actEl) {
+    actEl.innerHTML = '<div class="dash-empty">No exams yet. Create your first exam to get started.</div>';
+  }
 }
 
 // ── Exams list ───────────────────────────────────────────────────
