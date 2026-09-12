@@ -404,7 +404,7 @@ router.post('/exams/:id/questions/batch', asyncWrap(async (req, res) => {
   res.json({ ok: true, count: created.length, questions: created });
 }));
 
-router.put('/exams/:id/questions/:qid', (req, res) => {
+router.put('/exams/:id/questions/:qid', imageUpload.single('file'), asyncWrap(async (req, res) => {
   const exam = db.prepare('SELECT * FROM exams WHERE id = ?').get(req.params.id);
   if (!exam) return res.status(404).json({ error: 'Exam not found' });
   if (exam.status === 'live' || exam.status === 'ended') {
@@ -428,6 +428,26 @@ router.put('/exams/:id/questions/:qid', (req, res) => {
     fields.push('options=?');
     vals.push(JSON.stringify(arr.map((o, i) => ({ key: String.fromCharCode(65 + i), text: o }))));
   }
+  // Handle image upload
+  if (req.file) {
+    if (q.image) {
+      const oldPath = path.join(config.uploadsDir, q.image);
+      try { fs.unlinkSync(oldPath); } catch {}
+    }
+    const ext = req.file.mimetype === 'image/png' ? 'png' : 'jpg';
+    const filename = `${Date.now()}-${exam.id}-q${q.q_order}-manual.${ext}`;
+    const filePath = path.join(config.uploadsDir, filename);
+    fs.writeFileSync(filePath, req.file.buffer);
+    fields.push('image=?');
+    vals.push(filename);
+  } else if (b.remove_image === '1' || b.remove_image === 1) {
+    if (q.image) {
+      const oldPath = path.join(config.uploadsDir, q.image);
+      try { fs.unlinkSync(oldPath); } catch {}
+    }
+    fields.push('image=?');
+    vals.push('');
+  }
   if (fields.length) {
     vals.push(q.id);
     db.prepare(`UPDATE questions SET ${fields.join(', ')} WHERE id = ?`).run(...vals);
@@ -435,7 +455,7 @@ router.put('/exams/:id/questions/:qid', (req, res) => {
   marking.recomputeExamTotal(q.exam_id);
   const updated = db.prepare('SELECT * FROM questions WHERE id = ?').get(q.id);
   res.json(qWithScheme(updated));
-});
+}));
 
 router.delete('/exams/:id/questions/:qid', (req, res) => {
   const exam = db.prepare('SELECT * FROM exams WHERE id = ?').get(req.params.id);
