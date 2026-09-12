@@ -280,7 +280,7 @@ router.post('/exams/:id/send', asyncWrap(async (req, res) => {
 
 // ── Questions ──────────────────────────────────────────────────────────
 
-router.post('/exams/:id/questions', asyncWrap(async (req, res) => {
+router.post('/exams/:id/questions', imageUpload.single('file'), asyncWrap(async (req, res) => {
   const exam = db.prepare('SELECT * FROM exams WHERE id = ?').get(req.params.id);
   if (!exam) return res.status(404).json({ error: 'Exam not found' });
   if (exam.status === 'live' || exam.status === 'ended') {
@@ -289,10 +289,18 @@ router.post('/exams/:id/questions', asyncWrap(async (req, res) => {
   const q = req.body;
   const nextOrder = (db.prepare('SELECT MAX(q_order) m FROM questions WHERE exam_id = ?').get(exam.id).m || 0) + 1;
   const marks = parseFloat(q.marks) || 1;
+  // Handle image upload if provided
+  let imageFile = '';
+  if (req.file) {
+    const ext = req.file.mimetype === 'image/png' ? 'png' : 'jpg';
+    imageFile = `${Date.now()}-${exam.id}-q${nextOrder}-manual.${ext}`;
+    const filePath = path.join(config.uploadsDir, imageFile);
+    fs.writeFileSync(filePath, req.file.buffer);
+  }
   const info = db
     .prepare(
-      `INSERT INTO questions (exam_id, q_order, type, text, passage, options, correct_answer, marks, difficulty, learning_objective, explanation, source)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`
+      `INSERT INTO questions (exam_id, q_order, type, text, passage, options, correct_answer, marks, difficulty, learning_objective, explanation, source, image)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`
     )
     .run(
       exam.id, nextOrder, q.type || 'objective', q.text, q.passage || '',
@@ -301,7 +309,7 @@ router.post('/exams/:id/questions', asyncWrap(async (req, res) => {
         : null,
       q.correct_answer || null,
       marks, q.difficulty || 'medium', q.learning_objective || '', q.explanation || '',
-      'manual'
+      'manual', imageFile
     );
   const question = db.prepare('SELECT * FROM questions WHERE id = ?').get(info.lastInsertRowid);
   await marking.buildMarkingScheme(question);
