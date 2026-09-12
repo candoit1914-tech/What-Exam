@@ -417,7 +417,7 @@ test('estimateQuestionCount counts question-numbered lines', () => {
 
 test('completenessWarning is null when extraction is not far below the estimate and a message when it is', () => {
   const many = (n) => Array(n).fill({});
-  assert.equal(ai.completenessWarning(60, many(35)), null, '35 of ~60 is more than half → no warning');
+  assert.equal(ai.completenessWarning(60, many(55)), null, '55 of ~60 is close enough → no warning');
   assert.equal(ai.completenessWarning(10, many(10)), null, 'complete extraction never warns');
   assert.equal(ai.completenessWarning(2, many(0)), null, 'tiny estimates never warn');
   const msg = ai.completenessWarning(60, many(5));
@@ -1282,9 +1282,9 @@ test('extractQuestionsFromText reports progress only as blocks complete', async 
     return { questions: [{ type: 'objective', text: 'Fast B', options: ['A. X', 'B. Y', 'C. Z', 'D. W'], correct_answer: 'A', correct_index: 0 }] };
   };
   try {
-    // 10 questions -> 2 blocks. Block 0 (Q1-5) is the slow one.
+    // 20 questions -> 2 blocks. Block 0 (Q1-15) is the slow one.
     const lines = [];
-    for (let i = 1; i <= 10; i++) lines.push(`${i}. Progress question ${i}?`, 'A. X', 'B. Y', 'C. Z', 'D. W');
+    for (let i = 1; i <= 20; i++) lines.push(`${i}. Progress question ${i}?`, 'A. X', 'B. Y', 'C. Z', 'D. W');
     const out = await ai.extractQuestionsFromText(
       lines.join('\n'),
       (done, total) => progress.push({ done, total, at: Date.now() })

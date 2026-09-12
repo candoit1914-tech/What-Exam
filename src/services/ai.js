@@ -312,30 +312,30 @@ function examinerPrompt(base) {
 // everything else.
 const BULK_TIMEOUT_MS = 5 * 60 * 1000;
 
-// PDF/paper extraction runs in small question-aligned blocks so every AI call
-// stays fast on slow endpoints. Each block generates at most BLOCK_MAX_TOKENS
-// of output; the cap also keeps a single rambling block from burning the timeout,
-// and is set high enough that theory model answers (rubric, key points, model
-// answer) fit inside one block and are not truncated.
-// Blocks are kept SMALL on purpose: a huge block forces a slow (e.g. 100B+)
-// model to generate a very long JSON payload, which can take minutes and hang
-// the whole import. Small blocks finish quickly even on slow endpoints.
-const BLOCK_QUESTIONS = 8;
-const BLOCK_MAX_CHARS = 5000;
+// PDF/paper extraction runs in question-aligned blocks so every AI call
+// stays manageable. Each block generates at most BLOCK_MAX_TOKENS of output;
+// the cap is set high enough that theory model answers (rubric, key points,
+// model answer) fit inside one block and are not truncated. Larger blocks
+// reduce the number of AI calls and the chance of questions being dropped
+// when a block fails.
+const BLOCK_QUESTIONS = 15;
+const BLOCK_MAX_CHARS = 12000;
 // Blocks run several at a time: enough parallelism to collapse a long paper's
 // wall-clock time, so a slow block does not stall the whole wave. The cap is
 // still bounded so a single upload never floods a shared endpoint.
 // With 2 providers racing, concurrency = providerCount * 3 = 6; this is
 // high enough for fast providers but won't overwhelm slow ones.
 const BLOCK_CONCURRENCY = 6;
-const BLOCK_MAX_TOKENS = 6000;
-// A single extraction block runs on its own clock with a couple of retries
-// (flaky shared endpoints drop requests under concurrency). A block that still
-// fails is SKIPPED — never fails the whole paper — so this only bounds how
-// long one stubborn block can stall the import. Reduced to 45s for faster
-// failover to retries.
-const BLOCK_TIMEOUT_MS = 45 * 1000;
-const BLOCK_RETRIES = 1;
+// 16k tokens is enough for a block of 15 questions with full theory rubrics.
+// Previous 6k limit caused truncation on theory-heavy blocks, producing
+// invalid JSON that dropped entire blocks of questions.
+const BLOCK_MAX_TOKENS = 16000;
+// A single extraction block runs on its own clock with retries. A block that
+// still fails after retries is SKIPPED — never fails the whole paper — so
+// this bounds how long one stubborn block can stall the import. 90s allows
+// slow providers (100B+ models) to finish large blocks.
+const BLOCK_TIMEOUT_MS = 90 * 1000;
+const BLOCK_RETRIES = 2;
 
 /** Run fn over items with at most `limit` promises in flight (like a semaphore). */
 async function mapLimit(items, limit, fn) {
@@ -915,7 +915,14 @@ function estimateQuestionCount(text) {
 /** Human-readable warning, or null when the extraction looks complete. */
 function completenessWarning(estimate, extracted) {
   const count = Array.isArray(extracted) ? extracted.length : 0;
-  if (estimate < 3 || count * 2 >= estimate) return null;
+  if (estimate < 3 || count >= estimate) return null;
+  // Warn when clearly fewer questions were extracted than the document holds.
+  // Threshold: warn if less than half were extracted, or if more than 5
+  // questions are missing (generous to avoid false alarms on papers with
+  // unusual numbering or sections the estimator miscounts).
+  const ratio = count / estimate;
+  const missing = estimate - count;
+  if (ratio >= 0.5 && missing <= 5) return null;
   return `Extracted ${count} questions, but the document appears to contain ~${estimate}. Some questions (often the theory section) may have been missed.`;
 }
 
