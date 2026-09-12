@@ -1687,17 +1687,17 @@ async function transcribeAudio(audioPath, questionText) {
   const mimeType = ext === 'mp3' ? 'audio/mpeg' : ext === 'wav' ? 'audio/wav' : 'audio/ogg';
   const base64 = audioBuffer.toString('base64');
 
-  const prompt = `Transcribe EXACTLY what the student says in this audio recording of their exam answer.
+  const prompt = `Transcribe EXACTLY what the student says in this audio recording of their exam answer. This is a voice note sent via WhatsApp for an exam question.
 
 Question: ${questionText}
 
 RULES:
-- Return ONLY the student's actual spoken answer
+- Return ONLY the student's actual spoken answer as plain text
 - Do NOT correct spelling or grammar
 - Do NOT summarize or paraphrase
-- Do NOT add any explanation or prefix
+- Do NOT add any explanation, prefix, or JSON formatting
 - If the audio is unclear, transcribe what you can hear and mark unclear parts with [?]
-- If you cannot hear anything, return exactly: [inaudible]`;
+- If you cannot hear anything or the audio is empty, return exactly: [inaudible]`;
 
   // Use Gemini's native generateContent API (supports inline audio)
   const providers = [
@@ -1746,23 +1746,27 @@ RULES:
         return text.trim();
       }
 
-      // Non-Gemini providers: try OpenAI-compatible endpoint
+      // Non-Gemini providers: try OpenAI-compatible endpoint with base64 audio
+      // OpenAI supports input_audio in chat completions for audio models
+      const audioFormat = ext === 'mp3' ? 'mp3' : ext === 'wav' ? 'wav' : 'ogg';
+      const messages = [
+        { role: 'system', content: 'You are an exam answer transcriber. Transcribe spoken audio answers accurately and return ONLY the transcribed text.' },
+        { role: 'user', content: [
+          { type: 'text', text: prompt },
+          { type: 'input_audio', input_audio: { data: base64, format: audioFormat } },
+        ] },
+      ];
       const result = await callEndpointRaw({
         baseUrl: p.baseUrl,
         apiKey: p.apiKey,
         model: p.model,
-        messages: [
-          { role: 'system', content: 'You are an exam answer transcriber. Transcribe spoken audio answers accurately and return ONLY the transcribed text.' },
-          { role: 'user', content: [
-            { type: 'text', text: prompt },
-            { type: 'input_audio', input_audio: { data: base64, format: ext === 'mp3' ? 'mp3' : 'ogg' } },
-          ] },
-        ],
+        messages,
         temperature: 0.1,
         maxTokens: 2048,
         timeoutMs: Math.max(config.ai.timeoutMs, 60000),
       });
-      const text = typeof result === 'string' ? result : result?.content || result?.choices?.[0]?.message?.content || '';
+      // callEndpointRaw returns the raw content string from choices[0].message.content
+      const text = typeof result === 'string' ? result : '';
       if (!text || text === '[inaudible]') {
         throw new AIError('Audio transcription returned empty or inaudible');
       }

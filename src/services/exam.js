@@ -919,26 +919,16 @@ async function handleAnswer(exam, session, student, question, body, meta = {}) {
         console.log(`[exam] Saved photo answer as ${answerImage}`);
 
         // Read the handwritten answer from the photo
-        // Primary: local OCR (tesseract.js) — always works, no API needed
-        // Fallback: AI providers with vision support
+        // Primary: AI vision providers (best for handwritten text)
+        // Fallback: local OCR (tesseract.js)
         let readSuccess = false;
-        try {
-          console.log(`[exam] Reading photo with local OCR (tesseract.js)...`);
-          const ocrResult = await ocr.readPhotoAnswer(answerImage, question.text);
-          if (ocrResult.success && ocrResult.text && ocrResult.text !== '[unreadable]' && ocrResult.text.length > 1) {
-            answerText = ocrResult.text;
-            puterRead = true;
-            readSuccess = true;
-            console.log(`[ocr] Read answer (${ocrResult.confidence}% conf): ${answerText.slice(0, 150)}...`);
-          }
-        } catch (err) {
-          console.error(`[ocr] Read failed: ${err.message}`);
-        }
-        if (!readSuccess && ai.aiConfigured()) {
+        
+        // Try AI vision first (much better for handwritten text than Tesseract)
+        if (ai.aiConfigured()) {
           try {
-            console.log(`[exam] Falling back to AI vision...`);
+            console.log(`[exam] Reading photo with AI vision...`);
             const readText = await ai.readPhotoAnswer(answerImage, question.text);
-            if (readText && readText !== '[unreadable]') {
+            if (readText && readText !== '[unreadable]' && readText.length > 1) {
               answerText = readText;
               puterRead = true;
               readSuccess = true;
@@ -948,8 +938,28 @@ async function handleAnswer(exam, session, student, question, body, meta = {}) {
             console.error(`[ai] Vision read failed: ${err.message}`);
           }
         }
+        
+        // Fallback to local OCR if AI vision didn't work
         if (!readSuccess) {
-          answerText = (body || '').trim() || '(photo answer)';
+          try {
+            console.log(`[exam] Falling back to local OCR (tesseract.js)...`);
+            const ocrResult = await ocr.readPhotoAnswer(answerImage, question.text);
+            if (ocrResult.success && ocrResult.text && ocrResult.text !== '[unreadable]' && ocrResult.text.length > 1) {
+              answerText = ocrResult.text;
+              puterRead = true;
+              readSuccess = true;
+              console.log(`[ocr] Read answer (${ocrResult.confidence}% conf): ${answerText.slice(0, 150)}...`);
+            }
+          } catch (err) {
+            console.error(`[ocr] Read failed: ${err.message}`);
+          }
+        }
+        
+        if (!readSuccess) {
+          // Both AI vision and OCR failed - store the photo but mark for review
+          // Don't use placeholder text that would be marked as 0
+          answerText = '(photo answer - awaiting manual review)';
+          console.log(`[exam] Could not read photo answer, marking for manual review`);
         }
       } catch (err) {
         console.error('[exam] photo answer download/render failed:', err.message);
@@ -985,18 +995,20 @@ async function handleAnswer(exam, session, student, question, body, meta = {}) {
           try {
             console.log(`[exam] Transcribing audio with AI...`);
             const transcribed = await ai.transcribeAudio(audioFile, question.text);
-            if (transcribed && transcribed !== '[inaudible]') {
-              answerText = transcribed;
+            if (transcribed && transcribed !== '[inaudible]' && transcribed.trim().length > 0) {
+              answerText = transcribed.trim();
               console.log(`[ai] Transcribed: ${answerText.slice(0, 150)}...`);
             } else {
-              answerText = (body || '').trim() || '(audio answer - could not transcribe)';
+              // Transcription returned empty or inaudible
+              answerText = '(audio answer - could not transcribe)';
+              console.log(`[ai] Transcription returned empty or inaudible`);
             }
           } catch (err) {
             console.error(`[ai] Audio transcription failed: ${err.message}`);
-            answerText = (body || '').trim() || '(audio answer - transcription failed)';
+            answerText = '(audio answer - transcription failed)';
           }
         } else {
-          answerText = (body || '').trim() || '(audio answer)';
+          answerText = '(audio answer - AI not configured)';
         }
       } catch (err) {
         console.error('[exam] audio answer download failed:', err.message);
@@ -1123,6 +1135,17 @@ async function markAllPendingTheory(sessionId) {
       ).run('Photo answer could not be read by AI. Awaiting manual review.', a.id);
       return;
     }
+    
+    // Handle audio answers that couldn't be transcribed
+    if (a.answer_text && a.answer_text.startsWith('(audio answer')) {
+      // Audio transcription failed - mark for review
+      db.prepare(
+        `UPDATE answers SET needs_review=1, marked_by='ai', marks_awarded=0, ai_feedback=?, marked_at=datetime('now') WHERE id=?`
+      ).run('Audio answer could not be transcribed. Awaiting manual review.', a.id);
+      console.log(`[exam] Audio answer ${a.id} could not be transcribed, marked for review`);
+      return;
+    }
+    
     try {
       marked = await marking.markTheoryAnswer(question, a.answer_text, scheme);
     } catch (err) {

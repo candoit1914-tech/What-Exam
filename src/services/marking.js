@@ -216,7 +216,7 @@ async function markTheoryImageAnswer(question, studentAnswer, imageFile, scheme)
   // If the inbound read already produced meaningful text, mark it directly
   // without re-reading the image (avoids duplicate OCR/vision calls that may
   // fail on Render).
-  const PLACEHOLDERS = ['(photo answer)', '(photo answer - could not read)', '(photo answer - transcription failed)', '(audio answer)', '(audio answer - could not transcribe)', '(audio answer - transcription failed)'];
+  const PLACEHOLDERS = ['(photo answer)', '(photo answer - could not read)', '(photo answer - transcription failed)', '(audio answer)', '(audio answer - could not transcribe)', '(audio answer - transcription failed)', '(photo answer - awaiting manual review)'];
   const preReadText = (studentAnswer || '').trim();
   const isPlaceholder = !preReadText || PLACEHOLDERS.includes(preReadText) || preReadText.length < 3;
   if (!isPlaceholder) {
