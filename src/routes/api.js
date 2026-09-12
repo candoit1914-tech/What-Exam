@@ -14,6 +14,17 @@ const auth = require('../auth');
 
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
+const imageUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype === 'image/png' || file.mimetype === 'image/jpeg') {
+      cb(null, true);
+    } else {
+      cb(new Error('Only PNG and JPG images are accepted'));
+    }
+  },
+});
 
 // ── Admin auth ─────────────────────────────────────────────────────────
 router.post('/auth/login', (req, res) => {
@@ -434,6 +445,44 @@ router.delete('/exams/:id/questions/:qid', (req, res) => {
      WHERE exam_id = ?`
   ).run(req.params.id, req.params.id);
   marking.recomputeExamTotal(req.params.id);
+  res.json({ ok: true });
+});
+
+// ── Question image upload / remove ─────────────────────────────────────
+
+router.post('/exams/:id/questions/:qid/image', imageUpload.single('file'), asyncWrap(async (req, res) => {
+  const exam = db.prepare('SELECT * FROM exams WHERE id = ?').get(req.params.id);
+  if (!exam) return res.status(404).json({ error: 'Exam not found' });
+  if (exam.status === 'live' || exam.status === 'ended') {
+    return res.status(400).json({ error: 'Exam is already live/ended. Questions can no longer be edited.' });
+  }
+  const q = db.prepare('SELECT * FROM questions WHERE id = ? AND exam_id = ?').get(req.params.qid, req.params.id);
+  if (!q) return res.status(404).json({ error: 'Question not found' });
+  if (!req.file) return res.status(400).json({ error: 'No image file uploaded' });
+
+  const ext = req.file.mimetype === 'image/png' ? 'png' : 'jpg';
+  const filename = `${Date.now()}-${exam.id}-q${q.q_order}-manual.${ext}`;
+  const filePath = path.join(config.uploadsDir, filename);
+  fs.writeFileSync(filePath, req.file.buffer);
+
+  db.prepare('UPDATE questions SET image = ? WHERE id = ?').run(filename, q.id);
+  res.json({ ok: true, image: filename });
+}));
+
+router.delete('/exams/:id/questions/:qid/image', (req, res) => {
+  const exam = db.prepare('SELECT * FROM exams WHERE id = ?').get(req.params.id);
+  if (!exam) return res.status(404).json({ error: 'Exam not found' });
+  if (exam.status === 'live' || exam.status === 'ended') {
+    return res.status(400).json({ error: 'Exam is already live/ended. Questions can no longer be edited.' });
+  }
+  const q = db.prepare('SELECT * FROM questions WHERE id = ? AND exam_id = ?').get(req.params.qid, req.params.id);
+  if (!q) return res.status(404).json({ error: 'Question not found' });
+
+  if (q.image) {
+    const filePath = path.join(config.uploadsDir, q.image);
+    try { fs.unlinkSync(filePath); } catch {}
+  }
+  db.prepare('UPDATE questions SET image = ? WHERE id = ?').run('', q.id);
   res.json({ ok: true });
 });
 
