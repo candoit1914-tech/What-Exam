@@ -676,7 +676,7 @@ async function renderTab() {
       </div>
       <div class="card" style="margin-top:14px">
         <h3 style="margin-bottom:4px">ADD MANY <span class="gr">RECIPIENTS</span></h3>
-        <p class="muted" style="font-size:12.5px">Comma or newline separated, any country format.</p>
+        <p class="muted qmeta">Comma or newline separated, any country format.</p>
         <textarea id="phones_input" placeholder="+233 24 123 4567&#10;0541234567&#10;+1 555 123 4567"></textarea>
         <div class="row" style="margin-top:12px">
           <button class="btn btn-primary" onclick="addRecipients(${id})">Add Recipients</button>
@@ -706,7 +706,7 @@ async function renderTab() {
               <td>${esc(r.name || '—')}</td>
               <td>${esc(r.phone)}</td>
               <td class="muted">${esc(r.sent_at || '—')}</td>
-              <td>${status} ${time ? `<span class="muted" style="font-size:11px">(${esc(time)})</span>` : ''}</td>
+              <td>${status} ${time ? `<span class="muted qmeta">(${esc(time)})</span>` : ''}</td>
               <td><button class="small ghost danger" onclick="removeRecipient(${id}, ${r.id})">Remove</button></td>
             </tr>`;
           }).join('')}
@@ -726,7 +726,7 @@ async function renderTab() {
         <div class="spread">
           <div>
             <h3 style="margin-bottom:2px">RESEND <span class="gr">RESULTS</span></h3>
-            <p class="muted" style="font-size:12.5px">Send result messages and certificates to all ${finishedCount} participant(s) again.</p>
+            <p class="muted qmeta">Send result messages and certificates to all ${finishedCount} participant(s) again.</p>
           </div>
           <button class="btn btn-ghost" onclick="bulkResendResults(${id})">
             ${I.wa} Resend All Results & Certificates
@@ -765,7 +765,7 @@ function qitemHTML(q, id, samePassageAsPrev = false) {
   return `<div class="qitem">
     <div class="qhead">
       <div>
-        <div class="muted" style="font-size:12px">Q${q.q_order} · ${q.type} · ${q.marks} mark(s) · ${q.difficulty} · ${badge(q.source)}</div>
+        <div class="muted qmeta">Q${q.q_order} · ${q.type} · ${q.marks} mark(s) · ${q.difficulty} · ${badge(q.source)}</div>
         ${q.passage && samePassageAsPrev
           ? `<div class="qpassage-same">↳ same passage as above</div>`
           : q.passage ? `<div class="qpassage">${esc(q.passage)}</div>` : ''}
@@ -1513,12 +1513,12 @@ async function renderResultDetail(id) {
       <tbody>
         ${r.answers.map((a) => `<tr>
           <td>${a.q_order}</td>
-          <td style="max-width:280px">${esc(a.text)}</td>
-          <td>${a.answer_image ? `<img src="${API_BASE}/api/results/${id}/image/${encodeURIComponent(a.answer_image)}" alt="photo answer" style="max-height:90px;border-radius:8px">` : esc(a.answer_text)}</td>
+          <td>${esc(a.text)}</td>
+          <td>${a.answer_image ? `<img src="${API_BASE}/api/results/${id}/image/${encodeURIComponent(a.answer_image)}" alt="photo answer">` : esc(a.answer_text)}</td>
           <td>${a.type === 'objective' ? esc(a.correct_answer) : '—'}</td>
-          <td><input type="number" data-aw="${a.id}" value="${a.marks_awarded}" step="0.5" style="width:70px"> / ${a.max_marks}</td>
+          <td><input type="number" data-aw="${a.id}" value="${a.marks_awarded}" step="0.5"> / ${a.max_marks}</td>
           <td>${a.marked_by}${a.needs_review ? ' ' + badge('review') : ''}${Number(a.ai_detected) === 1 ? ' ' + badge('ai-copied') : ''}</td>
-          <td style="max-width:280px">${esc(a.ai_feedback)}</td>
+          <td class="muted qmeta">${esc(a.ai_feedback)}</td>
           <td><button class="small ghost" onclick="saveMarks(${id}, ${a.id})">Save</button></td>
         </tr>`).join('')}
       </tbody>
@@ -1560,17 +1560,17 @@ async function renderReviews() {
               <td>${esc(a.student_name || a.student_phone)}</td>
               <td><a href="#/exams/${a.session_id ? '' : ''}">${esc(a.exam_title)}</a></td>
               <td>${a.q_order}</td>
-              <td style="max-width:220px">${esc(a.question_text)}</td>
-              <td style="max-width:200px">${
+              <td>${esc(a.question_text)}</td>
+              <td>${
                 a.answer_image
-                  ? `<a href="${API_BASE}/api/results/${a.session_id}/image/${encodeURIComponent(a.answer_image)}" target="_blank"><img src="${API_BASE}/api/results/${a.session_id}/image/${encodeURIComponent(a.answer_image)}" alt="photo" style="max-height:60px;border-radius:6px"></a>`
+                  ? `<a href="${API_BASE}/api/results/${a.session_id}/image/${encodeURIComponent(a.answer_image)}" target="_blank"><img src="${API_BASE}/api/results/${a.session_id}/image/${encodeURIComponent(a.answer_image)}" alt="photo"></a>`
                   : esc((a.answer_text || '').slice(0, 120))
               }</td>
               <td>${a.question_type === 'objective' ? badge('objective') : badge('theory')}</td>
               <td>
-                <input type="number" data-rev="${a.id}" value="${a.marks_awarded}" step="0.5" style="width:60px" min="0" max="${a.max_marks}"> / ${a.max_marks}
+                <input type="number" data-rev="${a.id}" value="${a.marks_awarded}" step="0.5" min="0" max="${a.max_marks}"> / ${a.max_marks}
               </td>
-              <td style="max-width:200px;font-size:.82rem">${esc(a.ai_feedback || '').slice(0, 100)}</td>
+              <td class="muted qmeta">${esc(a.ai_feedback || '').slice(0, 100)}</td>
               <td>
                 <button class="small ghost" onclick="saveReview(${a.id}, ${a.session_id})">Save</button>
                 <a href="#/results/${a.session_id}"><button class="small ghost">Session</button></a>
@@ -1676,14 +1676,14 @@ async function renderMessages() {
   const msgs = await api('/api/messages');
   const events = await api('/api/webhook-events');
   const webhookHealth = events.length
-    ? `<div class="webhook-ok" style="background:#052e16;border:1px solid #166534;border-radius:12px;padding:12px 16px;margin:0 0 14px;font-size:13px">
+    ? `<div class="webhook-ok">
         <strong>Webhook connected ✓</strong> — ${events.length} event(s) received${events[0]?.received_at ? `, last ${esc(events[0].received_at)}` : ''}. Student replies are reaching this server.
       </div>`
-    : `<div class="webhook-warn" style="background:#3a1d0a;border:1px solid #92400e;border-radius:12px;padding:12px 16px;margin:0 0 14px;font-size:13px">
+    : `<div class="webhook-warn">
         <strong>⚠️ No webhook events received.</strong> Meta has never delivered a message to this server, so student
         replies cannot be processed and exams appear stuck. Verify the webhook URL in the Meta dashboard is
-        <code style="background:#0b1220;padding:2px 6px;border-radius:6px">${esc((window.API_BASE || window.location.origin))}/webhook/whatsapp</code>,
-        with the verify token from your <code style="background:#0b1220;padding:2px 6px;border-radius:6px">.env</code>, then send a test message to the bot.
+        <code>${esc((window.API_BASE || window.location.origin))}/webhook/whatsapp</code>,
+        with the verify token from your <code>.env</code>, then send a test message to the bot.
       </div>`;
   $view.innerHTML = `
     ${pageHead('envelope', 'DELI<span class="gr">VERY</span>', 'WhatsApp delivery status for outbound messages')}
@@ -1701,7 +1701,7 @@ async function renderMessages() {
             <td>${esc(m.recipient)}</td>
             <td>${esc(m.type || 'text')}</td>
             <td>${badge(m.status || 'sent')}</td>
-            <td class="muted" style="max-width:220px;word-break:break-all">${esc(m.message_id || '—')}</td>
+            <td class="muted message-id">${esc(m.message_id || '—')}</td>
             <td class="muted">${esc(m.created_at || '—')}</td>
             <td class="muted">${esc(m.updated_at || '—')}</td>
           </tr>`).join('')}
