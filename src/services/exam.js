@@ -1104,6 +1104,23 @@ async function markAllPendingTheory(sessionId) {
         scheme = null;
       }
     }
+    // If no scheme (non-pool question or pool scheme missing), try to load or generate one
+    if (!scheme || !scheme.model_answer) {
+      scheme = marking.getScheme(question.id);
+    }
+    // If still no scheme or scheme is empty, generate it now (for manually created questions)
+    if (!scheme || (!scheme.model_answer && !scheme.correct_answer)) {
+      if (question.type === 'theory' && ai.aiConfigured()) {
+        try {
+          console.log(`[exam] Generating missing marking scheme for question ${question.id}...`);
+          scheme = await marking.buildMarkingScheme(question);
+          console.log(`[exam] Generated scheme for question ${question.id}`);
+        } catch (err) {
+          console.error(`[exam] Failed to generate scheme for question ${question.id}:`, err.message);
+          scheme = scheme || { type: 'theory', model_answer: '', key_points: [], rubric: [], presentation_marks: 0, grammar_marks: 0 };
+        }
+      }
+    }
     let marked;
     if (a.answer_image) {
       // Photo answer: use image-based marking via marking service
