@@ -213,6 +213,8 @@ ensureColumn('question_pool', 'image', "TEXT DEFAULT ''");
 ensureColumn('answers', 'ai_detected', "INTEGER NOT NULL DEFAULT 0");
 ensureColumn('answers', 'answer_image', "TEXT DEFAULT ''");
 ensureColumn('jobs', 'warning', "TEXT DEFAULT ''");
+ensureColumn('questions', 'follow_ups', "TEXT DEFAULT '[]'");
+ensureColumn('question_pool', 'follow_ups', "TEXT DEFAULT '[]'");
 
 // Migration: answers.question_id used to be FK-constrained to questions().
 // Attempts may now answer pool-variant questions, so the constraint must go.

@@ -459,6 +459,116 @@ function attachMarkers(questionsByBlock, markersByBlock) {
   return { used, unused: allMarkers.filter((m) => !used.has(m.idx)) };
 }
 
+// ── Diagram generation for theory questions ─────────────────────────────
+
+const DIAGRAM_TYPES = ['bar_chart', 'pie_chart', 'line_graph', 'data_table', 'scientific_diagram', 'map', 'flowchart'];
+
+/**
+ * Determine if a theory question should have a diagram based on its content.
+ * Questions involving data, measurements, comparisons, or processes are good candidates.
+ */
+function shouldHaveDiagram(question) {
+  const text = String(question.text || '').toLowerCase();
+  const diagramKeywords = [
+    'chart', 'graph', 'table', 'data', 'diagram', 'compare', 'measure',
+    'temperature', 'rainfall', 'population', 'sales', 'cost', 'distance',
+    'speed', 'time', 'percentage', 'average', 'total', 'calculate',
+    'interpret', 'analyze', 'show', 'illustrate', 'describe the',
+    'what does the', 'which region', 'which month', 'highest', 'lowest',
+  ];
+  return diagramKeywords.some(kw => text.includes(kw));
+}
+
+/**
+ * Generate an SVG diagram for a theory question.
+ * Returns the SVG string or null if generation fails.
+ */
+async function generateDiagram({ subject, topic, questionText, diagramType }) {
+  const system = `You are an educational diagram generator for exam questions.
+Generate an SVG diagram that illustrates the given exam question.
+Return ONLY the raw SVG code - no markdown fences, no explanation, no commentary.
+The SVG must:
+- Be 800x600 pixels
+- Use clean, educational styling with clear labels
+- Use readable fonts (Arial, Helvetica, or sans-serif)
+- Have a white background
+- Include proper colors for clarity (blue, green, red, orange for different data)
+- Have a title/legend if applicable
+- Use simple, clear shapes and lines`;
+
+  const user = `Subject: ${subject || 'General'}
+Topic: ${topic || 'general'}
+Question: ${questionText}
+Diagram type: ${diagramType || 'best_fit'}
+
+Generate an SVG diagram that helps a student answer this question. The diagram should contain realistic, plausible data that matches the question context.`;
+
+  try {
+    const svg = await chatJSON(
+      [{ role: 'system', content: system }, { role: 'user', content: user }],
+      { temperature: 0.7, maxRetries: 1, maxTokens: 8192 }
+    );
+    // The AI might return the SVG wrapped in an object or as a string
+    if (typeof svg === 'string') return svg;
+    if (svg && svg.svg) return svg.svg;
+    if (svg && svg.diagram) return svg.diagram;
+    return null;
+  } catch (err) {
+    console.error('[ai] diagram generation failed:', err.message);
+    return null;
+  }
+}
+
+/**
+ * Generate 2-3 follow-up questions for a diagram-based theory question.
+ * Returns an array of follow-up objects.
+ */
+async function generateFollowUpQuestions({ subject, topic, questionText, diagramType }) {
+  const system = `You are an expert exam question writer. Generate 2-3 follow-up questions based on the given question and diagram type.
+Return: {"follow_ups": [{"text": "question text", "marks": 2, "difficulty": "easy|medium|hard"}]}
+
+Rules:
+- Each follow-up must require students to INTERPRET the diagram (not just recall facts)
+- Include a mix of difficulties (at least one easy, one medium)
+- Marks should be 2-4 per question
+- Questions should be specific and test data interpretation skills
+- Use clear, age-appropriate English (JHS/Ghana BECE level)`;
+
+  const user = `Subject: ${subject || 'General'}
+Topic: ${topic || 'general'}
+Main question: ${questionText}
+Diagram type: ${diagramType || 'chart'}
+
+Generate 2-3 follow-up questions that require students to read and interpret the diagram.`;
+
+  try {
+    const result = await chatJSON(
+      [{ role: 'system', content: system }, { role: 'user', content: user }],
+      { temperature: 0.7, maxRetries: 1, maxTokens: 2048 }
+    );
+    const followUps = result?.follow_ups || result;
+    if (Array.isArray(followUps)) return followUps.slice(0, 3);
+    return [];
+  } catch (err) {
+    console.error('[ai] follow-up generation failed:', err.message);
+    return [];
+  }
+}
+
+/**
+ * Select the best diagram type for a question based on its content.
+ */
+function selectDiagramType(questionText) {
+  const text = String(questionText || '').toLowerCase();
+  if (text.includes('pie') || text.includes('proportion') || text.includes('share')) return 'pie_chart';
+  if (text.includes('trend') || text.includes('over time') || text.includes('monthly') || text.includes('yearly')) return 'line_graph';
+  if (text.includes('table') || text.includes('data') || text.includes('list')) return 'data_table';
+  if (text.includes('map') || text.includes('region') || text.includes('location')) return 'map';
+  if (text.includes('flow') || text.includes('process') || text.includes('cycle')) return 'flowchart';
+  if (text.includes('circuit') || text.includes('cell') || text.includes('diagram')) return 'scientific_diagram';
+  return 'bar_chart'; // default
+}
+
 /**
  * Generate a full exam question set with automatic marking scheme.
  * When poolSize is greater than count, produces up to poolSize DISTINCT
@@ -766,6 +876,39 @@ ${avoidBlock}`);
   finalActive.sort(sortFn);
   finalRest.sort(sortFn);
   const result = finalActive.concat(finalRest).slice(0, target);
+
+  // ── Generate diagrams and follow-up questions for theory questions ──
+  // Add diagrams to ~50% of theory questions that are suitable
+  const { svgToPng } = require('./svgToPng');
+  const fs = require('fs');
+  const path = require('path');
+
+  for (const q of result) {
+    if (q.type === 'theory' && shouldHaveDiagram(q) && Math.random() < 0.5) {
+      const diagramType = selectDiagramType(q.text);
+      console.log(`[generate] generating ${diagramType} diagram for question: "${q.text.slice(0, 50)}..."`);
+
+      const svg = await generateDiagram({ subject, topics, questionText: q.text, diagramType });
+      if (svg) {
+        try {
+          const pngBuffer = await svgToPng(svg);
+          const filename = `diagram-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.png`;
+          fs.writeFileSync(path.join(config.uploadsDir, filename), pngBuffer);
+          q.image = filename;
+          console.log(`[generate] saved diagram: ${filename}`);
+
+          // Generate follow-up questions
+          const followUps = await generateFollowUpQuestions({ subject, topics, questionText: q.text, diagramType });
+          if (followUps.length > 0) {
+            q.follow_ups = JSON.stringify(followUps);
+            console.log(`[generate] generated ${followUps.length} follow-up questions`);
+          }
+        } catch (err) {
+          console.error('[generate] diagram render failed:', err.message);
+        }
+      }
+    }
+  }
 
   // ── Log to global history so future generations avoid these ──────────
   if (result.length > 0) {
@@ -2165,4 +2308,8 @@ module.exports = {
   repairTruncatedJSON,
   readPhotoAnswer,
   transcribeAudio,
+  generateDiagram,
+  generateFollowUpQuestions,
+  shouldHaveDiagram,
+  selectDiagramType,
 };

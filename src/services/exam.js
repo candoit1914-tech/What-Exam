@@ -611,6 +611,24 @@ async function sendQuestionTo(session, student) {
   if (question.type === 'objective') {
     await wa.sendText(student.phone, formatOptions(exam, session, question));
   }
+
+  // Send follow-up questions for theory questions with diagrams
+  if (question.type === 'theory' && question.follow_ups) {
+    try {
+      const followUps = JSON.parse(question.follow_ups);
+      if (Array.isArray(followUps) && followUps.length > 0) {
+        await wa.sendText(student.phone, '*Follow-up Questions:*');
+        for (let i = 0; i < followUps.length; i++) {
+          const fu = followUps[i];
+          const letter = String.fromCharCode(97 + i); // a, b, c
+          await wa.sendText(student.phone, `*(${letter})* ${fu.text}\nMarks: ${fu.marks}`);
+        }
+      }
+    } catch (err) {
+      console.error('[exam] failed to send follow-up questions:', err.message);
+    }
+  }
+
   return true;
 }
 
