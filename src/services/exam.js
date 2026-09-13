@@ -263,7 +263,7 @@ const START_WORDS = new Set([
   'test',
 ]);
 
-function formatQuestion(exam, question, qCount, body) {
+function formatQuestion(exam, question, qCount, body, session) {
   // The type banner and any passage/instruction/header are sent as their own
   // bubbles by buildQuestionBubbles, so the question bubble carries just the
   // stem (optionally pre-stripped of leading section headers).
@@ -278,7 +278,8 @@ function formatQuestion(exam, question, qCount, body) {
       text = text + ' —';
     }
   }
-  return `*QUESTION ${question.q_order}*\n\n${text}`;
+  const timer = session ? `\n\nTime remaining: *${timeRemaining(session, exam)}*` : '';
+  return `*QUESTION ${question.q_order}*\n\n${text}${timer}`;
 }
 
 /** mm:ss left on the clock, computed from the session start + exam duration. */
@@ -402,7 +403,7 @@ const SECTION_INTRO = {
  * precede this one in the sequence, so resume/nudge re-sends never duplicate
  * headers, instructions, or passages.
  */
-function buildQuestionBubbles(exam, question, sequence, index) {
+function buildQuestionBubbles(exam, question, sequence, index, session) {
   const bubbles = [];
   const type = question.type === 'theory' ? 'THEORY' : 'OBJECTIVE';
   const prev = index > 0 ? sequence.slice(0, index) : [];
@@ -457,7 +458,7 @@ function buildQuestionBubbles(exam, question, sequence, index) {
       seen.headings.add(h);
     }
   }
-  bubbles.push(formatQuestion(exam, question, sequence.length, body));
+  bubbles.push(formatQuestion(exam, question, sequence.length, body, session));
   return bubbles;
 }
 
@@ -467,8 +468,7 @@ function formatOptions(exam, session, question) {
   const body = options.map((o) => `${o.key}. ${o.text}`).join('\n');
   return (
     `${body}\n\n` +
-    `Reply with the letter of your answer.\n\n` +
-    `Time remaining: *${timeRemaining(session, exam)}*`
+    `Reply with the letter of your answer.`
   );
 }
 
@@ -600,7 +600,7 @@ async function sendQuestionTo(session, student) {
   // sent yet). The section header and intro are already sent above for the
   // first question, so buildQuestionBubbles only adds those when they are
   // genuinely new — but we skip them here when firstOfType handled them.
-  for (const bubble of buildQuestionBubbles(exam, question, sequence, index)) {
+  for (const bubble of buildQuestionBubbles(exam, question, sequence, index, session)) {
     // Skip bubbles we already sent as separate messages above.
     if (firstOfType) {
       if (bubble === formatSectionHeader(question.type === 'theory' ? 'THEORY' : 'OBJECTIVE')) continue;
