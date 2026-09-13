@@ -14,6 +14,46 @@ const auth = require('../auth');
 
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
+
+// ── Simple in-memory rate limiter ────────────────────────────────────
+// Tracks failed login attempts per IP. Blocks after 5 failures in 5 minutes.
+const loginAttempts = new Map();
+function loginRateLimiter(req, res, next) {
+  const ip = req.ip || req.connection?.remoteAddress || 'unknown';
+  const now = Date.now();
+  const windowMs = 5 * 60 * 1000; // 5 minutes
+  const maxAttempts = 5;
+
+  // Clean up old entries periodically
+  if (loginAttempts.size > 1000) {
+    for (const [key, val] of loginAttempts) {
+      if (now - val.first > windowMs) loginAttempts.delete(key);
+    }
+  }
+
+  const record = loginAttempts.get(ip);
+  if (record && now - record.first < windowMs && record.count >= maxAttempts) {
+    const retryAfter = Math.ceil((record.first + windowMs - now) / 1000);
+    return res.status(429).json({ error: `Too many login attempts. Try again in ${retryAfter}s.` });
+  }
+  next();
+}
+
+function recordLoginFailure(req) {
+  const ip = req.ip || req.connection?.remoteAddress || 'unknown';
+  const now = Date.now();
+  const record = loginAttempts.get(ip);
+  if (!record || now - record.first > 5 * 60 * 1000) {
+    loginAttempts.set(ip, { first: now, count: 1 });
+  } else {
+    record.count++;
+  }
+}
+
+function clearLoginFailures(req) {
+  const ip = req.ip || req.connection?.remoteAddress || 'unknown';
+  loginAttempts.delete(ip);
+}
 const imageUpload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 5 * 1024 * 1024 },
@@ -27,11 +67,13 @@ const imageUpload = multer({
 });
 
 // ── Admin auth ─────────────────────────────────────────────────────────
-router.post('/auth/login', (req, res) => {
+router.post('/auth/login', loginRateLimiter, (req, res) => {
   const password = (req.body && req.body.password) || '';
   if (!auth.verifyPassword(password)) {
+    recordLoginFailure(req);
     return res.status(401).json({ error: 'Invalid password' });
   }
+  clearLoginFailures(req);
   res.json({ token: auth.adminToken() });
 });
 

@@ -514,7 +514,7 @@ async function renderDashboard() {
           <span class="dash-activity-meta">${esc(e.subject || 'General')} · ${e.question_count || 0} questions · ${e.student_count || 0} students</span>
         </div>
         <div class="dash-activity-right">
-          <span class="badge badge--${status}">${status}</span>
+          <span class="badge badge--${esc(status)}">${esc(status)}</span>
           <span class="dash-activity-date">${date}</span>
         </div>
       </a>`;
@@ -1489,14 +1489,14 @@ function printAttendance(id) {
           <tbody>
             ${participated.map((s, i) => `<tr>
               <td>${i + 1}</td>
-              <td>${s.name}</td>
-              <td>${s.phone}</td>
+              <td>${esc(s.name)}</td>
+              <td>${esc(s.phone)}</td>
               <td>${s.score != null ? s.score : '—'}</td>
               <td>${s.percentage != null ? s.percentage + '%' : '—'}</td>
               <td>${s.passed != null ? (s.passed ? '<span class="pass">PASS</span>' : '<span class="fail">FAIL</span>') : '—'}</td>
-              <td><span class="badge ${s.status}">${s.status}</span></td>
-              <td class="muted">${s.started_at || '—'}</td>
-              <td class="muted">${s.ended_at || '—'}</td>
+              <td><span class="badge ${esc(s.status)}">${esc(s.status)}</span></td>
+              <td class="muted">${esc(s.started_at) || '—'}</td>
+              <td class="muted">${esc(s.ended_at) || '—'}</td>
             </tr>`).join('')}
           </tbody>
         </table>`}
@@ -1513,9 +1513,9 @@ function printAttendance(id) {
           <tbody>
             ${absent.map((s, i) => `<tr>
               <td>${i + 1}</td>
-              <td>${s.name}</td>
-              <td>${s.phone}</td>
-              <td class="muted">${s.sent_at || '—'}</td>
+              <td>${esc(s.name)}</td>
+              <td>${esc(s.phone)}</td>
+              <td class="muted">${esc(s.sent_at) || '—'}</td>
             </tr>`).join('')}
           </tbody>
         </table>`}

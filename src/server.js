@@ -237,7 +237,11 @@ app.use((err, req, res, next) => {
     return res.status(status).json({ error: `Upload failed: ${err.message}` });
   }
   console.error(err);
-  res.status(err.status || 500).json({ error: err.message || 'Internal server error' });
+  // Don't leak internal details (file paths, stack traces) in production
+  const safeMsg = process.env.NODE_ENV === 'production'
+    ? 'Internal server error'
+    : (err.message || 'Internal server error');
+  res.status(err.status || 500).json({ error: safeMsg });
 });
 
 if (require.main === module) {
@@ -278,7 +282,7 @@ if (require.main === module) {
           : 'AI: NOT configured (set AI_API_KEY/AI_BASE_URL in .env)'
       );
       if (config.admin.isGenerated) {
-        console.log(`⚠️  No ADMIN_PASSWORD set — generated a random one for this boot: ${config.admin.password}`);
+        console.log('⚠️  No ADMIN_PASSWORD set — a random one was generated for this boot.');
         console.log('    Set ADMIN_PASSWORD in your environment (Render env vars) to keep a stable password.');
       }
       if (!config.whatsapp.appSecret) {
