@@ -77,6 +77,10 @@ async function callEndpoint({ baseUrl, apiKey, model, messages, temperature, max
     max_tokens: maxTokens,
   };
 
+  // Log which endpoint we're calling (mask the API key for security)
+  const maskedKey = apiKey ? apiKey.slice(0, 8) + '...' + apiKey.slice(-4) : 'NONE';
+  console.log(`[ai] Calling ${model} @ ${baseUrl} (key: ${maskedKey})`);
+
   let lastErr;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
@@ -98,7 +102,7 @@ async function callEndpoint({ baseUrl, apiKey, model, messages, temperature, max
         const backoffMs = retryAfter
           ? parseInt(retryAfter, 10) * 1000
           : Math.min(1000 * Math.pow(2, attempt), 15000);
-        console.warn(`[ai] Rate limited (429) by ${model}, retrying in ${backoffMs}ms (attempt ${attempt + 1}/${maxRetries})`);
+        console.warn(`[ai] Rate limited (429) by ${model} @ ${baseUrl}, retrying in ${backoffMs}ms (attempt ${attempt + 1}/${maxRetries})`);
         if (attempt < maxRetries) {
           await delay(backoffMs);
           continue;
@@ -107,6 +111,7 @@ async function callEndpoint({ baseUrl, apiKey, model, messages, temperature, max
 
       if (!res.ok) {
         const text = await res.text().catch(() => '');
+        console.error(`[ai] HTTP ${res.status} from ${model} @ ${baseUrl}: ${text.slice(0, 300)}`);
         throw new AIError(`AI request failed (${res.status}): ${text.slice(0, 300)}`);
       }
 
@@ -128,13 +133,19 @@ async function callEndpoint({ baseUrl, apiKey, model, messages, temperature, max
       // A hard timeout must surface (never retry) so an exam question never
       // hangs the flow indefinitely waiting on an unresponsive AI endpoint.
       if (err instanceof AIError && /timed out/i.test(err.message)) {
+        console.error(`[ai] Timeout calling ${model} @ ${baseUrl} after ${Math.round(timeoutMs / 1000)}s`);
         throw new AIError(`AI request timed out after ${Math.round(timeoutMs / 1000)}s.`);
+      }
+      // Log network errors for debugging
+      if (err instanceof TypeError) {
+        console.error(`[ai] Network error calling ${model} @ ${baseUrl}: ${err.message}`);
       }
       // Retry transient network failures (ECONNRESET etc.) and HTTP errors with
       // exponential backoff; concurrent extraction blocks make these more likely.
       const retryable = err instanceof AIError || err instanceof TypeError;
       if (retryable && attempt < maxRetries) {
         const backoff = Math.min(500 * Math.pow(2, attempt), 10000);
+        console.warn(`[ai] Retrying ${model} in ${backoff}ms (attempt ${attempt + 1}/${maxRetries})`);
         await delay(backoff);
         continue;
       }
@@ -197,6 +208,14 @@ function puterConfigured() {
 async function chatJSON(messages, { temperature = 0.4, maxRetries = 2, timeoutMs = config.ai.timeoutMs, maxTokens = 8192 } = {}) {
   if (!aiConfigured() && !puterConfigured()) {
     throw new AIError('AI is not configured. Set AI_API_KEY and AI_BASE_URL in .env');
+  }
+
+  // Log configuration status
+  console.log(`[ai] Config: primary=${config.ai.model} @ ${config.ai.baseUrl} (key: ${config.ai.apiKey?.slice(0, 8)}...)`);
+  if (secondaryConfigured()) {
+    console.log(`[ai] Config: secondary=${config.claude.model} @ ${config.claude.baseUrl} (key: ${config.claude.apiKey?.slice(0, 8)}...)`);
+  } else {
+    console.log('[ai] Config: secondary=NOT configured');
   }
 
   // Ensure every provider always has a timeout so a hanging endpoint can
