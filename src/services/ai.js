@@ -430,11 +430,10 @@ async function generateQuestions({ subject, topics, count, objectiveCount, theor
   const total = objN + theoN;
 
   const target = Math.min(Math.max(parseInt(poolSize) || total, total), 150);
-  // Small batches (5) keep output within Nvidia's ~4096-token output cap.
-  // Theory questions with rubric/e/key_points are token-heavy; 15-question
-  // batches routinely truncate mid-JSON on smaller providers.
-  const batchSize = Math.max(1, Math.min(target, 5));
-  const maxCalls = Math.min(Math.ceil(target / batchSize), 20);
+  // Larger batches = fewer total API calls. 10 questions per batch keeps
+  // output within token limits while cutting the number of requests in half.
+  const batchSize = Math.max(1, Math.min(target, 10));
+  const maxCalls = Math.min(Math.ceil(target / batchSize), 15);
 
   // Keep the same objective/theory split within each smaller batch so the
   // per-batch counts stay consistent with the overall request.
@@ -635,18 +634,20 @@ ${avoidBlock}`);
           { role: 'system', content: system(perBatchObjective, perBatchTheory, retryVariety).replace(spin, currentSpin) },
           { role: 'user', content: user(batchSize) },
         ],
-        { temperature: 0.95, maxRetries: 4, maxTokens: 16384 }
+        { temperature: 0.95, maxRetries: 2, maxTokens: 16384 }
       )
     );
     const providerCount = (secondaryConfigured() ? 1 : 0) + (tertiaryConfigured() ? 1 : 0) + 1;
-    const concurrency = Math.min(maxCalls, providerCount * 3);
+    // Conservative concurrency: 1-2 parallel requests to avoid 429s.
+    // With 2 providers racing, concurrency=2 means 1 OpenAI + 1 Nvidia at a time.
+    const concurrency = Math.min(maxCalls, providerCount <= 1 ? 2 : 3);
     console.log(`[generate] attempt ${attempt}: launching ${maxCalls} batches with concurrency ${concurrency}`);
     const settled = await mapLimit(tasks, concurrency, async (run, idx) => {
       try {
-        // Stagger batch launches by 200ms per concurrency slot to reduce 429s
-        await delay(idx * 200);
+        // Stagger batch launches by 500ms to avoid hammering the API
+        await delay(idx * 500);
         const result = await run();
-        await delay(300);
+        await delay(500);
         return result;
       } catch (err) {
         console.error(`[generate] batch ${idx} failed:`, err.message);
