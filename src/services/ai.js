@@ -1,4 +1,5 @@
 const config = require('../config');
+const db = require('../db');
 const { stripSourceWatermarks, stripMarkers } = require('./textClean');
 
 class AIError extends Error {
@@ -91,6 +92,19 @@ async function callEndpoint({ baseUrl, apiKey, model, messages, temperature, max
         timeoutMs
       );
 
+      // Handle 429 rate-limit with exponential backoff + retry
+      if (res.status === 429) {
+        const retryAfter = res.headers.get('retry-after');
+        const backoffMs = retryAfter
+          ? parseInt(retryAfter, 10) * 1000
+          : Math.min(1000 * Math.pow(2, attempt), 15000);
+        console.warn(`[ai] Rate limited (429) by ${model}, retrying in ${backoffMs}ms (attempt ${attempt + 1}/${maxRetries})`);
+        if (attempt < maxRetries) {
+          await delay(backoffMs);
+          continue;
+        }
+      }
+
       if (!res.ok) {
         const text = await res.text().catch(() => '');
         throw new AIError(`AI request failed (${res.status}): ${text.slice(0, 300)}`);
@@ -117,10 +131,11 @@ async function callEndpoint({ baseUrl, apiKey, model, messages, temperature, max
         throw new AIError(`AI request timed out after ${Math.round(timeoutMs / 1000)}s.`);
       }
       // Retry transient network failures (ECONNRESET etc.) and HTTP errors with
-      // a small backoff; concurrent extraction blocks make these more likely.
+      // exponential backoff; concurrent extraction blocks make these more likely.
       const retryable = err instanceof AIError || err instanceof TypeError;
       if (retryable && attempt < maxRetries) {
-        await delay(500 * (attempt + 1));
+        const backoff = Math.min(500 * Math.pow(2, attempt), 10000);
+        await delay(backoff);
         continue;
       }
       throw err;
@@ -427,6 +442,14 @@ async function generateQuestions({ subject, topics, count, objectiveCount, theor
   const perBatchTheory = theoN > 0 ? Math.max(1, Math.round(theoN * ratio)) : 0;
   const perBatchObjective = Math.max(1, batchSize - perBatchTheory);
 
+  // ── Build the avoid list from current exam + global history ──────────
+  // Merge caller-provided `avoid` (existing questions in this exam) with
+  // the full history of AI-generated questions for this subject/topic so
+  // the AI never repeats questions it has produced before across exams.
+  const historicalTexts = getHistoricalQuestions(subject, topics, 200);
+  const allAvoid = [...new Set([...avoid, ...historicalTexts])];
+  console.log(`[generate] avoid list: ${avoid.length} exam + ${historicalTexts.length} historical = ${allAvoid.length} total`);
+
   const NOVELTY_RULE =
     'NOVELTY (non-negotiable): every question must be ORIGINAL and UNPREDICTABLE.\n' +
     '- A student who reads only the subject and topic list must NOT be able to guess these questions.\n' +
@@ -461,10 +484,14 @@ async function generateQuestions({ subject, topics, count, objectiveCount, theor
   ];
   const spin = SPINS[Math.floor(Math.random() * SPINS.length)];
 
+  // Build the avoid block: limit to 80 entries (each truncated to 140 chars)
+  // so the prompt doesn't blow up. The AI still gets the full picture.
+  const avoidDisplay = allAvoid.slice(0, 80);
   const avoidBlock =
-    avoid && avoid.length
-      ? 'ABSOLUTELY DO NOT generate, reuse, or closely paraphrase any of these existing questions:\n' +
-        avoid.map((t, i) => `${i + 1}. ${String(t).slice(0, 140)}`).join('\n')
+    avoidDisplay.length > 0
+      ? 'ABSOLUTELY DO NOT generate, reuse, or closely paraphrase any of these previously used questions:\n' +
+        avoidDisplay.map((t, i) => `${i + 1}. ${String(t).slice(0, 140)}`).join('\n') +
+        (allAvoid.length > 80 ? `\n... and ${allAvoid.length - 80} more similar questions to avoid.` : '')
       : '';
 
   const system = (objN, theoN, variety) => SYSTEM_BASE + `
@@ -526,72 +553,110 @@ ${avoidBlock}`;
       ? `- These questions are one batch of ${maxCalls} batches that together form ONE large pool on this exact subject and topic list. Every question in the WHOLE pool must be distinct: no repeats, no close paraphrases, and no reused facts, figures, or examples across batches.`
       : '- Produce a diverse set; avoid reusing the same facts, figures, or classic textbook examples across questions.';
 
-  // Build lazy tasks so mapLimit actually throttles them; eager promises would
-  // fire every call at once and defeat the concurrency cap.
-  const tasks = Array.from({ length: maxCalls }, () => () =>
-    chatJSON(
-      [
-        { role: 'system', content: system(perBatchObjective, perBatchTheory, variety) },
-        { role: 'user', content: user(batchSize) },
-      ],
-      { temperature: 0.95, maxRetries: 3, maxTokens: 16384 }
-    )
-  );
-  // Increase concurrency to utilize multiple AI providers.
-  // With 2-3 providers racing, we can handle more concurrent requests.
-  // A small delay between batches further reduces 429 errors.
-  // Individual batch failures are caught so a single 429 doesn't kill the
-  // entire generation — we collect however many batches succeed.
-  const providerCount = (secondaryConfigured() ? 1 : 0) + (tertiaryConfigured() ? 1 : 0) + 1;
-  const concurrency = Math.min(maxCalls, providerCount * 3);
-  console.log(`[generate] Using concurrency ${concurrency} with ${providerCount} providers`);
-  const settled = await mapLimit(tasks, concurrency, async (run) => {
-    try {
-      const result = await run();
-      await delay(300);
-      return result;
-    } catch (err) {
-      console.error('[generate] batch failed:', err.message);
-      await delay(1000);
-      return null;
-    }
-  });
+  // ── Run generation with retry on insufficient unique results ────────
+  // If the first pass produces too few unique questions (because many hit
+  // the avoid list), retry with a fresh spin and stricter dedup guidance.
+  const MAX_RETRIES = 2;
+  let finalActive = [];
+  let finalRest = [];
 
-  const seen = new Set();
-  const all = [];
-  for (const result of settled) {
-    if (!result) continue;
-    const batch = Array.isArray(result) ? result : result.questions;
-    for (const q of batch || []) {
-      const t = String(q && q.text || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-      if (t && !seen.has(t)) {
-        seen.add(t);
-        all.push(q);
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    if (attempt > 0) {
+      console.log(`[generate] retry attempt ${attempt}: need ${total - finalActive.length} more unique questions`);
+    }
+
+    // Re-roll spin on retry so the AI gets a different creative angle
+    const currentSpin = attempt === 0 ? spin : SPINS[Math.floor(Math.random() * SPINS.length)];
+    const retryVariety = attempt > 0
+      ? variety + '\n- IMPORTANT: You already generated some questions that were rejected for being too similar to past questions. Generate ONLY completely new, unseen questions with different contexts, names, numbers, and scenarios.'
+      : variety;
+
+    const tasks = Array.from({ length: maxCalls }, (_, i) => () =>
+      chatJSON(
+        [
+          { role: 'system', content: system(perBatchObjective, perBatchTheory, retryVariety).replace(spin, currentSpin) },
+          { role: 'user', content: user(batchSize) },
+        ],
+        { temperature: 0.95, maxRetries: 4, maxTokens: 16384 }
+      )
+    );
+    const providerCount = (secondaryConfigured() ? 1 : 0) + (tertiaryConfigured() ? 1 : 0) + 1;
+    const concurrency = Math.min(maxCalls, providerCount * 3);
+    console.log(`[generate] attempt ${attempt}: launching ${maxCalls} batches with concurrency ${concurrency}`);
+    const settled = await mapLimit(tasks, concurrency, async (run, idx) => {
+      try {
+        // Stagger batch launches by 200ms per concurrency slot to reduce 429s
+        await delay(idx * 200);
+        const result = await run();
+        await delay(300);
+        return result;
+      } catch (err) {
+        console.error(`[generate] batch ${idx} failed:`, err.message);
+        await delay(1000);
+        return null;
+      }
+    });
+
+    // Collect unique questions from this attempt
+    const seen = new Set();
+    const batchAll = [];
+    for (const result of settled) {
+      if (!result) continue;
+      const batch = Array.isArray(result) ? result : result.questions;
+      for (const q of batch || []) {
+        const t = String(q && q.text || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+        if (t && !seen.has(t)) {
+          seen.add(t);
+          batchAll.push(q);
+        }
       }
     }
-  }
-  console.log(`[generate] collected ${all.length} unique questions from ${settled.filter(Boolean).length}/${maxCalls} batches`);
+    console.log(`[generate] attempt ${attempt}: collected ${batchAll.length} raw unique questions`);
 
-  // The first `total` questions form the main set; every extra pool question
-  // must be genuinely distinct from them (and from its siblings), so an
-  // attempt can never show a question that paraphrases one already in the exam.
-  // Threshold is deliberately high (0.8) so only clear paraphrases are dropped —
-  // two different questions on the same topic still share vocabulary.
-  const active = all.slice(0, total);
-  const rest = [];
-  for (const q of all.slice(total)) {
-    const dupActive = active.some((a) => textSimilarity(a.text, q.text) > 0.8);
-    const dupRest = rest.some((p) => textSimilarity(p.text, q.text) > 0.8);
-    if (!dupActive && !dupRest) rest.push(q);
+    // Deduplicate against full history + already-accepted questions
+    const combinedAvoid = [...allAvoid, ...finalActive.map((q) => q.text), ...finalRest.map((q) => q.text)];
+    const uniqueBatch = deduplicateAgainstHistory(batchAll, combinedAvoid, 0.65);
+    console.log(`[generate] attempt ${attempt}: ${uniqueBatch.length} survived history dedup`);
+
+    // Split into active (main set) and rest (pool extras)
+    const needed = total - finalActive.length;
+    finalActive.push(...uniqueBatch.slice(0, needed));
+    finalRest.push(...uniqueBatch.slice(needed));
+
+    // Filter rest against active to avoid paraphrases in pool
+    const filteredRest = [];
+    for (const q of finalRest) {
+      const dupActive = finalActive.some((a) => textSimilarity(a.text, q.text) > 0.8);
+      const dupRest = filteredRest.some((p) => textSimilarity(p.text, q.text) > 0.8);
+      if (!dupActive && !dupRest) filteredRest.push(q);
+    }
+    finalRest = filteredRest;
+
+    // If we have enough, stop retrying
+    if (finalActive.length >= total) break;
   }
-  // Hard sort: ALL objective questions first, then ALL theory questions.
+
+  // If still short after retries, log what we have (partial is better than nothing)
+  if (finalActive.length < total) {
+    console.warn(`[generate] WARNING: only ${finalActive.length}/${total} unique questions after ${MAX_RETRIES + 1} attempts`);
+  }
+
+  // ── Sort and return ─────────────────────────────────────────────────
   const sortFn = (a, b) => {
     if (a.type !== b.type) return a.type === 'objective' ? -1 : 1;
     return 0;
   };
-  active.sort(sortFn);
-  rest.sort(sortFn);
-  return active.concat(rest).slice(0, target);
+  finalActive.sort(sortFn);
+  finalRest.sort(sortFn);
+  const result = finalActive.concat(finalRest).slice(0, target);
+
+  // ── Log to global history so future generations avoid these ──────────
+  if (result.length > 0) {
+    logGeneratedQuestions(result, subject, topics);
+    console.log(`[generate] logged ${result.length} questions to history`);
+  }
+
+  return result;
 }
 
 /** Jaccard similarity over significant tokens; used to drop near-duplicate stems. */
@@ -602,6 +667,91 @@ function textSimilarity(a, b) {
   let inter = 0;
   for (const t of ta) if (tb.has(t)) inter++;
   return inter / (ta.size + tb.size - inter);
+}
+
+/**
+ * Fetch previously generated question texts from the global history table.
+ * Returns up to `limit` texts matching the subject (and optionally topics),
+ * ordered by most recent first. Used to build the `avoid` list so the AI
+ * never regenerates questions it has produced before.
+ */
+function getHistoricalQuestions(subject, topics, limit = 100) {
+  try {
+    if (topics) {
+      return db
+        .prepare(
+          `SELECT question_text FROM generated_questions_history
+           WHERE subject = ? AND topics = ?
+           ORDER BY created_at DESC LIMIT ?`
+        )
+        .all(subject, topics, limit)
+        .map((r) => r.question_text);
+    }
+    return db
+      .prepare(
+        `SELECT question_text FROM generated_questions_history
+         WHERE subject = ?
+         ORDER BY created_at DESC LIMIT ?`
+      )
+      .all(subject, limit)
+      .map((r) => r.question_text);
+  } catch (err) {
+    console.error('[generate] failed to fetch history:', err.message);
+    return [];
+  }
+}
+
+/**
+ * Record newly generated question texts into the global history table.
+ * Called after a successful generation so future runs can avoid repeats.
+ */
+function logGeneratedQuestions(questions, subject, topics) {
+  try {
+    const insert = db.prepare(
+      `INSERT INTO generated_questions_history (subject, topics, question_text, type, difficulty)
+       VALUES (?, ?, ?, ?, ?)`
+    );
+    const insertMany = db.transaction((rows) => {
+      for (const row of rows) insert.run(...row);
+    });
+    insertMany(
+      questions.map((q) => [
+        subject || '',
+        topics || '',
+        q.text || '',
+        q.type || 'objective',
+        q.difficulty || 'medium',
+      ])
+    );
+  } catch (err) {
+    console.error('[generate] failed to log history:', err.message);
+  }
+}
+
+/**
+ * Check a batch of newly generated questions against the full history and
+ * existing questions. Returns only genuinely unique questions, dropping any
+ * that are too similar (>similarityThreshold) to an existing one.
+ */
+function deduplicateAgainstHistory(newQuestions, existingTexts, similarityThreshold = 0.65) {
+  const combined = [...existingTexts];
+  const unique = [];
+  for (const q of newQuestions) {
+    const text = String(q.text || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (!text) continue;
+    let isDup = false;
+    for (const existing of combined) {
+      if (textSimilarity(q.text, existing) > similarityThreshold) {
+        isDup = true;
+        break;
+      }
+    }
+    if (!isDup) {
+      unique.push(q);
+      combined.push(q.text);
+    }
+  }
+  return unique;
 }
 
 /**
@@ -1657,11 +1807,14 @@ RULES:
 
   const effectiveTimeout = Math.max(config.ai.timeoutMs, 60000);
 
-  // Try primary provider first
+  // Vision-capable providers ONLY — Nvidia Nemotron does NOT support image
+  // inputs, so it must be skipped for photo reads.  OpenAI gpt-4o-mini and
+  // gpt-4o both support vision natively.
   const providers = [
     { baseUrl: config.ai.baseUrl, apiKey: config.ai.apiKey, model: config.ai.model, name: 'primary' },
   ];
-  if (secondaryConfigured()) {
+  // Only add secondary/tertiary if they look like vision-capable models
+  if (secondaryConfigured() && !config.claude.model?.includes('nemotron')) {
     providers.push({ baseUrl: config.claude.baseUrl, apiKey: config.claude.apiKey, model: config.claude.model || config.ai.model, name: 'secondary' });
   }
   if (tertiaryConfigured()) {
@@ -1708,9 +1861,9 @@ RULES:
 }
 
 /**
- * Transcribe an audio file (voice message) to text using Gemini's native
- * generateContent API (which supports inline audio).  The OpenAI-compatible
- * /chat/completions endpoint does not reliably support input_audio.
+ * Transcribe an audio file (voice message) to text.
+ * Strategy: try OpenAI Whisper API first (most reliable for audio),
+ * then try provider chat endpoints with input_audio, then Gemini native.
  */
 async function transcribeAudio(audioPath, questionText) {
   if (!aiConfigured()) {
@@ -1742,7 +1895,47 @@ RULES:
 - If the audio is unclear, transcribe what you can hear and mark unclear parts with [?]
 - If you cannot hear anything or the audio is empty, return exactly: [inaudible]`;
 
-  // Use Gemini's native generateContent API (supports inline audio)
+  const effectiveTimeout = Math.max(config.ai.timeoutMs, 60000);
+
+  // ── Strategy 1: OpenAI Whisper API (most reliable for audio) ─────────
+  // The /v1/audio/transcriptions endpoint accepts multipart form data.
+  if (config.ai.baseUrl.includes('api.openai.com') && config.ai.apiKey) {
+    try {
+      console.log('[ai] Transcribing audio via OpenAI Whisper API...');
+      // Node 18+ has built-in FormData and Blob
+      const formData = new FormData();
+      const blob = new Blob([audioBuffer], { type: mimeType });
+      formData.append('file', blob, `audio.${ext}`);
+      formData.append('model', 'whisper-1');
+      formData.append('language', 'en');
+      formData.append('response_format', 'text');
+      formData.append('prompt', questionText);
+
+      const res = await withHardTimeout(
+        fetch(`${config.ai.baseUrl}/audio/transcriptions`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${config.ai.apiKey}` },
+          body: formData,
+        }),
+        effectiveTimeout
+      );
+
+      if (res.ok) {
+        const text = await res.text();
+        if (text && text.trim() && text.trim() !== '[inaudible]') {
+          console.log(`[ai] Audio transcribed via Whisper: "${text.trim().slice(0, 150)}..."`);
+          return text.trim();
+        }
+      } else {
+        const errText = await res.text().catch(() => '');
+        console.warn(`[ai] Whisper API returned ${res.status}: ${errText.slice(0, 200)}`);
+      }
+    } catch (err) {
+      console.warn(`[ai] Whisper API failed: ${err.message}`);
+    }
+  }
+
+  // ── Strategy 2: Provider chat endpoints with input_audio ──────────────
   const providers = [
     { name: 'primary', baseUrl: config.ai.baseUrl, apiKey: config.ai.apiKey, model: config.ai.model },
   ];
@@ -1774,7 +1967,7 @@ RULES:
             headers: { 'Content-Type': 'application/json', 'x-goog-api-key': p.apiKey },
             body: JSON.stringify(body),
           }),
-          Math.max(config.ai.timeoutMs, 60000),
+          effectiveTimeout,
         );
         if (!res.ok) {
           const errText = await res.text().catch(() => '');
@@ -1790,7 +1983,6 @@ RULES:
       }
 
       // Non-Gemini providers: try OpenAI-compatible endpoint with base64 audio
-      // OpenAI supports input_audio in chat completions for audio models
       const audioFormat = ext === 'mp3' ? 'mp3' : ext === 'wav' ? 'wav' : 'ogg';
       const messages = [
         { role: 'system', content: 'You are an exam answer transcriber. Transcribe spoken audio answers accurately and return ONLY the transcribed text.' },
@@ -1806,9 +1998,8 @@ RULES:
         messages,
         temperature: 0.1,
         maxTokens: 2048,
-        timeoutMs: Math.max(config.ai.timeoutMs, 60000),
+        timeoutMs: effectiveTimeout,
       });
-      // callEndpointRaw returns the raw content string from choices[0].message.content
       const text = typeof result === 'string' ? result : '';
       if (!text || text === '[inaudible]') {
         throw new AIError('Audio transcription returned empty or inaudible');
@@ -1831,6 +2022,9 @@ module.exports = {
   EXAMINER_PERSONA,
   examinerPrompt,
   generateQuestions,
+  getHistoricalQuestions,
+  logGeneratedQuestions,
+  deduplicateAgainstHistory,
   extractQuestionsFromText,
   answerObjectiveQuestions,
   resolveObjectiveAnswer,

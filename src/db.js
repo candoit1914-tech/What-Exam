@@ -173,6 +173,20 @@ CREATE INDEX IF NOT EXISTS idx_questions_exam ON questions(exam_id, q_order);
 CREATE INDEX IF NOT EXISTS idx_sessions_exam ON sessions(exam_id);
 CREATE INDEX IF NOT EXISTS idx_answers_session ON answers(session_id, q_order);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_schemes_question ON marking_schemes(question_id);
+-- Global history of all AI-generated questions. Used to prevent repeat questions
+-- across exams and generation runs. subject+topic indexed for fast lookups.
+CREATE TABLE IF NOT EXISTS generated_questions_history (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  subject       TEXT NOT NULL DEFAULT '',
+  topics        TEXT DEFAULT '',
+  question_text TEXT NOT NULL,
+  type          TEXT NOT NULL,                          -- objective|theory
+  difficulty    TEXT DEFAULT 'medium',
+  created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_gqh_subject ON generated_questions_history(subject);
+CREATE INDEX IF NOT EXISTS idx_gqh_subject_topics ON generated_questions_history(subject, topics);
+
 -- Performance indexes for 80-100 concurrent students
 CREATE INDEX IF NOT EXISTS idx_sessions_exam_student ON sessions(exam_id, student_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status);
