@@ -161,6 +161,34 @@ function tertiaryConfigured() {
   return !!(config.xai && config.xai.apiKey && config.xai.baseUrl);
 }
 
+// Circuit breaker: track consecutive failures per provider to skip unreliable ones.
+// If a provider fails 3 times in a row, skip it for 30 seconds.
+const circuitBreaker = { secondary: { fails: 0, skipUntil: 0 }, tertiary: { fails: 0, skipUntil: 0 } };
+
+function isProviderAvailable(name) {
+  const cb = circuitBreaker[name];
+  if (!cb) return true;
+  if (cb.skipUntil && Date.now() < cb.skipUntil) return false;
+  return true;
+}
+
+function recordProviderFailure(name) {
+  const cb = circuitBreaker[name];
+  if (!cb) return;
+  cb.fails++;
+  if (cb.fails >= 3) {
+    cb.skipUntil = Date.now() + 30000; // skip for 30 seconds
+    console.warn(`[ai] Circuit breaker: ${name} failed ${cb.fails} times, skipping for 30s`);
+  }
+}
+
+function recordProviderSuccess(name) {
+  const cb = circuitBreaker[name];
+  if (!cb) return;
+  cb.fails = 0;
+  cb.skipUntil = 0;
+}
+
 function puterConfigured() {
   const puter = require('./puter');
   return puter.isConfigured();
@@ -220,19 +248,19 @@ async function chatJSON(messages, { temperature = 0.4, maxRetries = 2, timeoutMs
     });
 
   // Race all configured providers; first success wins. When all fail,
-  // surface the primary provider's error.
+  // surface the primary provider's error. Skip providers on the circuit breaker.
   const providers = [];
   const providerNames = [];
   if (primary) {
-    providers.push(primary);
+    providers.push({ fn: primary, name: 'primary' });
     providerNames.push(config.ai.model);
   }
-  if (secondaryConfigured()) {
-    providers.push(secondary);
+  if (secondaryConfigured() && isProviderAvailable('secondary')) {
+    providers.push({ fn: secondary, name: 'secondary' });
     providerNames.push(config.claude.model || 'secondary');
   }
-  if (tertiaryConfigured()) {
-    providers.push(tertiary);
+  if (tertiaryConfigured() && isProviderAvailable('tertiary')) {
+    providers.push({ fn: tertiary, name: 'tertiary' });
     providerNames.push(config.xai.model || 'tertiary');
   }
 
@@ -243,12 +271,21 @@ async function chatJSON(messages, { temperature = 0.4, maxRetries = 2, timeoutMs
   console.log('[ai] Racing providers:', providerNames.join(', '));
   const startTime = Date.now();
   
-  return Promise.any(providers.map((fn) => fn())).then((result) => {
+  return Promise.any(providers.map((p) => p.fn().then((result) => {
+    recordProviderSuccess(p.name);
+    return result;
+  }))).then((result) => {
     const elapsed = Date.now() - startTime;
-    console.log(`[ai] Provider responded in ${elapsed}ms`);
+    // Find which provider won
+    const winner = providers.length === 1 ? providers[0].name : 'fastest';
+    console.log(`[ai] Provider responded in ${elapsed}ms (${winner})`);
     return result;
   }).catch((agg) => {
     const elapsed = Date.now() - startTime;
+    // Record failures for circuit breaker
+    for (const p of providers) {
+      recordProviderFailure(p.name);
+    }
     console.error(`[ai] All providers failed after ${elapsed}ms:`, agg?.errors?.map(e => e.message).join(', '));
     const err = agg && agg.errors ? agg.errors[0] : agg;
     throw err instanceof Error ? err : new AIError(`All AI providers failed: ${String(agg && agg.message)}`);
