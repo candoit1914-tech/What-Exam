@@ -494,10 +494,15 @@ async function generateQuestions({ subject, topics, count, objectiveCount, theor
         (allAvoid.length > 80 ? `\n... and ${allAvoid.length - 80} more similar questions to avoid.` : '')
       : '';
 
-  const system = (objN, theoN, variety) => SYSTEM_BASE + `
-Generate EXACTLY ${objN} objective questions and EXACTLY ${theoN} theory questions. Return: {"questions": [...]}.
+  const system = (objN, theoN, variety) => {
+    const parts = [SYSTEM_BASE];
 
-Objective question schema:
+    // Build type-specific instructions based on what's actually requested
+    if (objN > 0 && theoN > 0) {
+      // Both types requested
+      parts.push(`Generate EXACTLY ${objN} objective questions and EXACTLY ${theoN} theory questions. Return: {"questions": [...]}.`);
+
+      parts.push(`Objective question schema:
 {
   "type": "objective",
   "text": "question stem",
@@ -507,9 +512,9 @@ Objective question schema:
   "difficulty": "easy|medium|hard",
   "learning_objective": "what skill this tests",
   "explanation": "why the answer is correct"
-}
+}`);
 
-Theory question schema:
+      parts.push(`Theory question schema:
 {
   "type": "theory",
   "text": "question stem",
@@ -521,12 +526,56 @@ Theory question schema:
   "rubric": [{"point": "key idea a student must state", "marks": 2, "explanation": "what is expected"}],
   "presentation_marks": 1,
   "grammar_marks": 1
-}
+}`);
 
-CRITICAL RULES:
+      parts.push(`CRITICAL RULES:
 - You MUST return EXACTLY ${objN} objective questions and EXACTLY ${theoN} theory questions. Count them before returning. If you return fewer, the exam is broken.
-- ORDER: List ALL objective questions FIRST, then ALL theory questions. Do NOT mix them. The output MUST start with objective questions and end with theory questions.
-- Options must have exactly one correct answer; distractors must be plausible.
+- ORDER: List ALL objective questions FIRST, then ALL theory questions. Do NOT mix them. The output MUST start with objective questions and end with theory questions.`);
+    } else if (objN > 0) {
+      // Only objectives requested
+      parts.push(`Generate EXACTLY ${objN} objective questions ONLY. Return: {"questions": [...]}. DO NOT generate any theory questions.`);
+
+      parts.push(`Objective question schema:
+{
+  "type": "objective",
+  "text": "question stem",
+  "options": ["option1", "option2", "option3", "option4"],
+  "correct_index": 0,
+  "marks": 1,
+  "difficulty": "easy|medium|hard",
+  "learning_objective": "what skill this tests",
+  "explanation": "why the answer is correct"
+}`);
+
+      parts.push(`CRITICAL RULES:
+- You MUST return EXACTLY ${objN} objective questions. Count them before returning.
+- DO NOT generate any theory questions — only objective (multiple choice).
+- Every question MUST have type "objective".`);
+    } else {
+      // Only theory requested
+      parts.push(`Generate EXACTLY ${theoN} theory questions ONLY. Return: {"questions": [...]}. DO NOT generate any objective questions.`);
+
+      parts.push(`Theory question schema:
+{
+  "type": "theory",
+  "text": "question stem",
+  "marks": 5,
+  "difficulty": "easy|medium|hard",
+  "learning_objective": "what skill this tests",
+  "model_answer": "a complete model answer",
+  "key_points": ["point 1", "point 2", ...],
+  "rubric": [{"point": "key idea a student must state", "marks": 2, "explanation": "what is expected"}],
+  "presentation_marks": 1,
+  "grammar_marks": 1
+}`);
+
+      parts.push(`CRITICAL RULES:
+- You MUST return EXACTLY ${theoN} theory questions. Count them before returning.
+- DO NOT generate any objective questions — only theory (open-ended).
+- Every question MUST have type "theory".`);
+    }
+
+    parts.push(`- Options must have exactly one correct answer; distractors must be plausible.
 - correct_index is the 0-based index of the correct option.
 - CORRECTNESS IS NON-NEGOTIABLE: the option at correct_index must be the ONLY defensible correct answer. These keys are used to grade students, so a wrong key marks innocent students wrong.
 - Theory rubric points must sum to (marks - presentation_marks - grammar_marks) or less.
@@ -536,17 +585,26 @@ ${NOVELTY_RULE}
 ${VARIETY_TAGS}
 ${spin}
 ${variety || ''}
-${avoidBlock}`;
+${avoidBlock}`);
 
-  const user = (batchTotal) =>
-    [
+    return parts.join('\n\n');
+  };
+
+  const user = (batchTotal) => {
+    const lines = [
       `Subject: ${subject || 'General'}`,
       topics ? `Topics: ${topics}` : 'Topics: general',
       instructions ? `Additional instructions: ${instructions}` : '',
-      `Generate EXACTLY ${perBatchObjective} objective questions and EXACTLY ${perBatchTheory} theory questions. Return them all in one JSON array.`,
-    ]
-      .filter(Boolean)
-      .join('\n');
+    ];
+    if (perBatchObjective > 0 && perBatchTheory > 0) {
+      lines.push(`Generate EXACTLY ${perBatchObjective} objective questions and EXACTLY ${perBatchTheory} theory questions. Return them all in one JSON array.`);
+    } else if (perBatchObjective > 0) {
+      lines.push(`Generate EXACTLY ${perBatchObjective} objective (multiple choice) questions. DO NOT generate any theory questions. Return them in one JSON array.`);
+    } else {
+      lines.push(`Generate EXACTLY ${perBatchTheory} theory (open-ended) questions. DO NOT generate any objective questions. Return them in one JSON array.`);
+    }
+    return lines.filter(Boolean).join('\n');
+  };
 
   const variety =
     maxCalls > 1
