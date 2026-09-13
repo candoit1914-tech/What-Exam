@@ -134,10 +134,14 @@ function updateJob(id, patch) {
  * request path so a slow AI endpoint can never make the browser hang or a
  * proxy/server timeout kill the import. Progress is written to the jobs table
  * so the dashboard can poll it.
+ *
+ * opts.typeFilter: optional array like ['objective'] or ['theory'] to extract
+ * only specific question types. If omitted, all types are extracted.
  */
-async function startJob(jobId, buffer) {
+async function startJob(jobId, buffer, opts = {}) {
   const job = getJob(jobId);
   if (!job) return;
+  const typeFilter = Array.isArray(opts.typeFilter) && opts.typeFilter.length ? opts.typeFilter : null;
   updateJob(jobId, { status: 'running', stage: 'Reading PDF…', progress: 2 });
 
   const created = [];
@@ -173,11 +177,26 @@ async function startJob(jobId, buffer) {
       );
     }
 
+    // Filter by type if the user selected only objectives or only theories
+    let filtered = parsed;
+    if (typeFilter) {
+      filtered = parsed.filter((q) => typeFilter.includes(q.type));
+      if (!filtered.length) {
+        const want = typeFilter.join(' and ');
+        throw new Error(
+          `No ${want} questions found in this PDF. ` +
+          `The document contained ${parsed.length} questions but none were ${want} type.`
+        );
+      }
+      console.log(`[pdfImport] filtered ${parsed.length} → ${filtered.length} questions (type: ${typeFilter.join(',')})`);
+      updateJob(jobId, { count: filtered.length });
+    }
+
     // Estimate from the parseable (cleaned) text — the raw text still contains
     // the solutions/answer-key section, whose "1. B." lines would inflate the
     // count and produce a false "questions missing" warning.
     const warning = [
-      ai.completenessWarning(ai.estimateQuestionCount(ai.cleanExamText(text)), parsed),
+      ai.completenessWarning(ai.estimateQuestionCount(ai.cleanExamText(text)), filtered),
       blockWarning,
     ].filter(Boolean).join(' ');
     if (warning) updateJob(jobId, { warning });
@@ -186,7 +205,7 @@ async function startJob(jobId, buffer) {
     // This step is best-effort: a failure must not fail the whole import.
     const objQuestions = [];
     const missingAnswers = [];
-    for (const g of parsed) {
+    for (const g of filtered) {
       if (g.type === 'objective') {
         objQuestions.push(g);
         if (!g.correct_answer) {
@@ -224,7 +243,7 @@ async function startJob(jobId, buffer) {
     let curPassage = '';
     let objIdx = 0;
     const theoryToScheme = [];
-    for (const g of parsed) {
+    for (const g of filtered) {
       if (g.passage && String(g.passage).trim()) curPassage = stripSourceWatermarks(String(g.passage).trim());
       const passage = curPassage;
       g.text = stripSourceWatermarks(g.text);

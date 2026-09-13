@@ -702,11 +702,16 @@ router.post('/exams/:id/pdf', upload.single('file'), asyncWrap(async (req, res) 
     });
   }
 
+  // Optional type filter: ['objective'] or ['theory'] to extract only specific types
+  const typeFilter = req.body.typeFilter
+    ? (Array.isArray(req.body.typeFilter) ? req.body.typeFilter : [req.body.typeFilter])
+    : null;
+
   pdf.saveUpload(req.file.buffer, req.file.originalname);
   const jobId = pdfImport.createJob(exam.id, req.file.originalname);
   // Run off the request path: the browser gets the job id instantly and
   // polls for progress, so slow AI extraction can never hang the upload.
-  pdfImport.startJob(jobId, req.file.buffer).catch((err) => {
+  pdfImport.startJob(jobId, req.file.buffer, { typeFilter }).catch((err) => {
     console.error('[pdf] background job crashed:', err);
   });
   res.json({ jobId, message: 'Upload accepted. Extraction is running in the background.' });

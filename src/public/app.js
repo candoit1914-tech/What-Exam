@@ -1168,6 +1168,20 @@ async function pdfUploadForm(id) {
     <div id="pdf_status"></div>
     <div id="pdf_upload">
       <input type="file" id="pdf_file" accept="application/pdf">
+      <div style="margin:12px 0">
+        <label style="font-weight:600;font-size:13px">Extract only:</label>
+        <div style="display:flex;gap:16px;margin-top:6px">
+          <label style="display:flex;align-items:center;gap:4px;cursor:pointer">
+            <input type="radio" name="pdf_type_filter" value="all" checked> All types
+          </label>
+          <label style="display:flex;align-items:center;gap:4px;cursor:pointer">
+            <input type="radio" name="pdf_type_filter" value="objective"> Objectives only
+          </label>
+          <label style="display:flex;align-items:center;gap:4px;cursor:pointer">
+            <input type="radio" name="pdf_type_filter" value="theory"> Theory only
+          </label>
+        </div>
+      </div>
       <div class="modal-actions" style="margin-top:18px"><button id="pdf_run" class="btn btn-primary">Extract Questions</button></div>
     </div>
   `);
@@ -1191,6 +1205,11 @@ async function pdfUploadForm(id) {
     btn.textContent = 'Uploading…';
     const fd = new FormData();
     fd.append('file', file);
+    // Send type filter if not "all"
+    const typeFilter = document.querySelector('input[name="pdf_type_filter"]:checked')?.value;
+    if (typeFilter && typeFilter !== 'all') {
+      fd.append('typeFilter', typeFilter);
+    }
     try {
       const headers = {};
       const token = getToken();

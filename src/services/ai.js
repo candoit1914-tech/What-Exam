@@ -494,8 +494,10 @@ async function generateQuestions({ subject, topics, count, objectiveCount, theor
   // Keep the same objective/theory split within each smaller batch so the
   // per-batch counts stay consistent with the overall request.
   const ratio = total > 0 ? batchSize / total : 1;
-  const perBatchTheory = theoN > 0 ? Math.max(1, Math.round(theoN * ratio)) : 0;
-  const perBatchObjective = Math.max(1, batchSize - perBatchTheory);
+  const perBatchTheory = theoN > 0 ? Math.max(0, Math.round(theoN * ratio)) : 0;
+  // When a type is not requested (count=0), its per-batch count must be 0.
+  // Math.max(1, ...) would force at least 1 question of the wrong type.
+  const perBatchObjective = objN > 0 ? Math.max(1, Math.round(objN * ratio)) : 0;
 
   // ── Build the avoid list from current exam + global history ──────────
   // Merge caller-provided `avoid` (existing questions in this exam) with
