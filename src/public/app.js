@@ -192,7 +192,6 @@ function showLanding() {
     observeReveals();
     initHeroScene();
     initRevealAnimations();
-    animateWhatsAppMockup();
     animateCounters();
   });
 }
@@ -1883,39 +1882,6 @@ document.addEventListener('mouseover', (e) => {
     });
   }
 });
-
-// ── 3D Card Tilt Effect ──────────────────────────────────────
-document.addEventListener('mousemove', (e) => {
-  document.querySelectorAll('.card, .stat-chip, .feature-card, .step, .panel').forEach((card) => {
-    if (!card.matches(':hover')) {
-      card.style.transform = '';
-      return;
-    }
-    const rect = card.getBoundingClientRect();
-    const x = (e.clientX - rect.left) / rect.width - 0.5;
-    const y = (e.clientY - rect.top) / rect.height - 0.5;
-    const tiltX = y * -8;
-    const tiltY = x * 8;
-    const scale = 1.02;
-    card.style.transform = `perspective(800px) rotateX(${tiltX}deg) rotateY(${tiltY}deg) scale(${scale})`;
-    card.style.transition = 'transform 0.1s ease-out';
-  });
-}, { passive: true });
-
-// ── Floating WhatsApp mockup animation ──
-function animateWhatsAppMockup() {
-  const mockup = document.querySelector('.wapp');
-  if (!mockup) return;
-  let t = 0;
-  function tick() {
-    t += 0.02;
-    const y = Math.sin(t) * 6;
-    const r = Math.sin(t * 0.7) * 1.5;
-    mockup.style.transform = `translateY(${y}px) rotate(${r}deg)`;
-    requestAnimationFrame(tick);
-  }
-  tick();
-}
 
 // ── Smooth section reveals with staggered children ──
 function initRevealAnimations() {
