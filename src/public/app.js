@@ -680,7 +680,7 @@ async function renderTab() {
       <div class="card" style="margin-top:14px">
         <h3 style="margin-bottom:4px">ADD MANY <span class="gr">RECIPIENTS</span></h3>
         <p class="muted qmeta">Comma or newline separated, any country format.</p>
-        <textarea id="phones_input" placeholder="+233 24 123 4567&#10;0541234567&#10;+1 555 123 4567"></textarea>
+        <textarea id="phones_input" placeholder="Name Phone&#10;e.g. Boamah Bryan Ntim 0242004542&#10;Munirat Bint Essah 0550057465&#10;+1 555 123 4567"></textarea>
         <div class="row" style="margin-top:12px">
           <button class="btn btn-primary" onclick="addRecipients(${id})">Add Recipients</button>
           <button class="btn btn-ghost" onclick="sendExam(${id})">${I.wa} Send Exam to Recipients</button>
@@ -1307,10 +1307,20 @@ async function addStudent(id) {
 }
 
 async function addRecipients(id) {
-  const phones = document.querySelector('#phones_input').value.split(/[\n,]+/).map((p) => p.trim()).filter(Boolean);
-  if (!phones.length) return toast('Enter at least one phone number.', true);
+  const lines = document.querySelector('#phones_input').value.split(/[\n,]+/).map((p) => p.trim()).filter(Boolean);
+  if (!lines.length) return toast('Enter at least one phone number.', true);
+  const students = lines.map((line) => {
+    const match = line.match(/([\d+\s()-]+)$/);
+    if (match) {
+      const phone = match[1].replace(/[\s()-]/g, '');
+      const name = line.slice(0, match.index).trim();
+      return { phone, name };
+    }
+    return { phone: line, name: '' };
+  }).filter((s) => s.phone);
+  if (!students.length) return toast('Enter at least one phone number.', true);
   try {
-    const res = await api(`/api/exams/${id}/recipients`, { method: 'POST', body: { phones } });
+    const res = await api(`/api/exams/${id}/recipients`, { method: 'POST', body: { students } });
     invalidateCache(`/api/exams/${id}`);
     toast(`Added ${res.added.length} recipient(s).`);
     renderExam(id);
