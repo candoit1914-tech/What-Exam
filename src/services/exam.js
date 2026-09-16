@@ -289,8 +289,7 @@ function formatQuestion(exam, question, qCount, body, session) {
       text = text + ' —';
     }
   }
-  const timer = session ? `\n\nTime remaining: *${timeRemaining(session, exam)}*` : '';
-  return `*QUESTION ${question.q_order}*\n\n${text}${timer}`;
+  return `*QUESTION ${question.q_order}*\n\n${text}`;
 }
 
 /** mm:ss left on the clock, computed from the session start + exam duration. */
@@ -617,6 +616,11 @@ async function sendQuestionTo(session, student) {
       console.error('[exam] failed to format follow-up questions:', err.message);
     }
   }
+
+  // Place the timer BELOW the answer options so students see the question,
+  // options, then time remaining — not buried in the question text.
+  const timer = `\n\nTime remaining: *${timeRemaining(session, exam)}*`;
+  parts.push(timer);
 
   const combined = parts.join('\n\n');
   if (combined.trim()) {
