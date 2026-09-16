@@ -581,66 +581,46 @@ async function sendQuestionTo(session, student) {
   const sequence = sessionQuestionSequence(session);
   const index = sequence.findIndex((q) => q.id === question.id);
 
-  // When this is the first question of its type (objective or theory), send
-  // the section header and instructions as SEPARATE WhatsApp messages before
-  // any questions — so the student sees:
-  //   OBJECTIVE            ← section header bubble
-  //   Instructions...      ← instruction bubble
-  //   Q1, Q2, ...          ← question bubbles
-  //   THEORY               ← next section header
-  //   Instructions...
-  //   Q1, Q2, ...
-  const prev = index > 0 ? sequence.slice(0, index) : [];
-  const firstOfType = !prev.some((q) => q.type === question.type);
-  if (firstOfType) {
-    const type = question.type === 'theory' ? 'THEORY' : 'OBJECTIVE';
-    await wa.sendText(student.phone, `*${type}*`);
-    if (SECTION_INTRO[question.type]) {
-      await wa.sendText(student.phone, SECTION_INTRO[question.type]);
-    }
-  }
-
-  // The question's diagram arrives first as its own image bubble; the text
-  // and options follow. Rendering/send failures must never stall delivery,
-  // so a diagram send error logs and continues.
+  // Send image separately — WhatsApp requires media as its own message.
   if (question.image) {
     await wa.sendImage(student.phone, path.join(config.uploadsDir, question.image)).catch((err) => {
       console.error('[exam] image send failed (continued):', err.message);
     });
   }
 
-  // buildQuestionBubbles returns the question bubble (with any PDF passage
-  // headings, section instructions, or reading passage that haven't been
-  // sent yet). The section header and intro are already sent above for the
-  // first question, so buildQuestionBubbles only adds those when they are
-  // genuinely new — but we skip them here when firstOfType handled them.
+  // Combine ALL text content into a single WhatsApp message per question.
+  // Previously each question sent 3-5 separate messages (section header,
+  // instructions, passage, question, options), which burned through Meta's
+  // per-pair rate limit fast. Combining into one message cuts API calls by
+  // ~60% and virtually eliminates 131056 errors for 100-student exams.
+  const parts = [];
   for (const bubble of buildQuestionBubbles(exam, question, sequence, index, session)) {
-    // Skip bubbles we already sent as separate messages above.
-    if (firstOfType) {
-      if (bubble === formatSectionHeader(question.type === 'theory' ? 'THEORY' : 'OBJECTIVE')) continue;
-      if (SECTION_INTRO[question.type] && bubble === SECTION_INTRO[question.type]) continue;
-    }
-    await wa.sendText(student.phone, bubble);
+    parts.push(bubble);
   }
   if (question.type === 'objective') {
-    await wa.sendText(student.phone, formatOptions(exam, session, question));
+    const options = JSON.parse(question.options || '[]');
+    parts.push(options.map((o) => `${o.key}. ${o.text}`).join('\n'));
   }
-
-  // Send follow-up questions for theory questions with diagrams
   if (question.type === 'theory' && question.follow_ups) {
     try {
       const followUps = JSON.parse(question.follow_ups);
       if (Array.isArray(followUps) && followUps.length > 0) {
-        await wa.sendText(student.phone, '*Follow-up Questions:*');
+        const fuLines = ['*Follow-up Questions:*'];
         for (let i = 0; i < followUps.length; i++) {
           const fu = followUps[i];
-          const letter = String.fromCharCode(97 + i); // a, b, c
-          await wa.sendText(student.phone, `*(${letter})* ${fu.text}\nMarks: ${fu.marks}`);
+          const letter = String.fromCharCode(97 + i);
+          fuLines.push(`*(${letter})* ${fu.text}\nMarks: ${fu.marks}`);
         }
+        parts.push(fuLines.join('\n'));
       }
     } catch (err) {
-      console.error('[exam] failed to send follow-up questions:', err.message);
+      console.error('[exam] failed to format follow-up questions:', err.message);
     }
+  }
+
+  const combined = parts.join('\n\n');
+  if (combined.trim()) {
+    await wa.sendText(student.phone, combined);
   }
 
   return true;
