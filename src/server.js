@@ -254,6 +254,9 @@ if (require.main === module) {
     // Finalize sessions left in_progress past their deadline by a crash or
     // redeploy — each is closed and reported exactly like timer expiry.
     await require('./services/exam').finalizeStaleSessions();
+    // Start periodic background cleanup so expired sessions are finalized
+    // automatically instead of only on server restart.
+    require('./services/exam').startStaleSessionCleanup();
     if (config.seedOnBoot) {
       try {
         const s = seedIfEmpty(db);

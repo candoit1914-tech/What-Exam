@@ -39,7 +39,7 @@ const config = {
       .split(',')
       .map((s) => s.trim())
       .filter(Boolean),
-    sendIntervalMs: parseInt(process.env.WHATSAPP_SEND_INTERVAL_MS || '1200', 10),
+    sendIntervalMs: parseInt(process.env.WHATSAPP_SEND_INTERVAL_MS || '2000', 10),
   },
 
   ai: {
@@ -75,8 +75,11 @@ const config = {
     defaultDurationMinutes: parseInt(process.env.DEFAULT_DURATION_MINUTES || '30', 10),
     sendAnswerKey: process.env.SEND_ANSWER_KEY !== 'false',
     allowResendResults: process.env.ALLOW_RESEND_RESULTS !== 'false',
-    sendConcurrency: parseInt(process.env.SEND_CONCURRENCY || '5', 10),
+    sendConcurrency: parseInt(process.env.SEND_CONCURRENCY || '2', 10),
     sendCertificates: process.env.SEND_CERTIFICATES !== 'false',
+    sendRetries: parseInt(process.env.SEND_RETRIES || '3', 10),
+    sendRetryDelayMs: parseInt(process.env.SEND_RETRY_DELAY_MS || '5000', 10),
+    staleSessionCleanupIntervalMs: parseInt(process.env.STALE_SESSION_CLEANUP_MS || '60000', 10),
   },
 
   puter: {

@@ -172,6 +172,7 @@ CREATE INDEX IF NOT EXISTS idx_jobs_exam ON jobs(exam_id);
 CREATE INDEX IF NOT EXISTS idx_questions_exam ON questions(exam_id, q_order);
 CREATE INDEX IF NOT EXISTS idx_sessions_exam ON sessions(exam_id);
 CREATE INDEX IF NOT EXISTS idx_answers_session ON answers(session_id, q_order);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_answers_session_question ON answers(session_id, question_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_schemes_question ON marking_schemes(question_id);
 -- Global history of all AI-generated questions. Used to prevent repeat questions
 -- across exams and generation runs. subject+topic indexed for fast lookups.
@@ -215,6 +216,28 @@ ensureColumn('answers', 'answer_image', "TEXT DEFAULT ''");
 ensureColumn('jobs', 'warning', "TEXT DEFAULT ''");
 ensureColumn('questions', 'follow_ups', "TEXT DEFAULT '[]'");
 ensureColumn('question_pool', 'follow_ups', "TEXT DEFAULT '[]'");
+ensureColumn('sessions', 'retry_count', "INTEGER NOT NULL DEFAULT 0");
+
+// Migration: add unique constraint on answers(session_id, question_id) to prevent
+// duplicate answers from race conditions. SQLite doesn't support ADD CONSTRAINT
+// directly, so we check if the index exists and create it if not.
+try {
+  const idxCheck = db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_answers_session_question'").get();
+  if (!idxCheck) {
+    // Remove duplicate answers first (keep the earliest one per session+question)
+    db.exec(`
+      DELETE FROM answers WHERE id NOT IN (
+        SELECT MIN(id) FROM answers GROUP BY session_id, question_id
+      )
+    `);
+    db.exec('CREATE UNIQUE INDEX idx_answers_session_question ON answers(session_id, question_id)');
+    console.log('Migrated answers: added unique constraint on (session_id, question_id).');
+  }
+} catch (e) {
+  // If the index creation fails (e.g. duplicates exist), log and continue —
+  // the exam will still function but duplicate answers are possible.
+  console.warn('Could not add unique constraint on answers:', e.message);
+}
 
 // Migration: answers.question_id used to be FK-constrained to questions().
 // Attempts may now answer pool-variant questions, so the constraint must go.

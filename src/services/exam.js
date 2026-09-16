@@ -95,9 +95,15 @@ function sessionHasNoAnswers(sessionId) {
 }
 
 function createSession(examId, studentId) {
+  // Use INSERT OR IGNORE to handle race conditions where two simultaneous
+  // inbound messages both try to create a session for the same student+exam.
   const info = db
-    .prepare('INSERT INTO sessions (exam_id, student_id) VALUES (?, ?)')
+    .prepare('INSERT OR IGNORE INTO sessions (exam_id, student_id) VALUES (?, ?)')
     .run(examId, studentId);
+  if (info.changes === 0) {
+    // Another request created the session — fetch the existing one.
+    return db.prepare('SELECT * FROM sessions WHERE exam_id = ? AND student_id = ?').get(examId, studentId);
+  }
   const session = db.prepare('SELECT * FROM sessions WHERE id = ?').get(info.lastInsertRowid);
   drawSessionQuestions(session.id, examId);
   return session;
@@ -243,7 +249,12 @@ function deadline(session) {
   // If started_at is NULL, the session hasn't started yet — return a far-future
   // deadline so the timer check never triggers before the student engages.
   if (!session.started_at) return new Date(Date.now() + 365 * 24 * 60 * 60 * 1000);
-  return new Date(new Date(session.started_at).getTime() + session.duration_minutes * 60000);
+  // Ensure consistent UTC parsing: append 'Z' if the timestamp lacks a timezone
+  // indicator. SQLite's datetime('now') returns UTC without 'Z', which JS Date
+  // would parse as local time — causing a systematic timer drift.
+  const startedAtStr = String(session.started_at);
+  const utcStr = /[Zz]|[+-]\d{2}:\d{2}$/.test(startedAtStr) ? startedAtStr : startedAtStr + 'Z';
+  return new Date(new Date(utcStr).getTime() + session.duration_minutes * 60000);
 }
 
 // ── Formatting helpers ─────────────────────────────────────────────────
@@ -284,7 +295,9 @@ function formatQuestion(exam, question, qCount, body, session) {
 
 /** mm:ss left on the clock, computed from the session start + exam duration. */
 function timeRemaining(session, exam) {
-  const ms = new Date(session.started_at).getTime() + exam.duration_minutes * 60000 - Date.now();
+  const startedAtStr = String(session.started_at || '');
+  const utcStr = /[Zz]|[+-]\d{2}:\d{2}$/.test(startedAtStr) ? startedAtStr : startedAtStr + 'Z';
+  const ms = new Date(utcStr).getTime() + exam.duration_minutes * 60000 - Date.now();
   const total = Math.max(0, Math.round(ms / 1000));
   const mm = String(Math.floor(total / 60)).padStart(2, '0');
   const ss = String(total % 60).padStart(2, '0');
@@ -525,7 +538,8 @@ function restartSession(session) {
   db.prepare('DELETE FROM session_questions WHERE session_id = ?').run(session.id);
   db.prepare(
     `UPDATE sessions SET status='in_progress', current_q_order=1, started_at=NULL,
-       last_active_at=datetime('now'), ended_at=NULL, final_score=0, final_percentage=0, passed=0
+       last_active_at=datetime('now'), ended_at=NULL, final_score=0, final_percentage=0, passed=0,
+       retry_count=0
      WHERE id = ?`
   ).run(session.id);
   const fresh = db.prepare('SELECT * FROM sessions WHERE id = ?').get(session.id);
@@ -649,9 +663,11 @@ async function handleInbound(phone, body, meta = {}) {
   // starter is never greeted by a countdown that already ran down (e.g. the
   // 59:57 → 6:47 jump from sending hours after the admin pressed Send).
   if (sessionHasNoAnswers(session.id)) {
+    // Store as ISO 8601 with 'Z' suffix for consistent UTC parsing in deadline().
+    const now = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
     db.prepare(
-      `UPDATE sessions SET started_at = datetime('now'), last_active_at = datetime('now') WHERE id = ?`
-    ).run(session.id);
+      `UPDATE sessions SET started_at = ?, last_active_at = datetime('now') WHERE id = ?`
+    ).run(now, session.id);
     session = getActiveSession(student.id);
   }
 
@@ -727,7 +743,14 @@ async function maybeStartSession(student) {
 
   let session;
   if (existing && existing.status === 'abandoned') {
+    // Only restart if the session hasn't exceeded retry limit
+    const retries = existing.retry_count || 0;
+    if (retries >= config.exam.sendRetries) {
+      await wa.sendText(student.phone, `Your exam session could not be started after multiple attempts. Please ask your administrator to send the exam again.`);
+      return { ok: false, reason: 'max_retries' };
+    }
     session = restartSession(existing);
+    db.prepare('UPDATE sessions SET retry_count = ? WHERE id = ?').run(retries + 1, session.id);
   } else {
     session = createSession(exam.id, student.id);
   }
@@ -736,9 +759,10 @@ async function maybeStartSession(student) {
   // admin created or sent the exam. Question generation can take a long time,
   // so the clock must not start until the student is ready.
   if (!session.started_at) {
+    const now = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
     db.prepare(
-      `UPDATE sessions SET started_at = datetime('now'), last_active_at = datetime('now') WHERE id = ?`
-    ).run(session.id);
+      `UPDATE sessions SET started_at = ?, last_active_at = datetime('now') WHERE id = ?`
+    ).run(now, session.id);
     session = getActiveSession(student.id);
   }
 
@@ -751,9 +775,15 @@ async function maybeStartSession(student) {
     return false;
   });
   if (sent) {
-    await db.prepare(`UPDATE sessions SET last_active_at = datetime('now') WHERE id = ?`).run(session.id);
+    await db.prepare(`UPDATE sessions SET last_active_at = datetime('now'), retry_count = 0 WHERE id = ?`).run(session.id);
   } else {
-    db.prepare(`UPDATE sessions SET status = 'abandoned', ended_at = datetime('now') WHERE id = ?`).run(session.id);
+    // Don't permanently abandon — mark with retry count so background cleanup can retry
+    const retries = (session.retry_count || 0) + 1;
+    if (retries >= config.exam.sendRetries) {
+      db.prepare(`UPDATE sessions SET status = 'abandoned', ended_at = datetime('now'), retry_count = ? WHERE id = ?`).run(retries, session.id);
+    } else {
+      db.prepare(`UPDATE sessions SET retry_count = ?, last_active_at = datetime('now') WHERE id = ?`).run(retries, session.id);
+    }
   }
   return { ok: sent, reason: sent ? 'started' : 'send_failed' };
 }
@@ -799,7 +829,11 @@ async function processAnswer(session, student, body, meta = {}) {
   }
 
   const next = await handleAnswer(exam, session, student, question, body, meta);
-  if (next === false) return; // invalid input, question re-sent
+  if (next === false) {
+    // Invalid input — re-send the question so the student can try again.
+    await sendQuestionTo(session, student);
+    return;
+  }
 
   // advance
   const nextQ = nextInSequence(session, question);
@@ -1233,12 +1267,30 @@ async function finalize(session, student, reason = 'completed') {
   await drainSession(session.id); // background AI work must finish before results are computed
   await markAllPendingTheory(session.id);
   const result = results.computeForSession(session.id);
+
+  // Send results BEFORE marking status so that if the send fails, the session
+  // remains in_progress and can be retried on the next cleanup cycle.
+  let resultSent = false;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      await results.sendResultMessage(session.id, student.phone, reason);
+      resultSent = true;
+      break;
+    } catch (err) {
+      console.error(`[exam] result send attempt ${attempt} failed for ${student.phone}:`, err.message);
+      if (attempt < 3) await delay(2000 * attempt);
+    }
+  }
+
+  // NOW mark the session as ended/expired — after results have been sent.
   db.prepare(
     `UPDATE sessions SET status = ?, ended_at = datetime('now'), final_score = ?, final_percentage = ?, passed = ?
      WHERE id = ?`
   ).run(reason, result.score, result.percentage, result.passed ? 1 : 0, session.id);
 
-  await results.sendResultMessage(session.id, student.phone, reason);
+  if (!resultSent) {
+    console.error(`[exam] FAILED to send results to ${student.phone} after 3 attempts. Session marked ${reason} but results were NOT delivered.`);
+  }
 
   if (config.exam.sendCertificates) {
     try {
@@ -1268,15 +1320,27 @@ async function finalize(session, student, reason = 'completed') {
  * result + certificate). One failing session never blocks the rest.
  */
 async function finalizeStaleSessions() {
+  // Find sessions that are in_progress but whose deadline has passed.
+  // Use consistent UTC comparison: append 'Z' to SQLite datetime strings.
   const stale = db.prepare(
-    `SELECT s.id, s.student_id FROM sessions s
+    `SELECT s.id, s.student_id, s.started_at, e.duration_minutes
+     FROM sessions s
      JOIN exams e ON e.id = s.exam_id
      WHERE s.status = 'in_progress'
-       AND s.started_at IS NOT NULL
-       AND datetime(s.started_at, '+' || e.duration_minutes || ' minutes') < datetime('now')`
+       AND s.started_at IS NOT NULL`
   ).all();
-  let n = 0;
+
+  const now = Date.now();
+  const staleIds = [];
   for (const row of stale) {
+    const startedAtStr = String(row.started_at || '');
+    const utcStr = /[Zz]|[+-]\d{2}:\d{2}$/.test(startedAtStr) ? startedAtStr : startedAtStr + 'Z';
+    const deadlineMs = new Date(utcStr).getTime() + row.duration_minutes * 60000;
+    if (now > deadlineMs) staleIds.push(row);
+  }
+
+  let n = 0;
+  for (const row of staleIds) {
     try {
       const session = db.prepare(
         `SELECT s.*, e.duration_minutes, e.pass_percentage FROM sessions s
@@ -1285,13 +1349,13 @@ async function finalizeStaleSessions() {
       const student = db.prepare('SELECT * FROM students WHERE id = ?').get(row.student_id);
       if (!session || !student) continue;
       await finalize(session, student, 'expired');
-      console.log(`[startup] finalized stale session ${row.id} (${student.phone})`);
+      console.log(`[cleanup] finalized stale session ${row.id} (${student.phone})`);
       n++;
     } catch (err) {
-      console.error(`[startup] failed to finalize stale session ${row.id}:`, err.message);
+      console.error(`[cleanup] failed to finalize stale session ${row.id}:`, err.message);
     }
   }
-  if (n) console.log(`[startup] finalized ${n} stale session(s) — reports, certificates and results were sent.`);
+  if (n) console.log(`[cleanup] finalized ${n} stale session(s) — reports, certificates and results were sent.`);
   return n;
 }
 
@@ -1315,7 +1379,9 @@ async function endExam(examId) {
     `*${String(exam.title).toUpperCase()}*\n\n` +
     `This exam has been ended by your administrator. No more questions will be sent.`;
 
-  for (const s of active) {
+  // Process sessions in parallel with concurrency limit instead of sequentially.
+  // With 100 students, sequential processing could take 50+ minutes.
+  await mapLimit(active, config.exam.sendConcurrency, async (s) => {
     await drainSession(s.id);
     await markAllPendingTheory(s.id);
     const result = results.computeForSession(s.id);
@@ -1327,8 +1393,41 @@ async function endExam(examId) {
     } catch (err) {
       // session is already closed regardless of delivery outcome
     }
-  }
+  });
+
   return { ended: active.length };
+}
+
+// ── Background cleanup ──────────────────────────────────────────────────
+
+let staleCleanupTimer = null;
+
+/**
+ * Start a periodic background task that finalizes expired sessions.
+ * Without this, sessions past their deadline stay in_progress until the
+ * next server restart — meaning students get stuck mid-exam forever.
+ */
+function startStaleSessionCleanup() {
+  if (staleCleanupTimer) return; // already running
+  const intervalMs = config.exam.staleSessionCleanupIntervalMs || 60000;
+  staleCleanupTimer = setInterval(async () => {
+    try {
+      const n = await finalizeStaleSessions();
+      if (n) console.log(`[cleanup] Finalized ${n} stale session(s)`);
+    } catch (err) {
+      console.error('[cleanup] Stale session cleanup error:', err.message);
+    }
+  }, intervalMs);
+  // Don't keep the process alive just for cleanup
+  if (staleCleanupTimer.unref) staleCleanupTimer.unref();
+  console.log(`[cleanup] Stale session cleanup started (interval: ${intervalMs}ms)`);
+}
+
+function stopStaleSessionCleanup() {
+  if (staleCleanupTimer) {
+    clearInterval(staleCleanupTimer);
+    staleCleanupTimer = null;
+  }
 }
 
 // ── Admin: send exam to recipients ─────────────────────────────────────
@@ -1364,8 +1463,9 @@ async function sendExamToStudent(exam, student, questionCount, template, report)
     } else if (session.status === 'in_progress') {
       // A session whose timer already lapsed must restart, or the next
       // answer would be rejected by the deadline check.
-      const expiredAt =
-        new Date(new Date(session.started_at).getTime() + exam.duration_minutes * 60000).getTime();
+      const startedAtStr = String(session.started_at || '');
+      const utcStr = /[Zz]|[+-]\d{2}:\d{2}$/.test(startedAtStr) ? startedAtStr : startedAtStr + 'Z';
+      const expiredAt = new Date(new Date(utcStr).getTime() + exam.duration_minutes * 60000).getTime();
       if (Date.now() > expiredAt) {
         session = restartSession(session);
         fresh = true;
@@ -1407,10 +1507,20 @@ async function sendExamToStudent(exam, student, questionCount, template, report)
     await sendQuestionTo(session, student);
     report.sent++;
   } catch (err) {
+    // Instead of permanently abandoning, mark as pending retry so the
+    // background cleanup can re-attempt delivery.
     report.failed++;
     report.errors.push({ phone, error: friendlyError(err) });
     if (session) {
-      db.prepare(`UPDATE sessions SET status = 'abandoned', ended_at = datetime('now') WHERE id = ?`).run(session.id);
+      const retries = (session.retry_count || 0) + 1;
+      if (retries < config.exam.sendRetries) {
+        // Leave as in_progress so cleanup cron retries
+        db.prepare(`UPDATE sessions SET retry_count = ?, last_active_at = datetime('now') WHERE id = ?`).run(retries, session.id);
+        console.log(`[exam] Send failed for ${phone}, retry ${retries}/${config.exam.sendRetries} queued`);
+      } else {
+        db.prepare(`UPDATE sessions SET status = 'abandoned', ended_at = datetime('now') WHERE id = ?`).run(session.id);
+        console.log(`[exam] Send failed for ${phone} after ${retries} retries — session abandoned`);
+      }
     }
   }
 }
@@ -1463,4 +1573,6 @@ module.exports = {
   splitQuestionHeadings,
   stripPaperOnlyInstructions,
   splitSectionMeta,
+  startStaleSessionCleanup,
+  stopStaleSessionCleanup,
 };
