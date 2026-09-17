@@ -461,47 +461,157 @@ function attachMarkers(questionsByBlock, markersByBlock) {
 
 // ── Diagram generation for theory questions ─────────────────────────────
 
-const DIAGRAM_TYPES = ['bar_chart', 'pie_chart', 'line_graph', 'data_table', 'scientific_diagram', 'map', 'flowchart'];
+const DIAGRAM_TYPES = [
+  'bar_chart', 'pie_chart', 'line_graph', 'data_table', 'scientific_diagram',
+  'map', 'flowchart', 'venn_diagram', 'coordinate_plane', 'geometric_figure',
+  'number_line', 'angle_diagram', 'table_with_data',
+];
 
 /**
- * Determine if a theory question should have a diagram based on its content.
- * Questions involving data, measurements, comparisons, or processes are good candidates.
+ * Determine if a question should have a diagram based on its content.
+ * Covers all subjects — maths, science, geography, economics, etc.
+ * Questions involving data, measurements, comparisons, visual references,
+ * geometric concepts, or processes are good candidates.
  */
 function shouldHaveDiagram(question) {
   const text = String(question.text || '').toLowerCase();
-  const diagramKeywords = [
-    'chart', 'graph', 'table', 'data', 'diagram', 'compare', 'measure',
-    'temperature', 'rainfall', 'population', 'sales', 'cost', 'distance',
-    'speed', 'time', 'percentage', 'average', 'total', 'calculate',
-    'interpret', 'analyze', 'show', 'illustrate', 'describe the',
-    'what does the', 'which region', 'which month', 'highest', 'lowest',
+  const passage = String(question.passage || '').toLowerCase();
+  const combined = text + ' ' + passage;
+
+  // Direct visual-reference keywords — the question explicitly points to something to look at
+  const directRef = [
+    'use the table', 'use the chart', 'use the graph', 'use the diagram',
+    'use the map', 'use the figure', 'use the illustration', 'refer to',
+    'study the', 'examine the', 'from the table', 'from the chart',
+    'from the graph', 'from the diagram', 'from the map', 'from the figure',
+    'based on the table', 'based on the chart', 'based on the graph',
+    'based on the diagram', 'based on the data', 'based on the information',
+    'shown in', 'given in', 'presented in', 'below shows',
+    'the table below', 'the chart below', 'the graph below',
+    'the diagram below', 'the figure below', 'the map below',
+    'the information below', 'the data below',
   ];
-  return diagramKeywords.some(kw => text.includes(kw));
+
+  // Data/analysis keywords — question involves interpreting data
+  const dataKeywords = [
+    'chart', 'graph', 'table', 'data', 'diagram', 'figure', 'plot',
+    'compare', 'comparison', 'measure', 'measurement', 'interpret',
+    'analyze', 'analyse', 'show', 'illustrate', 'describe the',
+    'what does the', 'which region', 'which month', 'highest', 'lowest',
+    'trend', 'increase', 'decrease', 'fluctuation', 'pattern',
+    'draw', 'sketch', 'label', 'construct', 'plot the',
+  ];
+
+  // Subject-specific: Mathematics
+  const mathsKeywords = [
+    'angle', 'triangle', 'circle', 'rectangle', 'square', 'polygon',
+    'coordinate', 'axes', 'x-axis', 'y-axis', 'origin', 'quadrant',
+    'gradient', 'slope', 'intercept', 'vertex', 'vertices',
+    'perimeter', 'area', 'volume', 'surface area', 'circumference',
+    'diameter', 'radius', 'hypotenuse', 'pythagoras', 'theorem',
+    'symmetry', 'rotation', 'reflection', 'translation', 'enlargement',
+    'scale', 'bearing', 'compass', 'north', 'east', 'west', 'south',
+    'number line', 'inequality', 'equation', 'simultaneous',
+    'frequency', 'mode', 'median', 'mean', 'range', 'histogram',
+    'pie chart', 'bar chart', 'line graph', 'probability',
+    'set', 'venn', 'union', 'intersection', 'complement',
+    'sequence', 'pattern', 'nth term', 'arithmetic', 'geometric',
+    'bearing', 'scale drawing', 'net', 'cross section', 'elevation',
+    'plan', 'front view', 'side view', 'isometric',
+  ];
+
+  // Subject-specific: Science / Geography / Social Studies
+  const scienceKeywords = [
+    'circuit', 'cell', 'battery', 'resistor', 'voltage', 'current',
+    'ohm', 'ammeter', 'voltmeter', 'magnetic', 'magnet',
+    'ecosystem', 'food chain', 'food web', 'habitat', 'biome',
+    'weather', 'climate', 'rainfall', 'temperature', 'humidity',
+    'erosion', 'deposition', 'weathering', 'river', 'tributary',
+    'mountain', 'valley', 'plateau', 'plain', 'coast',
+    'continent', 'ocean', 'island', 'peninsula', 'strait',
+    'population', 'density', 'migration', 'settlement',
+    'solar system', 'planet', 'orbit', 'revolution', 'rotation',
+    'photosynthesis', 'respiration', 'digestion', 'circulation',
+    'atom', 'molecule', 'element', 'compound', 'mixture',
+    'acid', 'alkali', 'base', 'salt', 'indicator',
+    'force', 'energy', 'work', 'power', 'moment',
+    'pulley', 'lever', 'gear', 'spring', 'extension',
+    'wave', 'frequency', 'amplitude', 'wavelength',
+    'skeleton', 'muscle', 'organ', 'system',
+    'longitude', 'latitude', 'equator', 'meridian', 'timezone',
+    'volcano', 'earthquake', 'tectonic', 'fault', 'plate',
+  ];
+
+  // Subject-specific: Economics / Business
+  const economicsKeywords = [
+    'supply', 'demand', 'price', 'inflation', 'deflation',
+    'budget', 'revenue', 'expenditure', 'profit', 'loss',
+    'tax', 'subsidy', 'tariff', 'import', 'export',
+    'gdp', 'GNP', 'national income', 'per capita',
+    'market', 'monopoly', 'oligopoly', 'competition',
+    'exchange rate', 'interest rate', 'credit', 'debit',
+    'cost', 'sales', 'revenue', 'total', 'average',
+    'production', 'consumption', 'distribution',
+  ];
+
+  // All diagram types combined
+  const allDiagramKeywords = [
+    ...directRef, ...dataKeywords, ...mathsKeywords,
+    ...scienceKeywords, ...economicsKeywords,
+  ];
+
+  return allDiagramKeywords.some(kw => combined.includes(kw));
 }
 
 /**
- * Generate an SVG diagram for a theory question.
+ * Generate an SVG diagram for a question.
  * Returns the SVG string or null if generation fails.
  */
 async function generateDiagram({ subject, topic, questionText, diagramType }) {
-  const system = `You are an educational diagram generator for exam questions.
+  const system = `You are an educational diagram generator for exam questions across ALL subjects — Mathematics, Science, Geography, Economics, Social Studies, ICT, and more.
 Generate an SVG diagram that illustrates the given exam question.
-Return ONLY the raw SVG code - no markdown fences, no explanation, no commentary.
-The SVG must:
-- Be 800x600 pixels
-- Use clean, educational styling with clear labels
-- Use readable fonts (Arial, Helvetica, or sans-serif)
-- Have a white background
-- Include proper colors for clarity (blue, green, red, orange for different data)
-- Have a title/legend if applicable
-- Use simple, clear shapes and lines`;
+Return ONLY the raw SVG code — no markdown fences, no explanation, no commentary.
+
+CRITICAL RULES:
+- The SVG must be exactly 800x600 pixels
+- Use a white (#FFFFFF) background
+- All text must use Arial, Helvetica, or sans-serif fonts
+- Use clear, large labels (font-size 14-18px minimum for axis labels, 20-24px for titles)
+- Use high-contrast colors: dark text on white, distinct fills for different elements
+- Include a title/legend when applicable
+- Draw clean, sharp lines with stroke-width 2-3px
+- Use rounded corners on rectangles (rx="6")
+- Charts must have clear axis labels, tick marks, and data values
+- Geometric figures must have labeled vertices, sides, and angles where relevant
+- Maps must have a compass rose and scale bar
+- Venn diagrams must have clearly labeled overlapping circles
+- Scientific diagrams must have labeled parts with clear arrows
+
+STYLE GUIDE:
+- Bar charts: alternating fills (#2563EB, #3B82F6, #60A5FA, #93C5FD), white borders, value labels on top
+- Pie charts: distinct sector colors (#2563EB, #DC2626, #16A34A, #F59E0B, #8B5CF6, #EC4899), percentage labels
+- Line graphs: blue stroke (#2563EB), filled area below, clear data points (circles r=4)
+- Data tables: alternating row colors (#F8FAFC, #EFF6FF), bold headers, clear borders
+- Geometric figures: blue outlines (#1E40AF), light blue fills (#DBEAFE), labeled angles with arcs
+- Coordinate planes: grid lines (#E5E7EB), bold axes (#000000), plotted points (#DC2626)
+- Venn diagrams: semi-transparent overlapping circles (opacity 0.3), labeled regions
+- Scientific diagrams: clear labeled parts with arrows, clean line art
+- Maps: green land (#22C55E), blue water (#3B82F6), red markers (#DC2626)
+- Flowcharts: rounded rectangles (#2563EB fill, white text), diamond decisions (#F59E0B), arrow connectors
+- Number lines: bold axis, clear tick marks, colored points for values
+- Angle diagrams: arc for angle measurement, labeled degree values`;
 
   const user = `Subject: ${subject || 'General'}
 Topic: ${topic || 'general'}
 Question: ${questionText}
 Diagram type: ${diagramType || 'best_fit'}
 
-Generate an SVG diagram that helps a student answer this question. The diagram should contain realistic, plausible data that matches the question context.`;
+Generate an SVG diagram that:
+1. Directly relates to the question — a student should be able to answer the question by reading the diagram
+2. Contains realistic, plausible data that matches the question context
+3. Is visually clean and professional — suitable for an examination paper
+4. Has clear labels, a title, and a legend where needed
+5. Uses the exact diagram type specified above`;
 
   try {
     const svg = await chatJSON(
@@ -557,16 +667,50 @@ Generate 2-3 follow-up questions that require students to read and interpret the
 
 /**
  * Select the best diagram type for a question based on its content.
+ * Covers maths, science, geography, economics, and general data interpretation.
  */
 function selectDiagramType(questionText) {
   const text = String(questionText || '').toLowerCase();
-  if (text.includes('pie') || text.includes('proportion') || text.includes('share')) return 'pie_chart';
-  if (text.includes('trend') || text.includes('over time') || text.includes('monthly') || text.includes('yearly')) return 'line_graph';
-  if (text.includes('table') || text.includes('data') || text.includes('list')) return 'data_table';
-  if (text.includes('map') || text.includes('region') || text.includes('location')) return 'map';
-  if (text.includes('flow') || text.includes('process') || text.includes('cycle')) return 'flowchart';
-  if (text.includes('circuit') || text.includes('cell') || text.includes('diagram')) return 'scientific_diagram';
-  return 'bar_chart'; // default
+
+  // ── Charts / Data visualization ──────────────────────────────────────
+  if (text.includes('pie') || text.includes('proportion') || text.includes('share') || text.includes('sector')) return 'pie_chart';
+  if (text.includes('trend') || text.includes('over time') || text.includes('monthly') || text.includes('yearly') || text.includes('annual') || text.includes('weekly')) return 'line_graph';
+  if (text.includes('bar chart') || text.includes('bar graph') || text.includes('histogram') || text.includes('frequency') || text.includes('number of') || text.includes('how many')) return 'bar_chart';
+  if (text.includes('table') || text.includes('data') || text.includes('list') || text.includes('tabulate')) return 'data_table';
+
+  // ── Geography / Maps ─────────────────────────────────────────────────
+  if (text.includes('map') || text.includes('region') || text.includes('location') || text.includes('country') || text.includes('continent') || text.includes('ocean') || text.includes('river') || text.includes('latitude') || text.includes('longitude') || text.includes('equator') || text.includes('bearing') || text.includes('compass') || text.includes('scale drawing')) return 'map';
+
+  // ── Processes / Flowcharts ───────────────────────────────────────────
+  if (text.includes('flow') || text.includes('process') || text.includes('cycle') || text.includes('stages') || text.includes('steps') || text.includes('sequence of')) return 'flowchart';
+
+  // ── Venn Diagrams (sets, logic, probability) ─────────────────────────
+  if (text.includes('venn') || text.includes('set') || text.includes('union') || text.includes('intersection') || text.includes('complement') || (text.includes('both') && text.includes('either')) || (text.includes('neither') && text.includes('either'))) return 'venn_diagram';
+
+  // ── Coordinate Plane / Graphs (algebra, functions) ───────────────────
+  if (text.includes('coordinate') || text.includes('plot') || text.includes('x-axis') || text.includes('y-axis') || text.includes('origin') || text.includes('quadrant') || text.includes('gradient') || text.includes('slope') || text.includes('intercept') || text.includes('linear') || text.includes('quadratic') || text.includes('parabola') || text.includes('function') || text.includes('simultaneous') || text.includes('inequality')) return 'coordinate_plane';
+
+  // ── Geometric Figures (shape, angle, area, volume) ───────────────────
+  if (text.includes('triangle') || text.includes('angle') || text.includes('perimeter') || text.includes('area') || text.includes('volume') || text.includes('surface area') || text.includes('circumference') || text.includes('diameter') || text.includes('radius') || text.includes('circle') || text.includes('rectangle') || text.includes('square') || text.includes('polygon') || text.includes('hypotenuse') || text.includes('pythagoras') || text.includes('symmetry') || text.includes('rotation') || text.includes('reflection') || text.includes('translation') || text.includes('net') || text.includes('cross section') || text.includes('elevation') || text.includes('isometric')) return 'geometric_figure';
+
+  // ── Number Lines ─────────────────────────────────────────────────────
+  if (text.includes('number line') || text.includes('inequality') || text.includes('range of') || text.includes('between') && text.includes('on a')) return 'number_line';
+
+  // ── Angle Diagrams ───────────────────────────────────────────────────
+  if (text.includes('angle') || text.includes('degree') || text.includes('protract') || text.includes('complementary') || text.includes('supplementary') || text.includes('vertically opposite') || text.includes('acute') || text.includes('obtuse') || text.includes('reflex')) return 'angle_diagram';
+
+  // ── Science / Circuit / Diagram ──────────────────────────────────────
+  if (text.includes('circuit') || text.includes('cell') || text.includes('battery') || text.includes('resistor') || text.includes('voltage') || text.includes('current') || text.includes('ammeter') || text.includes('voltmeter') || text.includes('magnetic') || text.includes('magnet')) return 'scientific_diagram';
+  if (text.includes('food chain') || text.includes('food web') || text.includes('ecosystem') || text.includes('habitat') || text.includes('photosynthesis') || text.includes('digestion') || text.includes('circulation') || text.includes('skeleton') || text.includes('organ')) return 'scientific_diagram';
+  if (text.includes('atom') || text.includes('molecule') || text.includes('electron') || text.includes('proton') || text.includes('neutron') || text.includes('nucleus') || text.includes('orbit') || text.includes('energy level')) return 'scientific_diagram';
+  if (text.includes('solar system') || text.includes('planet') || text.includes('orbit') || text.includes('revolution') || text.includes('rotation') && text.includes('earth')) return 'scientific_diagram';
+  if (text.includes('wave') || text.includes('amplitude') || text.includes('wavelength') || text.includes('frequency') && text.includes('transverse')) return 'scientific_diagram';
+  if (text.includes('pulley') || text.includes('lever') || text.includes('gear') || text.includes('spring') || text.includes('force') && text.includes('diagram')) return 'scientific_diagram';
+
+  // ── Economics / Tables ───────────────────────────────────────────────
+  if (text.includes('budget') || text.includes('expenditure') || text.includes('revenue') || text.includes('profit') || text.includes('loss') || text.includes('supply') && text.includes('demand') || text.includes('price') && text.includes('quantity')) return 'table_with_data';
+
+  return 'bar_chart'; // default fallback
 }
 
 /**
@@ -878,15 +1022,17 @@ ${avoidBlock}`);
   const result = finalActive.concat(finalRest).slice(0, target);
 
   // ── Generate diagrams and follow-up questions for theory questions ──
-  // Add diagrams to ~50% of theory questions that are suitable
+  // Add diagrams to ~80% of questions (both theory and objective) that need them.
+  // Objective questions referencing charts, tables, maps, diagrams, or geometric
+  // figures also get diagrams so students can see the visual data on WhatsApp.
   const { svgToPng } = require('./svgToPng');
   const fs = require('fs');
   const path = require('path');
 
   for (const q of result) {
-    if (q.type === 'theory' && shouldHaveDiagram(q) && Math.random() < 0.5) {
-      const diagramType = selectDiagramType(q.text);
-      console.log(`[generate] generating ${diagramType} diagram for question: "${q.text.slice(0, 50)}..."`);
+    if (shouldHaveDiagram(q) && Math.random() < 0.8) {
+      const diagramType = selectDiagramType(q.text + ' ' + (q.passage || ''));
+      console.log(`[generate] generating ${diagramType} diagram for ${q.type} question: "${q.text.slice(0, 50)}..."`);
 
       const svg = await generateDiagram({ subject, topics, questionText: q.text, diagramType });
       if (svg) {
@@ -897,11 +1043,13 @@ ${avoidBlock}`);
           q.image = filename;
           console.log(`[generate] saved diagram: ${filename}`);
 
-          // Generate follow-up questions
-          const followUps = await generateFollowUpQuestions({ subject, topics, questionText: q.text, diagramType });
-          if (followUps.length > 0) {
-            q.follow_ups = JSON.stringify(followUps);
-            console.log(`[generate] generated ${followUps.length} follow-up questions`);
+          // Generate follow-up questions for theory questions with diagrams
+          if (q.type === 'theory') {
+            const followUps = await generateFollowUpQuestions({ subject, topics, questionText: q.text, diagramType });
+            if (followUps.length > 0) {
+              q.follow_ups = JSON.stringify(followUps);
+              console.log(`[generate] generated ${followUps.length} follow-up questions`);
+            }
           }
         } catch (err) {
           console.error('[generate] diagram render failed:', err.message);
