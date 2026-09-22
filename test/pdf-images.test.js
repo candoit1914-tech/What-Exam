@@ -99,6 +99,133 @@ test('filters drop tiny ornaments and giant spreads but keep single big images',
   assert.ok(images.every((i) => i.w > 1 && i.h > 1));
 });
 
+// ── math expressions + page headers ────────────────────────────────────
+
+// "Simplify:"-style maths expressions are short, wide images far smaller than
+// diagrams. They must survive the size filter or the question loses the actual
+// expression and becomes unanswerable in WhatsApp.
+test('small wide raster math expressions survive the size filter', async () => {
+  const { createCanvas } = require('@napi-rs/canvas');
+  const c = createCanvas(120, 30);
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = '#0000cc';
+  ctx.fillRect(0, 0, 120, 30);
+  const png = c.toBuffer('image/png');
+
+  const doc = new PDFDocument();
+  doc.fontSize(11).text('1. Simplify:');
+  doc.y += 4;
+  doc.image(png, 110, doc.y, { width: 120, height: 30 });
+  doc.y += 30 + 8;
+  doc.text('A. 4x^2');
+  doc.text('B. 2x^2');
+  doc.text('C. 4x');
+  doc.text('D. 2x');
+  doc.end();
+  const buf = await collectPdf(doc);
+
+  const { images } = await pdf.extractDocument(buf);
+  const expr = images.find((i) => i.kind === 'raster');
+  assert.ok(expr, 'expression image is detected');
+  assert.ok(expr.h < 60, 'expression is short');
+  assert.ok(expr.w / expr.h >= 2.5, 'expression is wide');
+  const pageArea = 612 * 792;
+  assert.ok((expr.w * expr.h) / pageArea < 0.015, 'was previously dropped by the min-size filter');
+});
+
+test('tiny near-square raster ornaments are still dropped', async () => {
+  const { createCanvas } = require('@napi-rs/canvas');
+  const c = createCanvas(30, 30);
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = '#000000';
+  ctx.fillRect(0, 0, 30, 30);
+  const png = c.toBuffer('image/png');
+
+  const doc = new PDFDocument();
+  doc.fontSize(11).text('1. Which is a prime number?');
+  doc.image(png, 60, 400, { width: 30, height: 30 });
+  doc.moveDown(1);
+  doc.text('A. 4  B. 7  C. 9  D. 12');
+  doc.end();
+  const buf = await collectPdf(doc);
+
+  const { images } = await pdf.extractDocument(buf);
+  assert.equal(images.length, 0, 'bullet-sized square is not detected as a figure');
+});
+
+test('a page-1 header banner with no text above it is dropped', async () => {
+  const { createCanvas } = require('@napi-rs/canvas');
+  const c = createCanvas(240, 60);
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = '#cc0000';
+  ctx.fillRect(0, 0, 240, 60);
+  const banner = c.toBuffer('image/png');
+  const c2 = createCanvas(150, 150);
+  const ctx2 = c2.getContext('2d');
+  ctx2.fillStyle = '#000000';
+  ctx2.fillRect(0, 0, 150, 150);
+  const fig = c2.toBuffer('image/png');
+
+  const doc = new PDFDocument();
+  doc.image(banner, 186, 40, { width: 240, height: 60 }); // top of page 1, no text above
+  doc.moveDown(2).fontSize(16).text('2026 BECE Mathematics');
+  doc.fontSize(11).text('1. Use the circle below to answer the question.');
+  doc.y += 4;
+  doc.image(fig, 230, doc.y, { width: 150, height: 150 });
+  doc.y += 150 + 8;
+  doc.text('A. 14  B. 22  C. 28  D. 30');
+  doc.end();
+  const buf = await collectPdf(doc);
+
+  const { images } = await pdf.extractDocument(buf);
+  const kept = images.find((i) => i.h > 60);
+  assert.ok(kept, 'the question figure is kept');
+  assert.equal(images.length, 1, 'the header banner is dropped');
+});
+
+test('a short wide vector box containing text is kept as a math expression', async () => {
+  const doc = new PDFDocument();
+  doc.fontSize(11).text('3. Solve for x in the equation below:');
+  doc.rect(120, 300, 300, 30).fill('#eeeeee'); // vector box, short
+  doc.fontSize(10).text('ax^2 + bx + c = 0', 130, 305);
+  doc.moveDown(1);
+  doc.text('A. x = 2  B. x = 3  C. x = 5  D. x = 7');
+  doc.end();
+  const buf = await collectPdf(doc);
+
+  const { images } = await pdf.extractDocument(buf);
+  assert.ok(images.some((i) => i.kind === 'vector' && i.h <= 60), 'short equation box is kept despite text inside');
+});
+
+test('markers anchor above the image top so expressions land between stem and options', async () => {
+  const { createCanvas } = require('@napi-rs/canvas');
+  const c = createCanvas(120, 30);
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = '#008800';
+  ctx.fillRect(0, 0, 120, 30);
+  const png = c.toBuffer('image/png');
+
+  const doc = new PDFDocument();
+  doc.fontSize(11).text('1. Simplify:');
+  doc.y += 4;
+  doc.image(png, 110, doc.y, { width: 120, height: 30 });
+  doc.y += 30 + 8;
+  doc.text('A. 4x^2');
+  doc.text('B. 2x^2');
+  doc.text('C. 4x');
+  doc.text('D. 2x');
+  doc.end();
+  const buf = await collectPdf(doc);
+
+  const { text, markers } = await pdf.textWithMarkers(buf);
+  assert.equal(markers.length, 1);
+  const stemIdx = text.indexOf('1. Simplify:');
+  const optIdx = text.indexOf('A. 4x^2');
+  const mkIdx = text.indexOf('[IMG:0]');
+  assert.ok(mkIdx > stemIdx, 'marker after the stem');
+  assert.ok(mkIdx < optIdx, 'marker before the options');
+});
+
 test('stripMarkers removes marker lines fully', () => {
   assert.equal(pdf.stripMarkers('a\n[IMG:3]\nb\n'), 'a\nb\n');
   assert.equal(pdf.stripMarkers('no markers here'), 'no markers here');

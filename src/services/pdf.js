@@ -384,6 +384,15 @@ function vectorBox(p) {
 // Region-to-page area ratios used to drop bullets/ornaments and giant spreads.
 const PAGE_AREA_MIN = 0.015;
 const PAGE_AREA_MAX = 0.20;
+// Math expressions are short, wide images (e.g. a typeset equation under
+// "Simplify:") far smaller than diagrams. Keep wide low-profile rasters above a
+// lower floor, provided they are not hairlines (a thin line has a tiny side).
+const RASTER_WIDE_MIN = 0.004;
+const RASTER_WIDE_ASPECT = 2.5;
+const RASTER_WIDE_MIN_SIDE = 20;
+// Vector boxes taller than this that contain text are treated as tables or
+// labelled graphics; shorter wide ones are kept as math expressions.
+const VECTOR_TEXT_BOX_MAX_H = 60;
 
 /**
  * One pass over the whole document: joined text lines, per-page row geometry
@@ -462,7 +471,9 @@ async function analyzeDocument(buffer) {
     const perPage = paints.filter((q) => {
       const box = q.kind === 'vector' ? vectorBox(q) : q;
       const ratio = (box.w * box.h) / pageArea;
-      if (ratio < PAGE_AREA_MIN) return false;
+      const wideProfile = box.h > 0 && box.w / box.h >= RASTER_WIDE_ASPECT && Math.min(box.w, box.h) >= RASTER_WIDE_MIN_SIDE;
+      const minRatio = q.kind === 'raster' && wideProfile ? RASTER_WIDE_MIN : PAGE_AREA_MIN;
+      if (ratio < minRatio) return false;
       if (ratio > PAGE_AREA_MAX) {
         return paints.length === 1;
       }
@@ -505,11 +516,20 @@ async function analyzeDocument(buffer) {
       if (covered) continue; // frame/outline around a raster figure
       const key = [Math.round(q.x / 2) * 2, Math.round(q.y / 2) * 2, Math.round(q.w / 2) * 2, Math.round(q.h / 2) * 2].join(',');
       if ((seenBoxes.get(key) || new Set()).size >= 2) continue; // repeating header/footer ornament
-      // Text-in-box exclusion: a region containing text rows is a table /
-      // labelled graphic, not a figure the students must draw or read.
+      // Text-in-box exclusion: a tall region containing text rows is a table /
+      // labelled graphic, not a figure. Short, wide boxes carrying just a line
+      // of text are math expressions/equations — keep those so "Simplify:"-style
+      // questions still carry their expression.
       const qRows = pageData[q.page - 1].rows;
-      if (qRows.some((row) => row.y >= q.userBox.y && row.y <= q.userBox.y + q.userBox.h)) continue;
+      const hasTextInside = qRows.some((row) => row.y >= q.userBox.y && row.y <= q.userBox.y + q.userBox.h);
+      if (hasTextInside && q.userBox.h > VECTOR_TEXT_BOX_MAX_H) continue;
     }
+    // Page-header/masthead images (a banner or logo at the top of a page with
+    // no text row above it) reference no question. Dropping them prevents a
+    // meaningless image from being attached to the first question and shown
+    // above it in WhatsApp.
+    const pageRows = pageData[q.page - 1].rows;
+    if (q.userBox && !pageRows.some((row) => row.y > q.userBox.y + q.userBox.h)) continue;
     images.push(q);
   }
 
@@ -571,9 +591,13 @@ async function textWithMarkers(buffer) {
   for (let i = 0; i < images.length; i++) {
     const img = images[i];
     const pageRows = rowsByPage[img.page - 1] || [];
+    // Anchor to the text row directly above the image's TOP edge (not its
+    // midpoint); options/legends below the figure then never capture the
+    // marker, and a "Simplify:"-style stem right above an expression does.
+    const imgTop = img.userBox ? img.userBox.y + img.userBox.h : img.userMid;
     let anchor = null;
     for (const row of pageRows) {
-      if (row.y > img.userMid && (!anchor || row.y - img.userMid < anchor.y - img.userMid)) anchor = row;
+      if (row.y > imgTop && (!anchor || row.y - imgTop < anchor.y - imgTop)) anchor = row;
     }
     let at;
     if (anchor) {
