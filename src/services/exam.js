@@ -462,7 +462,7 @@ function buildQuestionBubbles(exam, question, sequence, index, session) {
     seen.passages.add(pasKey);
   }
 
-  const textClean = String(question.text || '').trim();
+  const textClean = stripSourceWatermarks(String(question.text || '')).trim();
   const { headings: tHead, body } = splitQuestionHeadings(textClean);
   for (const h of tHead) {
     if (!seen.headings.has(h)) {
@@ -580,22 +580,27 @@ async function sendQuestionTo(session, student) {
   const sequence = sessionQuestionSequence(session);
   const index = sequence.findIndex((q) => q.id === question.id);
 
-  // Send image separately — WhatsApp requires media as its own message.
+  // Every bubble that is not the question itself is meta content — section
+  // intro, type header, heading, instructions, reading passage — and goes out
+  // as its OWN WhatsApp message. An instruction and a question never share a
+  // chat bubble (per product requirement).
+  const bubbles = buildQuestionBubbles(exam, question, sequence, index, session);
+  const questionBubble = bubbles.pop();
+  for (const bubble of bubbles) {
+    await wa.sendText(student.phone, bubble);
+  }
+
+  // Diagram/image bubble goes directly ABOVE the question so the student sees
+  // the figure first, then the full question that refers to it.
   if (question.image) {
     await wa.sendImage(student.phone, path.join(config.uploadsDir, question.image)).catch((err) => {
       console.error('[exam] image send failed (continued):', err.message);
     });
   }
 
-  // Combine ALL text content into a single WhatsApp message per question.
-  // Previously each question sent 3-5 separate messages (section header,
-  // instructions, passage, question, options), which burned through Meta's
-  // per-pair rate limit fast. Combining into one message cuts API calls by
-  // ~60% and virtually eliminates 131056 errors for 100-student exams.
-  const parts = [];
-  for (const bubble of buildQuestionBubbles(exam, question, sequence, index, session)) {
-    parts.push(bubble);
-  }
+  // Question bubble: full stem, then the answer (options or follow-ups), then
+  // the timer — nothing omitted.
+  const parts = [questionBubble];
   if (question.type === 'objective') {
     const options = JSON.parse(question.options || '[]');
     parts.push(options.map((o) => `${o.key}. ${o.text}`).join('\n'));
