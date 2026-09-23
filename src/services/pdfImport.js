@@ -60,6 +60,40 @@ function imageFileNameFor(examId, qOrder, markerIndex, now = Date.now()) {
   return `${now}-${examId}-q${qOrder}-${markerIndex}.png`;
 }
 
+/**
+ * Render every math expression a question kept (g.markerIndices) and store it
+ * as a question_images row with increasing position, so WhatsApp can send the
+ * bubbles in reading order above the question text. Best-effort: a render
+ * failure logs and skips that bubble — the question still imports.
+ * `mathExprs` is the document-global expression list from textWithMarkers;
+ * `pageCache` renders each page at most once.
+ */
+async function storeMathImages(g, questionId, mathExprs, pageCache, buffer, examId, qOrder) {
+  if (!Array.isArray(g.markerIndices) || !g.markerIndices.length) return;
+  const indices = g.markerIndices.slice().sort((a, b) => a - b);
+  // Insert AFTER all renders succeed so positions are never left scattered if
+  // an earlier render throws mid-batch.
+  const rows = [];
+  for (const idx of indices) {
+    const expr = mathExprs[idx];
+    if (!expr) continue;
+    try {
+      const dest = path.join(config.uploadsDir, imageFileNameFor(examId, qOrder, idx));
+      await pdf.renderMathRegion(buffer, expr, dest, 4, pageCache);
+      rows.push(path.basename(dest));
+    } catch (e) {
+      console.error('[pdfImport] math bubble render failed:', e.message);
+    }
+  }
+  if (!rows.length) return;
+  const insertImg = db.prepare(
+    `INSERT INTO question_images (question_id, position, image, kind) VALUES (?,?,?, 'math')`
+  );
+  for (let position = 0; position < rows.length; position++) {
+    insertImg.run(questionId, position, rows[position]);
+  }
+}
+
 // ── Job store ──────────────────────────────────────────────────────────
 
 function getJob(id) {
@@ -166,7 +200,7 @@ async function startJob(jobId, buffer, opts = {}) {
         updateJob(jobId, { stage: `Parsing questions… (${done}/${total})`, progress: pct });
       },
       (warning) => { blockWarning = warning; },
-      { markers: sourceText.markers }
+      { markers: sourceText.markers, mathMarkers: sourceText.mathExprs }
     );
     if (!parsed.length) {
       throw new Error(
@@ -243,6 +277,7 @@ async function startJob(jobId, buffer, opts = {}) {
     let curPassage = '';
     let objIdx = 0;
     const theoryToScheme = [];
+    const pageCache = new Map();
     for (const g of filtered) {
       if (g.passage && String(g.passage).trim()) curPassage = stripSourceWatermarks(String(g.passage).trim());
       const passage = curPassage;
@@ -290,6 +325,7 @@ async function startJob(jobId, buffer, opts = {}) {
           correct, marks, g.difficulty || 'medium', g.learning_objective || '', explanation, 'pdf', imageFile
         );
         created.push(info.lastInsertRowid);
+        await storeMathImages(g, info.lastInsertRowid, sourceText.mathExprs || [], pageCache, buffer, job.exam_id, nextOrder);
         db.prepare(
           `INSERT INTO marking_schemes (question_id, type, scheme) VALUES (?, 'objective', ?)
            ON CONFLICT(question_id) DO UPDATE SET scheme=excluded.scheme, updated_at=datetime('now')`
@@ -306,6 +342,7 @@ async function startJob(jobId, buffer, opts = {}) {
         );
         const q = db.prepare('SELECT * FROM questions WHERE id = ?').get(info.lastInsertRowid);
         created.push(q.id);
+        await storeMathImages(g, q.id, sourceText.mathExprs || [], pageCache, buffer, job.exam_id, nextOrder);
         // Preserve ANY marking-scheme content the paper provides (model answer,
         // key points, rubric). A partial scheme is kept verbatim and then passed
         // to buildMarkingScheme, which fills the missing parts with AI while
@@ -376,4 +413,5 @@ module.exports = {
   buildOptions,
   correctKeyFor,
   imageFileNameFor,
+  storeMathImages,
 };

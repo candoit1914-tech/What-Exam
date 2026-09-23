@@ -1,10 +1,17 @@
 'use strict';
-const { test } = require('node:test');
+const { test, after } = require('node:test');
 const assert = require('node:assert/strict');
 const db = require('../src/db');
 const marking = require('../src/services/marking');
 const config = require('../src/config');
 const results = require('../src/services/results');
+
+// The photo-answer path spins up a Tesseract worker that otherwise keeps the
+// test process alive forever (node --test would hang instead of finishing).
+after(async () => {
+  const ocr = require('../src/services/ocr');
+  await ocr.terminate();
+});
 
 test('answers table has the answer_image column', () => {
   const cols = db.prepare("PRAGMA table_info('answers')").all().map((c) => c.name);

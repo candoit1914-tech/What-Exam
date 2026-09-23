@@ -590,9 +590,20 @@ async function sendQuestionTo(session, student) {
     await wa.sendText(student.phone, bubble);
   }
 
-  // Diagram/image bubble goes directly ABOVE the question so the student sees
-  // the figure first, then the full question that refers to it.
-  if (question.image) {
+  // Diagram/image bubbles go directly ABOVE the question so the student sees
+  // the figure first, then the full question that refers to it. Math
+  // expressions imported from PDFs are stored in question_images (position
+  // order); fall back to the legacy single questions.image for everything else.
+  const mathImages = db
+    .prepare('SELECT image FROM question_images WHERE question_id = ? ORDER BY position')
+    .all(question.id);
+  if (mathImages.length) {
+    for (const row of mathImages) {
+      await wa.sendImage(student.phone, path.join(config.uploadsDir, row.image)).catch((err) => {
+        console.error('[exam] question image send failed (continued):', err.message);
+      });
+    }
+  } else if (question.image) {
     await wa.sendImage(student.phone, path.join(config.uploadsDir, question.image)).catch((err) => {
       console.error('[exam] image send failed (continued):', err.message);
     });

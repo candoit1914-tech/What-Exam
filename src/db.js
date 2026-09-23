@@ -170,6 +170,18 @@ CREATE TABLE IF NOT EXISTS jobs (
 CREATE INDEX IF NOT EXISTS idx_jobs_exam ON jobs(exam_id);
 
 CREATE INDEX IF NOT EXISTS idx_questions_exam ON questions(exam_id, q_order);
+-- Per-question image bubbles (math expressions or extra figures), delivered
+-- in position order above the question text on WhatsApp. A single question
+-- can need several expression bubbles (e.g. fractions inside a stem).
+CREATE TABLE IF NOT EXISTS question_images (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  question_id INTEGER NOT NULL REFERENCES questions(id) ON DELETE CASCADE,
+  position    INTEGER NOT NULL DEFAULT 0,
+  image       TEXT NOT NULL,
+  kind        TEXT NOT NULL DEFAULT 'math',   -- math|figure
+  UNIQUE(question_id, position)
+);
+CREATE INDEX IF NOT EXISTS idx_question_images_question ON question_images(question_id, position);
 CREATE INDEX IF NOT EXISTS idx_sessions_exam ON sessions(exam_id);
 CREATE INDEX IF NOT EXISTS idx_answers_session ON answers(session_id, q_order);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_answers_session_question ON answers(session_id, question_id);

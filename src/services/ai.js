@@ -424,23 +424,29 @@ async function mapLimit(items, limit, fn) {
 }
 
 /**
- * Attach figure markers to questions after extraction.
+ * Attach figure and math markers to questions after extraction.
  *
  * `questionsByBlock[b]` is the list of questions parsed from block `b`;
- * `markersByBlock[b]` is the list of `{idx}` markers that survived inside
- * that block. A marker is gifted to the question whose `text`/`passage`
- * contains its verbatim `[IMG:n]` line (the AI is told to preserve them);
- * a marker that no question kept falls back to the block's FIRST question.
- * Attach is recorded as `q.markerIndex` so pdfImport can turn it into a file
- * name — never as a stored text field.
+ * `markersByBlock[b]` is the list of `{idx}` [IMG:n] markers that survived
+ * inside that block; `mathByBlock[b]` the matching `[MATH:n]` markers. A
+ * marker is gifted to the question whose `text`/`passage` (for figures) or
+ * `text`/`passage`/`options` (for math, which can ride inside option text)
+ * contains its verbatim marker line — the AI is told to preserve them; a
+ * marker that no question kept falls back to the block's FIRST question.
+ * Figures attach as `q.markerIndex` (single); a question may keep several
+ * math markers, recorded as `q.markerIndices` in document order. Attach is
+ * recorded on the question object only — never as a stored text field.
  *
- * Returns { used:Set, unused:[] } — `unused` holds markers whose block
- * yielded no questions at all (skipped blocks), so the caller can warn.
+ * Returns { used:Set, unused:[], unusedMath:[] } — `unused`/`unusedMath` hold
+ * markers whose block yielded no questions at all (skipped blocks), so the
+ * caller can warn.
  */
-function attachMarkers(questionsByBlock, markersByBlock) {
+function attachMarkers(questionsByBlock, markersByBlock, mathByBlock) {
   const used = new Set();
+  const usedMath = new Set();
   const allMarkers = [];
-  for (let b = 0; b < markersByBlock.length; b++) {
+  const allMath = [];
+  for (let b = 0; b < questionsByBlock.length; b++) {
     const qs = questionsByBlock[b] || [];
     for (const m of markersByBlock[b] || []) {
       allMarkers.push(m);
@@ -455,8 +461,27 @@ function attachMarkers(questionsByBlock, markersByBlock) {
         used.add(m.idx);
       }
     }
+    for (const m of mathByBlock[b] || []) {
+      allMath.push(m);
+      let target = null;
+      for (const q of qs) {
+        const textQ =
+          String(q.text || '') + ' ' + String(q.passage || '') + ' ' +
+          (Array.isArray(q.options) ? q.options.join(' ') : String(q.options || ''));
+        if (textQ.includes(`[MATH:${m.idx}]`)) { target = q; break; }
+      }
+      if (!target && qs.length) target = qs[0];
+      if (target) {
+        (target.markerIndices = target.markerIndices || []).push(m.idx);
+        usedMath.add(m.idx);
+      }
+    }
   }
-  return { used, unused: allMarkers.filter((m) => !used.has(m.idx)) };
+  return {
+    used,
+    unused: allMarkers.filter((m) => !used.has(m.idx)),
+    unusedMath: allMath.filter((m) => !usedMath.has(m.idx)),
+  };
 }
 
 // ── Diagram generation for theory questions ─────────────────────────────
@@ -1187,8 +1212,12 @@ async function extractQuestionsFromText(rawText, onProgress, onWarning, opts = {
   // exist — without it a pasted document is never warned about "missing"
   // figures it never had.
   const markersPresent = Array.isArray(opts.markers) && opts.markers.length > 0;
+  const mathMarkersPresent = Array.isArray(opts.mathMarkers) && opts.mathMarkers.length > 0;
   const markersByBlock = markersPresent
     ? blocks.map((blk) => [...blk.matchAll(/\[IMG:(\d+)\]/g)].map((mm) => ({ idx: Number(mm[1]) })))
+    : null;
+  const mathByBlock = mathMarkersPresent
+    ? blocks.map((blk) => [...blk.matchAll(/\[MATH:(\d+)\]/g)].map((mm) => ({ idx: Number(mm[1]) })))
     : null;
   const questionsByBlock = blocks.map(() => []);
 
@@ -1240,6 +1269,7 @@ Rules:
 - Do NOT invent answer keys that are not in the document. Leave correct_answer as "" and correct_index as null when unknown.
 - WATERMARK LINES: Never copy watermark, source, or download footer/header lines (e.g. "Downloaded from sronu.com", "Source: www.example.com", "DOWNLOADED FROM SRONU") into text, passage, or instructions. Always drop such lines.
 - FIGURE MARKERS: Raw text may contain lines like "[IMG:5]" — those are real figure markers from the paper. If a marker belongs to this question's stem or its figure caption, PRESERVE it verbatim in the "text" or "passage" field of that question (never invent or move markers).
+- MATH MARKERS: Raw text may contain inline markers like "[MATH:3]" — those are real math-expression bubbles (fractions, powers, matrices, surd stacks) that cannot be typeset as text. PRESERVE them verbatim wherever they appear: in the "text" field, inside the "passage" field, AND inside option strings (e.g. "A. [MATH:3] + 4"). Never invent, renumber, or drop markers, and never move a marker from one option to another.
 - COMPACT OUTPUT: keep option text short, leave explanation and learning_objective empty, and do not repeat the passage for later questions. Output ONLY the JSON object.
 `;
 
@@ -1401,20 +1431,24 @@ Rules:
     }
   }
 
-  // Hand every figure marker to the question that kept it, with a fallback to
-  // the first question of its block; then markers never leak into stored
-  // text/passage whether or not any were attached.
-  if (markersPresent) {
-    const { unused } = attachMarkers(questionsByBlock, markersByBlock);
-    if (unused.length && onWarning) {
-      onWarning(
-        `Detected ${unused.length} diagram(s) that could not be matched to a question - check them after import.`
-      );
+  // Hand every figure and math marker to the question that kept it, with a
+  // fallback to the first question of its block; then markers never leak into
+  // stored text/passage/options whether or not any were attached.
+  if (markersPresent || mathMarkersPresent) {
+    const { unused, unusedMath } = attachMarkers(questionsByBlock, markersByBlock || blocks.map(() => []), mathByBlock || blocks.map(() => []));
+    const warnings = [];
+    if (unused.length) {
+      warnings.push(`Detected ${unused.length} diagram(s) that could not be matched to a question - check them after import.`);
     }
+    if (unusedMath.length) {
+      warnings.push(`Detected ${unusedMath.length} math expression(s) that could not be matched to a question - check them after import.`);
+    }
+    if (warnings.length && onWarning) onWarning(warnings.join(' '));
   }
   for (const q of all) {
     q.text = stripMarkers(q.text);
     q.passage = stripMarkers(q.passage);
+    if (Array.isArray(q.options)) q.options = q.options.map((o) => (typeof o === 'string' ? stripMarkers(o) : o));
   }
   return all;
 }

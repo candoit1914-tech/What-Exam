@@ -6,6 +6,10 @@ const { stripMarkers } = require('./textClean');
 let pdfjs = null;
 function loadPdfjs() {
   if (!pdfjs) {
+    // pdfjs evaluates its own Path2D handling at module load, so the native
+    // canvas Path2D must already be global before (and stay) the single pdfjs
+    // instance — otherwise glyph paths can't be replayed on the native canvas.
+    if (!globalThis.Path2D) globalThis.Path2D = require('@napi-rs/canvas').Path2D;
     pdfjs = require('pdfjs-dist/legacy/build/pdf.mjs');
   }
   return pdfjs;
@@ -218,7 +222,7 @@ async function ocrDocument(buffer) {
     await worker.terminate();
   }
 
-  return { textLines, images, rowsByPage };
+  return { textLines, images, rowsByPage, mathExprs: [] };
 }
 
 // Helper: multiply 3x3-affine matrices [a,b,c,d,e,f]
@@ -271,7 +275,7 @@ function pointsAABB(pts, m) {
  *     matches the text the AI later sees.
  * Returns { paints, rows, width, height } in user space (y-up).
  */
-async function analyzePage(doc, pageNo) {
+async function analyzePage(doc, pageNo, mathBase = 0) {
   const { OPS } = loadPdfjs();
   const page = await doc.getPage(pageNo);
   const vp = page.getViewport({ scale: 1 });
@@ -357,23 +361,302 @@ async function analyzePage(doc, pageNo) {
   // Text lines (user space) from getTextContent, joined with the same
   // whitespace rules as extractText so markers land on the same line boxes.
   const content = await page.getTextContent();
+  // Math notation (fractions, powers, index stacks) is typeset as STACKED
+  // glyphs in a dedicated math font (e.g. g_d0_f3): glyphs at the same
+  // x-window whose baselines are ~0.55+ char-heights apart. pdf.js flattens
+  // them into plain digits dumped at the END of the page text, so those
+  // clusters are detected geometrically, replaced inline with [MATH:n]
+  // markers, and later rendered as small region images (renderMathRegion).
+  const { exprs, skip } = detectMathExprs(content.items, vp.height);
   const rows = [];
   let cur = '';
   let curY = null;
+  // Per-row item geometry (stream order) so a math marker can be spliced at
+  // the char offset that matches the cluster's x position.
+  let curItems = [];
   const flush = () => {
-    if (cur) rows.push({ y: curY, line: cur });
+    if (cur) {
+      rows.push({
+        y: curY,
+        line: cur,
+        x0: curItems.length ? Math.min(...curItems.map((i) => i.x)) : 0,
+        x1: curItems.length ? Math.max(...curItems.map((i) => i.x + i.w)) : 0,
+        __items: curItems,
+      });
+    }
     cur = '';
     curY = null;
+    curItems = [];
   };
   for (const it of content.items) {
     if (it.hasEOL) flush();
     const s = String(it.str || '');
+    // Skip glyphs that belong to a detected math cluster - their digits are
+    // replaced by a [MATH:n] splice below, never kept as page-tail text.
+    if (!s || (it.transform && skip.has(it))) continue;
     if (!cur && it.transform) curY = it.transform[5];
     if (cur && s && !/\s$/.test(cur) && !/^\s/.test(s) && cur.trim() && s.trim()) cur += ' ';
-    cur += s;
+    const cw = it.width != null ? it.width / Math.max(1, s.length) : 6;
+    curItems.push({ s, x: it.transform ? it.transform[4] : 0, w: cw });
+    if (cur) cur += s; else cur = s;
   }
   flush();
-  return { paints, rows, width: vp.width, height: vp.height };
+  // Splice each math cluster's marker into its host row at the x position
+  // where it belongs, so "Arrange the following: , 0.8," becomes
+  // "Arrange the following: [MATH:0], 0.8,". Multiple clusters may share one
+  // host row, so every splice is recorded and applied to that row together.
+  // Tokens are numbered document-globally (mathBase is the cumulative count
+  // from previous pages) so a later question never mixes up two pages' [MATH:0].
+  exprs.forEach((ex, n) => {
+    const host = findMathHostRow(rows, ex);
+    if (!host) {
+      console.warn(`[pdf] math expr at (${ex.cx.toFixed(1)}, ${ex.cy.toFixed(1)}) had no host row`);
+      return;
+    }
+    (host.__splices = host.__splices || []).push({ cx: ex.cx, marker: `[MATH:${mathBase + n}]` });
+  });
+  for (const row of rows) {
+    if (!row.__splices || !row.__splices.length) {
+      delete row.__items;
+      delete row.__splices;
+      continue;
+    }
+    row.__splices.sort((a, b) => a.cx - b.cx);
+    spliceMarkersInto(row);
+  }
+  return { paints, rows, mathExprs: exprs, width: vp.width, height: vp.height };
+}
+
+/**
+ * Detect stacked-glyph math clusters in a page's text items.
+ *
+ * Glyphs whose x-windows genuinely intersect are unioned (a fraction's
+ * numerator and denominator share the same x column); ordinary letters only
+ * abut, so normal words survive untouched. A cluster is treated as math when
+ * it holds >=2 glyphs on >=2 distinct baselines separated by at least
+ * 0.55 x char-height - the measured signature of a fraction / power / index /
+ * matrix stack (normal text shares one baseline). Adjacent stacks of the same
+ * font sharing a baseline row (the multi-digit fraction "23/45") merge into
+ * one expression.
+ *
+ * Returns { exprs, skip } where skip is a Set of the source items whose glyphs
+ * belong to a cluster (never emitted as plain page text).
+ */
+function detectMathExprs(items, pageHeight) {
+  const chars = [];
+  for (const it of items) {
+    if (!it.transform) continue;
+    const s = String(it.str || '');
+    if (!s) continue;
+    const cw = it.width != null ? it.width / Math.max(1, s.length) : 6;
+    const ch = Math.abs(it.height) || 10;
+    for (let k = 0; k < s.length; k++) {
+      // Space glyphs never belong to a stack (they inflate a column's baseline
+      // set and mask the real numerator/denominator gap).
+      if (/\s/.test(s[k])) continue;
+      chars.push({
+        ch: s[k], font: it.fontName, it,
+        x: it.transform[4] + k * cw, y: it.transform[5],
+        w: cw, h: ch,
+      });
+    }
+  }
+  const byFont = {};
+  for (const c of chars) (byFont[c.font] = byFont[c.font] || []).push(c);
+
+  const exprs = [];
+  // Two glyphs are "stacked" when their x-windows genuinely intersect (a
+  // numerator and denominator share the same x column). Ordinary letters only
+  // abut, so overlap-union keeps normal words intact while chaining (running
+  // x1) is deliberately avoided — it would fuse whole lines into one giant
+  // group and both miss the stack and delete page text.
+  const parent = new Map();
+  const find = (c) => {
+    const p = parent.get(c);
+    if (p === c) return c;
+    parent.set(c, find(p));
+    return parent.get(c);
+  };
+  const union = (a, b) => parent.set(find(a), find(b));
+
+  for (const list of Object.values(byFont)) {
+    const sorted = [...list].sort((a, b) => a.x - b.x || a.y - b.y);
+    const active = [];
+    for (const c of sorted) {
+      parent.set(c, c);
+      // Retire glyphs whose x-run can no longer intersect anything later.
+      while (active.length && active[0].x + active[0].w < c.x) active.shift();
+      for (const d of active) {
+        // Stacked members share an x column AND sit vertically near each other.
+        // A genuine stack is denser than a line's leading: fraction numerators
+        // sit ~0.7x the char-height from their denominator, while ordinary
+        // text lines are >>1.0x apart (measured ~11.5pt line vs 8pt stack).
+        // Crossing 1.0 makes consecutive text lines union whenever their
+        // trailing glyphs happen to align in x (e.g. "Accra." over "largest"),
+        // which would delete whole lines as false "math".
+        const near = Math.abs(c.y - d.y) < 0.95 * Math.max(c.h, d.h);
+        const overlap = Math.min(c.x + c.w, d.x + d.w) - Math.max(c.x, d.x) > 0.1;
+        if (near && overlap) union(c, d);
+      }
+      active.push(c);
+    }
+  }
+
+  const groups = new Map();
+  for (const c of chars) {
+    const r = find(c);
+    if (!groups.has(r)) groups.set(r, []);
+    groups.get(r).push(c);
+  }
+  const candidates = [];
+  for (const g of groups.values()) {
+    if (g.length < 2) continue;
+    // Watermark / masthead script glyphs (the rotated "DOWNLOADED FROM SRONU"
+    // ribbon: "SRONU papers.com") also stack with distinct baselines, but the
+    // logo is PURE LETTERS and the ".com" suffix is a single large glyph under
+    // tiny ones. Real math stacks always carry at least one digit or math
+    // symbol, and have >= 2 body-sized glyphs (>= 6.5pt).
+    if (g.length < 2) continue;
+    if (g.filter((c) => Math.abs(c.h) >= 6.5).length < 2) continue;
+    // The logo block ("DOWNLOADED FROM SRONU…papers.com") is PURE LETTERS;
+    // real math stacks carry at least one digit or math symbol. Requiring that
+    // (rather than merely "not all letters") also stops a stray full stop from
+    // turning two aligned text lines into a fake stack.
+    if (!g.some((c) => /[0-9+\-×÷=±√∑∏∫≤≥≠∞]/.test(c.ch))) continue;
+    const baselines = [...new Set(g.map((c) => c.y))];
+    if (baselines.length < 2) continue;
+    const ys = [...baselines].sort((a, b) => b - a);
+    let maxGap = 0;
+    for (let i = 1; i < ys.length; i++) maxGap = Math.max(maxGap, ys[i - 1] - ys[i]);
+    const avgH = g.reduce((a, c) => a + c.h, 0) / g.length;
+    if (maxGap < 0.55 * avgH) continue;
+    // Reject "staircase" columns: 3+ glyphs on >=3 baselines that are all
+    // nearly EQUALLY spaced. That is the signature of a text column — option
+    // labels ("A. 4x^2" over "B. 2x^2" over "C. 4x"...) or a table of numbers
+    // — at one x position, NOT a math expression. Genuine stacks have an
+    // irregular baseline spread (a tight numerator/denominator pair).
+    if (ys.length >= 3) {
+      const g0 = ys[0] - ys[1];
+      let even = true;
+      for (let i = 2; i < ys.length; i++) {
+        if (Math.abs(ys[i - 1] - ys[i] - g0) > 0.6) { even = false; break; }
+      }
+      if (even) continue;
+    }
+    // A stack's glyphs are one type size: a fraction's numerator and
+    // denominator (and matrix members) match. Consecutive text lines that
+    // align at the same left margin ("2026 BECE" title over "1. Use the
+    // circle...") stack a 16pt line over an 11pt line — sizes that never
+    // appear inside one expression.
+    {
+      let hMin = Infinity, hMax = 0;
+      for (const c of g) { hMin = Math.min(hMin, Math.abs(c.h)); hMax = Math.max(hMax, Math.abs(c.h)); }
+      if (hMax / hMin > 1.4) continue;
+    }
+    candidates.push(sealStack(g, pageHeight));
+  }
+  // Merge adjacent stacks of the same font that share a baseline row — the
+  // multi-digit fraction "23/45" is two side-by-side columns (2/4 and 3/5)
+  // that should render as ONE expression.
+  candidates.sort((a, b) => a.x0 - b.x0);
+  const merged = [];
+  for (const c of candidates) {
+    const prev = merged[merged.length - 1];
+    const charW = (c.avgH); // approximate column advance
+    if (
+      prev && prev.font === c.font &&
+      c.x0 - prev.x1 < 0.9 * charW &&
+      intersectHas(prev.ys, c.ys)
+    ) {
+      prev.chars.push(...c.chars);
+      computedStackExtent(prev);
+    } else {
+      merged.push(c);
+    }
+  }
+  const skip = new Set();
+  for (const m of merged) {
+    const box = { x: m.x0 - 2, y: pageHeight - m.yBot - 2, w: m.x1 - m.x0 + 4, h: m.yBot - m.yTop + 4 };
+    exprs.push({
+      box,
+      cx: (m.x0 + m.x1) / 2,
+      cy: m.yTop + (m.yBot - m.yTop) / 2,
+      skip: m.items,
+    });
+    for (const it of m.items) skip.add(it);
+  }
+  return { exprs, skip };
+}
+
+function sealStack(g, pageHeight) {
+  let x0 = Infinity, x1 = -Infinity, yTop = Infinity, yBot = -Infinity;
+  const items = new Set();
+  const ys = new Set();
+  let hSum = 0;
+  for (const c of g) {
+    x0 = Math.min(x0, c.x); x1 = Math.max(x1, c.x + c.w);
+    yTop = Math.min(yTop, c.y); yBot = Math.max(yBot, c.y + c.h);
+    ys.add(c.y);
+    items.add(c.it);
+    hSum += c.h;
+  }
+  return { chars: g, font: g[0].font, x0, x1, yTop, yBot, ys: [...ys], avgH: hSum / g.length, items };
+}
+
+function computedStackExtent(s) {
+  let x0 = Infinity, x1 = -Infinity, yTop = Infinity, yBot = -Infinity;
+  const items = new Set();
+  for (const c of s.chars) {
+    x0 = Math.min(x0, c.x); x1 = Math.max(x1, c.x + c.w);
+    yTop = Math.min(yTop, c.y); yBot = Math.max(yBot, c.y + c.h);
+    s.ys.push(c.y);
+    items.add(c.it);
+  }
+  s.ys = [...new Set(s.ys)];
+  s.x0 = x0; s.x1 = x1; s.yTop = yTop; s.yBot = yBot;
+  s.items = items;
+}
+
+function intersectHas(a, b) {
+  const set = new Set(b);
+  return a.some((v) => set.has(v));
+}
+
+/** The row a math expression belongs to. A stacked expression straddles its
+ * own text line's baseline (numerator above, denominator below), so the host
+ * is simply the row whose baseline is closest; x-overlap is only a tiebreaker
+ * when two rows are equally near (dense leading). Falls back to the vertically
+ * nearest row for standalone "Simplify:" -> expression layouts. */
+function findMathHostRow(rows, ex) {
+  let best = null;
+  let bestDy = Infinity;
+  for (const r of rows) {
+    const dy = Math.abs(r.y - ex.cy);
+    if (dy < bestDy - 0.75) { bestDy = dy; best = r; }
+    else if (dy <= bestDy + 0.75 && best && ex.cx >= r.x0 && ex.cx <= r.x1) { bestDy = dy; best = r; }
+  }
+  return best || rows.reduce((a, b) => (Math.abs(b.y - ex.cy) < Math.abs(a.y - ex.cy) ? b : a), rows[0]) || null;
+}
+
+/** Insert every marker into its host row at the char offset matching the
+ * cluster's x. The row string was built from __items in stream order, so the
+ * line is rebuilt walking __items in order, inserting each marker the first
+ * time an item sits physically right of its cluster x. */
+function spliceMarkersInto(row) {
+  let out = '';
+  let si = 0;
+  for (const it of row.__items) {
+    while (si < row.__splices.length && it.x > row.__splices[si].cx) {
+      out += row.__splices[si++].marker;
+    }
+    const s = it.s;
+    if (out && s && !/\s$/.test(out) && !/^\s/.test(s) && out.trim() && s.trim()) out += ' ';
+    out += s;
+  }
+  while (si < row.__splices.length) out += row.__splices[si++].marker;
+  row.line = out;
+  delete row.__items;
+  delete row.__splices;
 }
 
 // Vector regions cover the fill/stroke AABB plus the stroke half-width.
@@ -405,8 +688,11 @@ const VECTOR_TEXT_BOX_MAX_H = 60;
 async function analyzeDocument(buffer) {
   const doc = await openDoc(buffer);
   const pageData = [];
+  let mathBase = 0;
   for (let p = 1; p <= doc.numPages; p++) {
-    pageData.push(await analyzePage(doc, p));
+    const data = await analyzePage(doc, p, mathBase);
+    pageData.push(data);
+    mathBase += data.mathExprs.length;
   }
   const textLines = [];
   for (const data of pageData) {
@@ -533,7 +819,10 @@ async function analyzeDocument(buffer) {
     images.push(q);
   }
 
-  return { textLines: merged, images, rowsByPage: pageData.map((d) => d.rows) };
+  // mathExprs[exprIndex] === the expression behind token [MATH:exprIndex]:
+  // tokens are numbered document-globally, so the flat array position IS the
+  // index used by ai.js markerIndices and pdfImport's renderer.
+  return { textLines: merged, images, rowsByPage: pageData.map((d) => d.rows), mathExprs: pageData.flatMap((d, p) => d.mathExprs.map((ex) => ({ page: p + 1, ...ex.box }))) };
 }
 
 /**
@@ -558,7 +847,7 @@ async function extractDocument(buffer) {
  * n = the figure's index into the extractDocument images array.
  */
 async function textWithMarkers(buffer) {
-  const { textLines, images, rowsByPage, _ocr } = await analyzeDocument(buffer);
+  const { textLines, images, rowsByPage, mathExprs, _ocr } = await analyzeDocument(buffer);
   const pageStarts = [];
   {
     let n = 0;
@@ -624,7 +913,7 @@ async function textWithMarkers(buffer) {
     markers.push({ idx: ins.idx, page: ins.page });
   }
   markers.sort((a, b) => a.idx - b.idx);
-  return { text: lines.join('\n'), markers, images, _ocr: !!_ocr };
+  return { text: lines.join('\n'), markers, images, mathExprs, _ocr: !!_ocr };
 }
 
 // A canvas 2D context that accepts every call pdfjs's renderer makes but
@@ -912,6 +1201,44 @@ async function renderVectorRegion(buffer, image, outPath) {
   return outPath;
 }
 
+/**
+ * Render a math expression region (a stacked-foundry cluster that was replaced
+ * inline by a [MATH:n] marker) to a PNG. Unlike renderVectorRegion, the glyphs
+ * MUST be drawn too — pdfjs emits them as Path2D objects, which the native
+ * canvas accepts once `globalThis.Path2D` shadows the (absent) global. Renders
+ * the full page through pdfjs at `scale`, then crops the expression box and
+ * writes the PNG. Pass an optional `pageCache` Map (page number -> rendered
+ * canvas) to render each page at most once per import job.
+ * Returns outPath (side effect: writes the file).
+ */
+async function renderMathRegion(buffer, expr, outPath, scale = 4, pageCache) {
+  const { createCanvas } = require('@napi-rs/canvas');
+  if (!globalThis.Path2D) globalThis.Path2D = require('@napi-rs/canvas').Path2D;
+  const doc = await openDoc(buffer);
+  const page = await doc.getPage(expr.page);
+  const vp = page.getViewport({ scale });
+  const cw = Math.max(1, Math.round(expr.w * scale));
+  const ch = Math.max(1, Math.round(expr.h * scale));
+  const out = createCanvas(cw, ch);
+  const octx = out.getContext('2d');
+  try {
+    let canvas = pageCache && pageCache.get(expr.page);
+    if (!canvas) {
+      canvas = createCanvas(Math.ceil(vp.width), Math.ceil(vp.height));
+      const ctx = canvas.getContext('2d');
+      await page.render({ canvasContext: ctx, viewport: vp }).promise;
+      if (pageCache) pageCache.set(expr.page, canvas);
+    }
+    octx.drawImage(canvas, expr.x * scale, expr.y * scale, cw, ch, 0, 0, cw, ch);
+  } catch (err) {
+    console.warn(`[pdf] math region render failed (p${expr.page}): ${err.message}`);
+    octx.fillStyle = '#ffffff';
+    octx.fillRect(0, 0, cw, ch);
+  }
+  fs.writeFileSync(outPath, out.toBuffer('image/png'));
+  return outPath;
+}
+
 function saveUpload(buffer, originalName) {
   const name = `${Date.now()}-${path.basename(originalName || 'upload.pdf')}`;
   const filePath = path.join(config.uploadsDir, name);
@@ -919,4 +1246,4 @@ function saveUpload(buffer, originalName) {
   return filePath;
 }
 
-module.exports = { extractText, extractDocument, textWithMarkers, stripMarkers, renderImage, renderVectorRegion, renderPageToBuffer, saveUpload, loadPdfjs, openDoc };
+module.exports = { extractText, extractDocument, textWithMarkers, stripMarkers, renderImage, renderVectorRegion, renderMathRegion, renderPageToBuffer, saveUpload, loadPdfjs, openDoc };

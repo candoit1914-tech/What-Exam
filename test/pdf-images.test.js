@@ -441,3 +441,191 @@ test('WhatsApp question delivery sends the diagram image before text when presen
     wa.sendImage = origImg; wa.sendText = origTxt;
   }
 });
+
+// ── Math expression bubbles ─────────────────────────────────────────────
+//
+// WAEC/BECE math papers typeset fractions and powers as STACKED glyphs
+// (numerator/denominator share an x column with different baselines). pdf.js
+// flattens those to digits dumped at the end of the page text; detectMathExprs
+// finds the stacks geometrically, splices a [MATH:n] marker in their place, and
+// renderMathRegion crops each expression to its own WhatsApp image bubble.
+
+// First writable system TrueType font — needed so pdf.js can load glyph paths
+// and actually paint ink during render tests (pdfkit's built-in Helvetica is
+// not embedded). Falls back to skipping the ink assertions if none is found.
+function systemTtf() {
+  const candidates = [
+    'C:/Windows/Fonts/times.ttf',
+    'C:/Windows/Fonts/arial.ttf',
+    'C:/Windows/Fonts/segoeui.ttf',
+    '/System/Library/Fonts/Times.ttc',
+    '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
+  ];
+  return candidates.find((p) => fs.existsSync(p));
+}
+
+// A page with two stacked-glyph fractions, like "3/4" and "1/2" typeset by a
+// math font: digits at the same x column ~9pt apart in baseline.
+async function mathFixturePdf() {
+  const doc = new PDFDocument();
+  const ttf = systemTtf();
+  if (ttf) doc.registerFont('mathfont', ttf);
+  doc.font(ttf ? 'mathfont' : 'Helvetica').fontSize(12);
+  doc.text('1. Arrange the following:');
+  doc.text('3', 210, 680);
+  doc.text('4', 210, 671);
+  doc.text(' , 0.8, ', 230, 680);
+  doc.text('1', 330, 680);
+  doc.text('2', 330, 671);
+  doc.text(', 0.65 in descending order.', 350, 680);
+  doc.end();
+  return collectPdf(doc);
+}
+
+test('stacked math glyphs become [MATH:n] markers in reading order, digits dropped', async () => {
+  const res = await pdf.textWithMarkers(await mathFixturePdf());
+  assert.equal(res.mathExprs.length, 2, 'two stacked fractions detected');
+  for (const ex of res.mathExprs) {
+    assert.equal(ex.page, 1);
+    assert.ok(ex.w > 0 && ex.h > 0, 'expression has a real box');
+  }
+  assert.ok(res.text.includes('[MATH:0]'), 'first fraction marker spliced');
+  assert.ok(res.text.includes('[MATH:1]'), 'second fraction marker spliced');
+  assert.ok(res.text.includes('Arrange the following:'), 'stem intact');
+  assert.ok(res.text.includes('0.8'), 'ordinary inline number keeps its digits');
+  assert.ok(res.text.includes('0.65'), 'ordinary inline number keeps its digits');
+  // The stacked digits themselves must not leak into the question text (they
+  // were replaced by the markers).
+  for (const leaked of ['3', '4', '2']) {
+    assert.ok(!res.text.includes(leaked), `stacked digit "${leaked}" removed from text`);
+  }
+  // Markers sit where the fractions were, before the text that followed them.
+  const m0 = res.text.indexOf('[MATH:0]');
+  const m1 = res.text.indexOf('[MATH:1]');
+  assert.ok(m0 < res.text.indexOf('0.8'), '[MATH:0] spliced before "0.8"');
+  assert.ok(m1 < res.text.indexOf('0.65'), '[MATH:1] spliced before "0.65"');
+});
+
+test('renderMathRegion crops an ink-bearing PNG at the expression box size', async (t) => {
+  const ttf = systemTtf();
+  if (!ttf) {
+    t.skip('no system TrueType font to embed — glyph paint cannot be verified');
+    return;
+  }
+  const buf = await mathFixturePdf();
+  const res = await pdf.textWithMarkers(buf);
+  assert.equal(res.mathExprs.length, 2);
+  const dest = path.join(TMP, 'math-expr-0.png');
+  await pdf.renderMathRegion(buf, res.mathExprs[0], dest, 4);
+  const magic = fs.readFileSync(dest).slice(0, 8).toString('hex');
+  assert.equal(magic, '89504e470d0a1a0a', 'PNG magic');
+  const sharp = require('sharp');
+  const { data, info } = await sharp(dest).raw().toBuffer({ resolveWithObject: true });
+  assert.ok(Math.abs(info.width - Math.round(res.mathExprs[0].w * 4)) <= 8, 'width ~ 4x the box');
+  assert.ok(Math.abs(info.height - Math.round(res.mathExprs[0].h * 4)) <= 8, 'height ~ 4x the box');
+  let dark = 0;
+  for (let k = 0; k < data.length; k += 4) if (data[k] < 128) dark++;
+  assert.ok(dark > 0, 'expression pixels are painted (not a blank crop)');
+});
+
+test('math markers riding in text or options attach as markerIndices and are stripped from stored fields', async () => {
+  await withStubChatJSON(
+    [{
+      type: 'objective',
+      number: 1,
+      text: 'Simplify: [MATH:0] y + 1',
+      options: ['A. [MATH:1] + 4', 'B. 2y', 'C. y', 'D. y + 2'],
+    }],
+    async () => {
+      const qs = await aiMod.extractQuestionsFromText(
+        '1. Simplify:\n[MATH:0]\nA. [MATH:1] + 4\nB. 2y\nC. y\nD. y + 2\n',
+        null, null,
+        { mathMarkers: [0, 1] }
+      );
+      assert.equal(qs.length, 1);
+      assert.deepEqual(qs[0].markerIndices, [0, 1], 'both math markers attached in document order');
+      assert.equal(qs[0].markerIndex, undefined, 'no figure markerIndex for math-only markers');
+      assert.equal(qs[0].text, 'Simplify: y + 1', 'marker stripped from text');
+      assert.equal(qs[0].options[0], 'A. + 4', 'marker stripped from the option string');
+    }
+  );
+});
+
+test('a math marker whose block yielded no questions warns', async () => {
+  const warnings = [];
+  await withStubChatJSON([], async () => {
+    await aiMod.extractQuestionsFromText(
+      '9. Evaluate:\n[MATH:4]\n',
+      null, (w) => warnings.push(w),
+      { mathMarkers: [4] }
+    );
+  });
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /math/);
+});
+
+test('storeMathImages renders each expression and inserts question_images rows in position order', async () => {
+  const ttf = systemTtf();
+  if (!ttf) {
+    t.skip('no system TrueType font to embed');
+    return;
+  }
+  const db = require('../src/db');
+  const pdfImport = require('../src/services/pdfImport');
+  const uploadsDir = require('../src/config').uploadsDir;
+  db.exec('BEGIN');
+  let examId, questionId;
+  try {
+    const buf = await mathFixturePdf();
+    const res = await pdf.textWithMarkers(buf);
+    assert.equal(res.mathExprs.length, 2);
+    examId = db.prepare("INSERT INTO exams (title, duration_minutes) VALUES ('math', 30)").run().lastInsertRowid;
+    questionId = db.prepare(
+      "INSERT INTO questions (exam_id, q_order, type, text, marks, source) VALUES (?,1,'objective','Arrange:',1,'pdf')"
+    ).run(examId).lastInsertRowid;
+    await pdfImport.storeMathImages(
+      { markerIndices: [0, 1] }, questionId, res.mathExprs, new Map(), buf, examId, 1
+    );
+    const rows = db.prepare('SELECT position, image, kind FROM question_images WHERE question_id = ? ORDER BY position').all(questionId);
+    assert.equal(rows.length, 2);
+    assert.deepEqual(rows.map((r) => r.position), [0, 1], 'positions 0 and 1');
+    assert.equal(rows[0].kind, 'math');
+    for (const row of rows) {
+      assert.ok(fs.existsSync(path.join(uploadsDir, row.image)), `rendered ${row.image} exists`);
+    }
+    assert.notEqual(rows[0].image, rows[1].image, 'two distinct expression files');
+  } finally {
+    db.exec('ROLLBACK');
+  }
+});
+
+test('WhatsApp delivery sends math expression bubbles in position order above the question text', async () => {
+  const examMod = require('../src/services/exam');
+  const wa = require('../src/services/whatsapp');
+  const db = require('../src/db');
+  const origImg = wa.sendImage, origTxt = wa.sendText;
+  const calls = [];
+  wa.sendImage = async (phone, file) => { calls.push('image:' + path.basename(file)); };
+  wa.sendText = async () => { calls.push('text'); };
+  try {
+    db.exec('BEGIN');
+    const examId = db.prepare("INSERT INTO exams (title, duration_minutes, status) VALUES ('x', '1', 'live')").run().lastInsertRowid;
+    const qid = db.prepare("INSERT INTO questions (exam_id, q_order, type, text, image) VALUES (?,1,'theory','q stem','legacy.png')").run(examId).lastInsertRowid;
+    db.prepare("INSERT INTO question_images (question_id, position, image, kind) VALUES (?,0,'m0.png','math')").run(qid);
+    db.prepare("INSERT INTO question_images (question_id, position, image, kind) VALUES (?,1,'m1.png','math')").run(qid);
+    const stud = db.prepare("INSERT INTO students (phone) VALUES ('233000000000')").run().lastInsertRowid;
+    const sid = db.prepare("INSERT INTO sessions (exam_id, student_id, current_q_order, status) VALUES (?, ?, '1','in_progress')").run(examId, stud).lastInsertRowid;
+    const session = db.prepare('SELECT * FROM sessions WHERE id = ?').get(sid);
+    await examMod.sendQuestionTo(session, { phone: '233000000000' });
+    const i0 = calls.indexOf('image:m0.png');
+    const i1 = calls.indexOf('image:m1.png');
+    assert.ok(i0 >= 0 && i1 >= 0, 'both math bubbles are sent');
+    assert.ok(i0 < i1, 'bubbles sent in position order');
+    const lastText = calls.map((c, i) => (c.startsWith('text') ? i : -1)).filter((i) => i >= 0).pop();
+    assert.ok(lastText !== undefined && i1 < lastText, 'both bubbles arrive above the question text');
+    assert.ok(!calls.includes('image:legacy.png'), 'legacy single image not used when question_images exist');
+  } finally {
+    db.exec('ROLLBACK');
+    wa.sendImage = origImg; wa.sendText = origTxt;
+  }
+});

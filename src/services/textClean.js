@@ -27,10 +27,12 @@ function stripSourceWatermarks(text) {
 // attachment pipeline, never content: strip every one. The AI may echo a
 // marker back mid-line ("Look at Figure 1. [IMG:0]") — a marker is removed
 // wherever it appears, whether it sits on its own line or inline in text.
+// The same applies to [MATH:n] markers spliced inline where stacked math
+// glyphs were removed (see pdf.js detectMathExprs).
 function stripMarkers(text) {
   return String(text || '')
-    .replace(/^\[IMG:\d+\]\s*\n?/gm, '')
-    .replace(/\s?\[IMG:\d+\]/g, '');
+    .replace(/^\[(?:IMG|MATH):\d+\]\s*\n?/gm, '')
+    .replace(/\s?\[(?:IMG|MATH):\d+\]/g, '');
 }
 
 module.exports = { stripSourceWatermarks, stripMarkers };
