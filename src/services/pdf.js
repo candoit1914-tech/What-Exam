@@ -695,6 +695,67 @@ const PAGE_AREA_MAX = 0.20;
 // lower floor, provided they are not hairlines (a thin line has a tiny side).
 const RASTER_WIDE_MIN = 0.004;
 const RASTER_WIDE_ASPECT = 2.5;
+// Real text pages carry roughly 1,500-3,000 characters and 200+ words. A scan
+// that slipped a text layer in (page number, running header, watermark, scan
+// stamp) yields a few dozen characters and far fewer words.
+//
+// Three independent gates must ALL look like a dead text layer before OCR is
+// used, because no single signal can tell them apart:
+//
+//   1. Character density - separates a real paper from junk. Checked first, so
+//      a real document never reaches the cheaper checks.
+//   2. Word density - rescues a genuinely short real page, and catches junk
+//      made of bare page numbers.
+//   3. Word variety - catches a dense repeated running header, which carries
+//      enough characters and enough words to pass gates 1 and 2, but is the
+//      same three words on every page. Real text is varied; a header is not.
+//
+// Gates 1 and 2 alone are not enough. A real page can be short: a one-page
+// question sheet, a math-heavy page that is mostly symbols, a stem with an
+// image and four options. OCR-ing those replaces real text with OCR
+// approximations, destroying math markers and breaking sentence merging.
+const OCR_FALLBACK_CHARS_PER_PAGE = 200;
+const OCR_FALLBACK_WORDS_PER_PAGE = 4;
+const OCR_FALLBACK_MIN_WORDS_PER_PAGE = 1;
+const OCR_FALLBACK_DISTINCT_RATIO = 0.5;
+
+/**
+ * Whether a document's extracted text is too sparse to be a real text layer,
+ * meaning the pages are images and must go through OCR.
+ *
+ * The OCR fallback used to trigger only when the text was completely empty, so
+ * a scan that produced a stray page number or header skipped OCR entirely,
+ * yielded zero question blocks, and failed with an error blaming the user's
+ * document for having no questions in it.
+ *
+ * @param {string} text
+ * @param {number} pageCount
+ * @returns {boolean}
+ */
+function needsOcrFallback(text, pageCount) {
+  const trimmed = String(text || '').trim();
+  if (!trimmed) return true;
+  const pages = Number(pageCount) > 0 ? Number(pageCount) : 1;
+
+  if (trimmed.length >= OCR_FALLBACK_CHARS_PER_PAGE * pages) return false;
+
+  // Word-like tokens: 2+ letters, so bare page numbers and "2026" do not count.
+  const words = trimmed.match(/[A-Za-z]{2,}/g) || [];
+  if (words.length >= OCR_FALLBACK_WORDS_PER_PAGE * pages) return false;
+
+  // Too few words for variety to mean anything. A single word like "Biology" is
+  // trivially "all distinct", so this gate must not be allowed to rescue a
+  // document that has one word spread across a whole scanned paper.
+  if (words.length < OCR_FALLBACK_MIN_WORDS_PER_PAGE * pages) return true;
+
+  // Enough words to judge them by: varied words are a real text layer, the
+  // same few words repeated on every page are a running header.
+  const distinct = new Set(words.map((w) => w.toLowerCase())).size;
+  if (distinct >= OCR_FALLBACK_DISTINCT_RATIO * words.length) return false;
+
+  return true;
+}
+
 const RASTER_WIDE_MIN_SIDE = 20;
 // Vector boxes taller than this that contain text are treated as tables or
 // labelled graphics; shorter wide ones are kept as math expressions.
@@ -741,10 +802,13 @@ async function analyzeDocument(buffer) {
     }
   }
   const text = merged.join('\n').replace(/[ \t]+/g, ' ');
-  if (!text.trim()) {
-    // No extractable text — this is likely a scanned/image-only PDF.
-    // Fall back to OCR: render each page as an image and run Tesseract.
-    console.log('[pdf] No extractable text found, falling back to OCR...');
+  if (needsOcrFallback(text, doc.numPages)) {
+    // No usable text layer - this is a scanned/image-only PDF, or one whose
+    // only "text" was a stray header/page number. Fall back to OCR: render
+    // each page as an image and run Tesseract.
+    console.log(
+      `[pdf] Text layer absent or too sparse (${text.trim().length} chars over ${doc.numPages} pages), falling back to OCR...`
+    );
     const ocrResult = await ocrDocument(buffer);
     ocrResult._ocr = true;
     // Sentence-join the raw OCR lines (same algorithm as below)
@@ -1272,4 +1336,4 @@ function saveUpload(buffer, originalName) {
   return filePath;
 }
 
-module.exports = { extractText, extractDocument, textWithMarkers, stripMarkers, renderImage, renderVectorRegion, renderMathRegion, renderPageToBuffer, saveUpload, loadPdfjs, openDoc };
+module.exports = { extractText, extractDocument, textWithMarkers, stripMarkers, renderImage, renderVectorRegion, renderMathRegion, renderPageToBuffer, saveUpload, loadPdfjs, openDoc, needsOcrFallback };

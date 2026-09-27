@@ -181,6 +181,43 @@ function updateJob(id, patch) {
 // ── Worker ─────────────────────────────────────────────────────────────
 
 /**
+ * Explain why an import produced zero questions, in terms of what actually
+ * went wrong.
+ *
+ * These cases are genuinely different and need different advice. Telling
+ * someone their document "may not contain exam questions" when the real
+ * problem is that nothing could be read out of it sends them to re-check a
+ * file that is perfectly fine.
+ *
+ * @param {{text?: string, isOcr?: boolean, blockWarning?: string}} input
+ * @returns {string}
+ */
+function describeExtractionFailure({ text, isOcr, blockWarning } = {}) {
+  // This branch is for a TIMEOUT, so it must not claim documents that were
+  // simply unreadable. The empty-text extractor reports its own warning, which
+  // arrives here as `blockWarning`; checking `blockWarning` alone relabelled an
+  // unreadable scan as "the AI provider did not answer in time" - the exact
+  // misleading message this function exists to replace. Unreadable text is
+  // handled by the branch below.
+  if (blockWarning && String(text || '').trim()) {
+    return (
+      'No questions could be parsed from this PDF. ' +
+      blockWarning +
+      ' The AI provider did not answer in time — try again, or raise AI_BLOCK_TIMEOUT_MS if it keeps happening.'
+    );
+  }
+  // Nothing readable at all. Either OCR ran and could not read the page
+  // images, or the document had no usable text layer.
+  if (!String(text || '').trim()) {
+    return isOcr
+      ? 'No readable text could be extracted from this PDF. It appears to be a scan, and OCR could not read the page images clearly enough to work with. Try a higher-resolution scan, or export the PDF from the original document rather than photographing it.'
+      : 'No readable text could be extracted from this PDF, so there was nothing to build questions from. This usually means the pages are images or a scan that needs clearer imaging — try re-exporting the PDF from the original document.';
+  }
+  // There was plenty of readable text; it simply was not an exam paper.
+  return 'The document may not contain exam questions in a recognizable format.';
+}
+
+/**
  * Process an uploaded exam PDF in the background. Runs entirely off the HTTP
  * request path so a slow AI endpoint can never make the browser hang or a
  * proxy/server timeout kill the import. Progress is written to the jobs table
@@ -223,17 +260,10 @@ async function startJob(jobId, buffer, opts = {}) {
       ...(sourceText.diagnostics || {}) });
     if (!parsed.length) {
       console.warn('[pdf-import] extraction produced no questions', { jobId });
-      // Surface WHY. A paper that parses to nothing is almost always blocks
-      // timing out against a slow provider, and "no questions" alone sends the
-      // user hunting for a problem in their PDF that isn't there.
-      throw new Error(
-        'No questions could be parsed from this PDF. ' +
-        (blockWarning
-          ? blockWarning + ' The AI provider did not answer in time — try again, or raise AI_BLOCK_TIMEOUT_MS if it keeps happening.'
-          : isOcr
-            ? 'The scanned text may be too unclear for the AI to identify question patterns. Try a clearer scan or manually add questions.'
-            : 'The document may not contain exam questions in a recognizable format.')
-      );
+      // Surface WHY. The wrong guess here sends the user hunting for a problem
+      // in their PDF that isn't there: a paper that parses to nothing is
+      // usually unreadable text (a scan), not a mis-formatted document.
+      throw new Error(describeExtractionFailure({ text, isOcr, blockWarning }));
     }
 
     // Filter by type if the user selected only objectives or only theories
@@ -464,4 +494,5 @@ module.exports = {
   correctKeyFor,
   imageFileNameFor,
   storeMathImages,
+  describeExtractionFailure,
 };
