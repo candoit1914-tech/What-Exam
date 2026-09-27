@@ -362,8 +362,18 @@ test('extraction warns (once) when a marker block yielded no questions', async (
       { markers: [{ idx: 4, page: 3 }] }
     );
   });
-  assert.equal(warnings.length, 1);
-  assert.match(warnings[0], /diagram/);
+  // The diagram warning must still fire exactly once. A block that yields
+  // nothing is now additionally reported as skipped, so filter for the
+  // diagram warning rather than counting every warning.
+  assert.equal(
+    warnings.filter((w) => /diagram/i.test(w)).length,
+    1,
+    `expected exactly one diagram warning, got ${JSON.stringify(warnings)}`
+  );
+  assert.ok(
+    warnings.some((w) => /block\(s\) could not be parsed/i.test(w)),
+    `expected the dropped block to be reported, got ${JSON.stringify(warnings)}`
+  );
 });
 
 test('stripping does not fire when the document had no markers at all', async () => {
@@ -561,8 +571,17 @@ test('a math marker whose block yielded no questions warns', async () => {
       { mathMarkers: [4] }
     );
   });
-  assert.equal(warnings.length, 1);
-  assert.match(warnings[0], /math/);
+  // A block that yields nothing is now reported as a skipped block as well as
+  // flagging its unmatched math, so assert on what the user is told rather
+  // than on an exact count.
+  assert.ok(
+    warnings.some((w) => /math/i.test(w)),
+    `expected a math warning, got ${JSON.stringify(warnings)}`
+  );
+  assert.ok(
+    warnings.some((w) => /block\(s\) could not be parsed/i.test(w)),
+    `expected the dropped block to be reported, got ${JSON.stringify(warnings)}`
+  );
 });
 
 test('storeMathImages renders each expression and inserts question_images rows in position order', async () => {

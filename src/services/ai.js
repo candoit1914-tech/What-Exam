@@ -402,11 +402,24 @@ const BLOCK_CONCURRENCY = 6;
 // invalid JSON that dropped entire blocks of questions.
 const BLOCK_MAX_TOKENS = 16000;
 // A single extraction block runs on its own clock with retries. A block that
-// still fails after retries is SKIPPED — never fails the whole paper — so
-// this bounds how long one stubborn block can stall the import. 90s allows
-// slow providers (100B+ models) to finish large blocks.
-const BLOCK_TIMEOUT_MS = 90 * 1000;
-const BLOCK_RETRIES = 2;
+// still fails after retries is SKIPPED - never fails the whole paper - so
+// this bounds how long one stubborn block can stall the import.
+//
+// The budget is per BLOCK and comes from config (AI_BLOCK_TIMEOUT_MS) because
+// it is the single knob that decides whether a slow provider costs the user
+// questions. A block that overruns is not retried indefinitely, it is dropped:
+// with a 90s ceiling against a provider measured at 28s-89s, ordinary slow
+// responses were being converted into silently missing questions.
+const BLOCK_RETRIES = 1;
+// The parallel wave gets a single attempt per block; retries are spent on the
+// serial recovery pass instead, where the endpoint is no longer flooded.
+const BLOCK_WAVE_RETRIES = 0;
+
+/** Hard per-block budget, read at call time so config/env changes apply. */
+function blockTimeoutMs() {
+  const ms = Number(config.ai.blockTimeoutMs);
+  return Number.isFinite(ms) && ms > 0 ? ms : 240000;
+}
 
 /** Run fn over items with at most `limit` promises in flight (like a semaphore). */
 async function mapLimit(items, limit, fn) {
@@ -1326,21 +1339,37 @@ Rules:
   // it still fails (timeout, HTTP error, bad JSON) the block is re-run
   // serially after the wave (flaky shared endpoints usually succeed once they
   // are no longer flooded); only then is it dropped and reported.
-  const runBlock = async (bp) => {
-    for (let attempt = 0; attempt <= BLOCK_RETRIES; attempt++) {
+  // Retries are split across the two passes so a block is never retried more
+  // than BLOCK_WAVE_RETRIES + 1 + BLOCK_RETRIES times in total. The previous
+  // shape (3 attempts in the wave, then 3 more serially) meant up to 6 calls
+  // per block; multiplied by block count and raced providers that is what
+  // produced 429 storms and multi-minute imports.
+  const runBlock = async (bp, maxRetries) => {
+    const retries = maxRetries === undefined ? BLOCK_WAVE_RETRIES : maxRetries;
+    for (let attempt = 0; attempt <= retries; attempt++) {
       try {
-        return await chatJSON(
+        const result = await chatJSON(
           [
             { role: 'system', content: system },
             { role: 'user', content: user(bp.block, bp.shared) },
           ],
           // Internal retries are disabled: the block wrapper owns retries, and
           // the hard timeout guarantees a stuck fetch cannot stall the import.
-          { timeoutMs: BLOCK_TIMEOUT_MS, maxTokens: BLOCK_MAX_TOKENS, maxRetries: 0 }
+          { timeoutMs: blockTimeoutMs(), maxTokens: BLOCK_MAX_TOKENS, maxRetries: 0 }
         );
+        // A block is ~15 questions of text, so an empty list is never a valid
+        // answer: the model bailed, truncated, or returned a shape we could
+        // not read. Treating it as a SUCCESS silently dropped every question
+        // in the block and the paper imported as "no questions" with no
+        // warning at all. Fail it so it retries and is eventually reported.
+        const list = Array.isArray(result) ? result : result?.questions;
+        if (!Array.isArray(list) || list.length === 0) {
+          throw new AIError('block returned no questions');
+        }
+        return result;
       } catch (err) {
         const isTimeout = err && err.name === 'AIError' && /timed out/i.test(err.message);
-        if (attempt < BLOCK_RETRIES) {
+        if (attempt < retries) {
           await delay(500 * (attempt + 1));
           continue;
         }
@@ -1371,7 +1400,7 @@ Rules:
   const failed = [];
   for (let i = 0; i < settled.length; i++) if (!settled[i]) failed.push(i);
   if (failed.length) {
-    const rerun = await mapLimit(failed.map((i) => blockPrompts[i]), 1, runBlock);
+    const rerun = await mapLimit(failed.map((i) => blockPrompts[i]), 1, (bp) => runBlock(bp, BLOCK_RETRIES));
     for (let k = 0; k < rerun.length; k++) if (rerun[k]) settled[failed[k]] = rerun[k];
     const stillFailed = failed.filter((_, k) => !rerun[k]);
     if (stillFailed.length && onWarning) {

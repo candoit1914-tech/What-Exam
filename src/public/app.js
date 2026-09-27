@@ -41,7 +41,13 @@ async function api(path, opts = {}) {
     showLanding();
     throw new Error(data.error || 'Session expired — please sign in.');
   }
-  if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
+  if (!res.ok) {
+    // Carry the status so callers can tell a permanent failure (gone, bad
+    // request, unauthenticated) from a retryable one, instead of guessing.
+    const err = new Error(data.error || `Request failed (${res.status})`);
+    err.status = res.status;
+    throw err;
+  }
 
   if (key) _cache.set(key, { data, ts: Date.now() });
   return data;
@@ -1236,11 +1242,22 @@ function pollPdfJob(examId, div, jobId) {
     try {
       job = await api(`/api/jobs/${jobId}`);
       misses = 0;
-    } catch {
-      // Don't silently freeze on the last stage: tell the user the server
-      // went away and keep retrying (it recovers after a redeploy).
+    } catch (e) {
+      // Retry only what can plausibly recover. A 404 will never come back
+      // (job row gone / server restarted losing it) and a 401 needs a new
+      // sign-in; reporting those as "Server unreachable — retrying" is what
+      // left users staring at a spinner that could never resolve.
+      const permanent = e.status === 404 || e.status === 401;
       misses++;
-      update(`<span class="spinner"></span> Server unreachable — retrying… (attempt ${misses})`);
+      if (permanent || misses > 8) {
+        clearInterval(timer);
+        div.remove();
+        toast(e.message || 'Lost contact with the extraction job.', true);
+        return;
+      }
+      // Don't silently freeze on the last stage: keep retrying, it recovers
+      // after a redeploy.
+      update(`<span class="spinner"></span> Connection interrupted — retrying… (attempt ${misses})`);
       return;
     }
     update(`<span class="spinner"></span> ${esc(job.stage || 'Processing…')} <strong>${job.progress || 0}%</strong>`);

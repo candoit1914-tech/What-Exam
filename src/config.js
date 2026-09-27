@@ -47,6 +47,11 @@ const config = {
     apiKey: valid(process.env.AI_API_KEY) ? process.env.AI_API_KEY : '',
     model: process.env.AI_MODEL || 'gpt-4o-mini',
     timeoutMs: parseInt(process.env.AI_TIMEOUT_MS || '120000', 10),
+    // Per-block budget for PDF question extraction. This is deliberately much
+    // larger than timeoutMs: a block that overruns is not retried into
+    // oblivion, it is SKIPPED, so a tight budget silently deletes questions.
+    // Measured on a real 17-page paper: blocks took 28s-89s to answer.
+    blockTimeoutMs: parseInt(process.env.AI_BLOCK_TIMEOUT_MS || '240000', 10),
     vision: process.env.AI_VISION === 'true',
   },
 

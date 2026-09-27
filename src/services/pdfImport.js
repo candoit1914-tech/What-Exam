@@ -223,11 +223,16 @@ async function startJob(jobId, buffer, opts = {}) {
       ...(sourceText.diagnostics || {}) });
     if (!parsed.length) {
       console.warn('[pdf-import] extraction produced no questions', { jobId });
+      // Surface WHY. A paper that parses to nothing is almost always blocks
+      // timing out against a slow provider, and "no questions" alone sends the
+      // user hunting for a problem in their PDF that isn't there.
       throw new Error(
         'No questions could be parsed from this PDF. ' +
-        (isOcr
-          ? 'The scanned text may be too unclear for the AI to identify question patterns. Try a clearer scan or manually add questions.'
-          : 'The document may not contain exam questions in a recognizable format.')
+        (blockWarning
+          ? blockWarning + ' The AI provider did not answer in time — try again, or raise AI_BLOCK_TIMEOUT_MS if it keeps happening.'
+          : isOcr
+            ? 'The scanned text may be too unclear for the AI to identify question patterns. Try a clearer scan or manually add questions.'
+            : 'The document may not contain exam questions in a recognizable format.')
       );
     }
 
