@@ -23,7 +23,8 @@ CREATE TABLE IF NOT EXISTS exams (
   total_marks     REAL NOT NULL DEFAULT 0,
   created_at      TEXT NOT NULL DEFAULT (datetime('now')),
   published_at    TEXT,
-  ended_at        TEXT
+  ended_at        TEXT,
+  max_attempts    INTEGER NOT NULL DEFAULT 0     -- attempts allowed per student; 0 = unlimited
 );
 
 CREATE TABLE IF NOT EXISTS questions (
@@ -77,7 +78,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   final_score     REAL DEFAULT 0,
   final_percentage REAL DEFAULT 0,
   passed          INTEGER DEFAULT 0,
-  UNIQUE(exam_id, student_id)
+  attempt_no      INTEGER NOT NULL DEFAULT 1
 );
 
 CREATE TABLE IF NOT EXISTS answers (
@@ -151,6 +152,23 @@ CREATE TABLE IF NOT EXISTS outbound_messages (
 CREATE INDEX IF NOT EXISTS idx_outbound_message_id ON outbound_messages(message_id);
 CREATE INDEX IF NOT EXISTS idx_outbound_recipient ON outbound_messages(recipient);
 
+CREATE TABLE IF NOT EXISTS message_outbox (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  question_id INTEGER NOT NULL DEFAULT 0,
+  q_order INTEGER,
+  kind TEXT NOT NULL,
+  recipient TEXT NOT NULL,
+  state TEXT NOT NULL DEFAULT 'queued',
+  attempts INTEGER NOT NULL DEFAULT 0,
+  error TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  sent_at TEXT,
+  updated_at TEXT,
+  UNIQUE(session_id, question_id, kind)
+);
+CREATE INDEX IF NOT EXISTS idx_outbox_state ON message_outbox(state);
+
 -- Background jobs (e.g. PDF question import). Long-running AI work runs here
 -- so the HTTP request returns instantly instead of blocking on slow models.
 CREATE TABLE IF NOT EXISTS jobs (
@@ -183,6 +201,8 @@ CREATE TABLE IF NOT EXISTS question_images (
 );
 CREATE INDEX IF NOT EXISTS idx_question_images_question ON question_images(question_id, position);
 CREATE INDEX IF NOT EXISTS idx_sessions_exam ON sessions(exam_id);
+-- One live attempt per (exam, student); finished attempts accumulate freely.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_active ON sessions(exam_id, student_id) WHERE status = 'in_progress';
 CREATE INDEX IF NOT EXISTS idx_answers_session ON answers(session_id, q_order);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_answers_session_question ON answers(session_id, question_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_schemes_question ON marking_schemes(question_id);
@@ -229,6 +249,76 @@ ensureColumn('jobs', 'warning', "TEXT DEFAULT ''");
 ensureColumn('questions', 'follow_ups', "TEXT DEFAULT '[]'");
 ensureColumn('question_pool', 'follow_ups', "TEXT DEFAULT '[]'");
 ensureColumn('sessions', 'retry_count', "INTEGER NOT NULL DEFAULT 0");
+ensureColumn('sessions', 'attempt_no', 'INTEGER NOT NULL DEFAULT 1');
+// exams has no settings blob, so the per-exam attempt cap is a plain column.
+ensureColumn('exams', 'max_attempts', 'INTEGER NOT NULL DEFAULT 0');
+
+// Migration: the table-level UNIQUE(exam_id, student_id) made a second attempt
+// impossible. The constraint lives in the CREATE TABLE and cannot be dropped in
+// place, so the table is rebuilt. Mirrors the answers rebuild below, and keeps
+// every existing column so no history is lost.
+const sessionsDdl = db
+  .prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='sessions'")
+  .get();
+if (sessionsDdl && /UNIQUE\s*\(\s*exam_id\s*,\s*student_id\s*\)/i.test(sessionsDdl.sql)) {
+  db.exec('PRAGMA foreign_keys = OFF');
+  try {
+    db.exec(`
+      BEGIN;
+      CREATE TABLE sessions_new (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        exam_id         INTEGER NOT NULL REFERENCES exams(id) ON DELETE CASCADE,
+        student_id      INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+        current_q_order INTEGER NOT NULL DEFAULT 1,
+        status          TEXT NOT NULL DEFAULT 'in_progress',
+        started_at      TEXT NOT NULL DEFAULT (datetime('now')),
+        last_active_at  TEXT NOT NULL DEFAULT (datetime('now')),
+        ended_at        TEXT,
+        final_score     REAL DEFAULT 0,
+        final_percentage REAL DEFAULT 0,
+        passed          INTEGER DEFAULT 0,
+        retry_count     INTEGER NOT NULL DEFAULT 0,
+        attempt_no      INTEGER NOT NULL DEFAULT 1
+      );
+      INSERT INTO sessions_new
+        (id, exam_id, student_id, current_q_order, status, started_at, last_active_at,
+         ended_at, final_score, final_percentage, passed, retry_count, attempt_no)
+      SELECT
+        id, exam_id, student_id, current_q_order, status, started_at, last_active_at,
+        ended_at, final_score, final_percentage, passed, COALESCE(retry_count, 0), 1
+      FROM sessions;
+      DROP TABLE sessions;
+      ALTER TABLE sessions_new RENAME TO sessions;
+      COMMIT;
+    `);
+    console.log('Migrated sessions table (removed unique exam/student constraint for attempts).');
+  } finally {
+    db.exec('PRAGMA foreign_keys = ON');
+  }
+}
+
+// Number historical attempts oldest-first so a resumed exam continues the
+// sequence instead of restarting it at 1.
+db.exec(`
+  UPDATE sessions SET attempt_no = (
+    SELECT COUNT(*) FROM sessions s2
+     WHERE s2.exam_id = sessions.exam_id
+       AND s2.student_id = sessions.student_id
+       AND s2.id <= sessions.id
+  )
+`);
+
+// The partial unique index can only be created once at most one live attempt
+// remains per (exam, student); retire any older duplicates first.
+db.exec(`
+  UPDATE sessions SET status = 'abandoned'
+   WHERE status = 'in_progress'
+     AND id NOT IN (
+       SELECT MAX(id) FROM sessions WHERE status = 'in_progress' GROUP BY exam_id, student_id
+     )
+`);
+db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_active
+  ON sessions(exam_id, student_id) WHERE status = 'in_progress'`);
 
 // Migration: add unique constraint on answers(session_id, question_id) to prevent
 // duplicate answers from race conditions. SQLite doesn't support ADD CONSTRAINT

@@ -1,4 +1,5 @@
 'use strict';
+require('./helpers/isolate');
 const { test, before } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');

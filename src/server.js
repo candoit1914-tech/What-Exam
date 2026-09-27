@@ -1,6 +1,7 @@
 const express = require('express');
 const path = require('path');
 const config = require('./config');
+const { checkConfig } = require('./services/configCheck');
 const api = require('./routes/api');
 const webhook = require('./routes/webhook');
 const results = require('./services/results');
@@ -274,24 +275,14 @@ if (require.main === module) {
     app.listen(config.port, '0.0.0.0', () => {
       console.log(`What Exam admin running at http://localhost:${config.port}`);
       console.log(`Webhook URL for WhatsApp: ${config.appUrl}/webhook/whatsapp`);
-      console.log(
-        config.whatsapp.accessToken
-          ? 'WhatsApp: configured ✓'
-          : 'WhatsApp: NOT configured (set WHATSAPP_* in .env)'
-      );
-      console.log(
-        config.ai.apiKey
-          ? `AI: configured (${config.ai.model}) ✓`
-          : 'AI: NOT configured (set AI_API_KEY/AI_BASE_URL in .env)'
-      );
-      if (config.admin.isGenerated) {
-        console.log('⚠️  No ADMIN_PASSWORD set — a random one was generated for this boot.');
-        console.log('    Set ADMIN_PASSWORD in your environment (Render env vars) to keep a stable password.');
+      const report = checkConfig(config, process.env);
+      for (const item of report.items) {
+        if (item.level === 'info' && item.status === 'set') continue;
+        console.warn(`[${item.level.toUpperCase()}] ${item.key} (${item.status}): ${item.problem}`);
+        if (item.fix) console.warn(`  Fix: ${item.fix}`);
       }
-      if (!config.whatsapp.appSecret) {
-        console.warn('⚠️  WHATSAPP_APP_SECRET not set — webhook POSTs are REJECTED.');
-        console.warn('    Set WHATSAPP_APP_SECRET in .env to receive student replies from WhatsApp.');
-      }
+      if (!report.ok) console.warn(`${report.counts.critical} critical configuration gap(s). Run: npm run config:check`);
+      console.log('Configuration check is local; credentials, template approval and reachability are not verified.');
     });
   };
   run().catch((e) => {

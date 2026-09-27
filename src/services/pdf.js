@@ -3,6 +3,27 @@ const path = require('path');
 const config = require('../config');
 const { stripMarkers } = require('./textClean');
 
+function diag(event, details) {
+  if (process.env.PDF_DIAG === '1') console.log('[pdf:diag]', event, details);
+}
+
+// PNG byte size does not establish whether a small formula is blank. Inspect
+// actual pixels only in diagnostic mode, treating white/transparent as paper.
+function diagnoseRender(canvas, page, kind) {
+  if (process.env.PDF_DIAG !== '1') return;
+  const pixels = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data;
+  let visible = false;
+  for (let i = 0; i < pixels.length; i += 4) {
+    if (pixels[i + 3] > 0 && Math.min(pixels[i], pixels[i + 1], pixels[i + 2]) < 250) {
+      visible = true;
+      break;
+    }
+  }
+  const details = { page, kind, width: canvas.width, height: canvas.height, blank: !visible };
+  diag('render', details);
+  if (!visible) console.warn('[pdf] blank render', details);
+}
+
 let pdfjs = null;
 function loadPdfjs() {
   if (!pdfjs) {
@@ -410,7 +431,7 @@ async function analyzePage(doc, pageNo, mathBase = 0) {
   exprs.forEach((ex, n) => {
     const host = findMathHostRow(rows, ex);
     if (!host) {
-      console.warn(`[pdf] math expr at (${ex.cx.toFixed(1)}, ${ex.cy.toFixed(1)}) had no host row`);
+      console.warn('[pdf] math marker has no host row', { page: pageNo, marker: `[MATH:${mathBase + n}]` });
       return;
     }
     (host.__splices = host.__splices || []).push({ cx: ex.cx, marker: `[MATH:${mathBase + n}]` });
@@ -424,6 +445,8 @@ async function analyzePage(doc, pageNo, mathBase = 0) {
     row.__splices.sort((a, b) => a.cx - b.cx);
     spliceMarkersInto(row);
   }
+  diag('page extraction', { page: pageNo, rows: rows.length, mathExpressions: exprs.length,
+    mathMarkers: rows.reduce((n, row) => n + (row.line.match(/\[MATH:\d+\]/g) || []).length, 0) });
   return { paints, rows, mathExprs: exprs, width: vp.width, height: vp.height };
 }
 
@@ -913,7 +936,15 @@ async function textWithMarkers(buffer) {
     markers.push({ idx: ins.idx, page: ins.page });
   }
   markers.sort((a, b) => a.idx - b.idx);
-  return { text: lines.join('\n'), markers, images, mathExprs, _ocr: !!_ocr };
+  const text = lines.join('\n');
+  const found = new Set(Array.from(text.matchAll(/\[MATH:(\d+)\]/g), (m) => Number(m[1])));
+  const missing = (mathExprs || []).map((ex, idx) => ({ page: ex.page, marker: `[MATH:${idx}]`, idx }))
+    .filter((entry) => !found.has(entry.idx));
+  const diagnostics = { pages: rowsByPage.length, imageMarkers: markers.length,
+    mathExpressions: (mathExprs || []).length, mathMarkers: found.size, missingMathMarkers: missing.length };
+  if (missing.length) console.warn('[pdf] math markers missing from extracted text', { count: missing.length });
+  diag('extraction summary', diagnostics);
+  return { text, markers, images, mathExprs, _ocr: !!_ocr, diagnostics };
 }
 
 // A canvas 2D context that accepts every call pdfjs's renderer makes but
@@ -986,11 +1017,8 @@ async function renderImage(buffer, image, outPath) {
   if (image.rasterId) {
     try { img = page.objs.get(String(image.rasterId)); } catch { img = null; }
   }
-  if (!img || !img.width) {
-    for (const [, v] of page.objs) {
-      if (v && v.width && v.height) { img = v; break; }
-    }
-  }
+  // An unrelated decoded bitmap (for example a logo) is never a valid
+  // substitute for the requested raster. Use the page crop below instead.
   const cw = Math.max(1, Math.round((image.w || 1) * 2));
   const ch = Math.max(1, Math.round((image.h || 1) * 2));
   const out = createCanvas(cw, ch);
@@ -1010,11 +1038,9 @@ async function renderImage(buffer, image, outPath) {
       const full = await replayPageOps(page, vp);
       const pad = 4;
       octx.drawImage(full, image.x - pad, image.y - pad, image.w + pad * 2, image.h + pad * 2, 0, 0, cw, ch);
-    } catch {
-      // Last resort: grey placeholder
-      console.warn('[pdf] image render fallback failed, drawing placeholder');
-      octx.fillStyle = '#d9d9d9';
-      octx.fillRect(0, 0, cw, ch);
+    } catch (err) {
+      console.warn('[pdf] image render failed', { page: image.page });
+      throw err;
     }
   }
   fs.writeFileSync(outPath, out.toBuffer('image/png'));
@@ -1231,10 +1257,10 @@ async function renderMathRegion(buffer, expr, outPath, scale = 4, pageCache) {
     }
     octx.drawImage(canvas, expr.x * scale, expr.y * scale, cw, ch, 0, 0, cw, ch);
   } catch (err) {
-    console.warn(`[pdf] math region render failed (p${expr.page}): ${err.message}`);
-    octx.fillStyle = '#ffffff';
-    octx.fillRect(0, 0, cw, ch);
+    console.warn('[pdf] math region render failed', { page: expr.page });
+    throw err;
   }
+  diagnoseRender(out, expr.page, 'math');
   fs.writeFileSync(outPath, out.toBuffer('image/png'));
   return outPath;
 }

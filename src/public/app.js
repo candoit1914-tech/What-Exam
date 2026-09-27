@@ -678,12 +678,13 @@ async function renderTab() {
       </div>
       <div class="card" style="margin-top:14px">
         <h3 style="margin-bottom:4px">ADD MANY <span class="gr">RECIPIENTS</span></h3>
-        <p class="muted qmeta">Comma or newline separated, any country format.</p>
+        <p class="muted qmeta">One per line &mdash; "Name Phone". Newline, comma, semicolon or pipe separated. Any country format.</p>
         <textarea id="phones_input" placeholder="Name Phone&#10;e.g. Boamah Bryan Ntim 0242004542&#10;Munirat Bint Essah 0550057465&#10;+1 555 123 4567"></textarea>
         <div class="row" style="margin-top:12px">
           <button class="btn btn-primary" onclick="addRecipients(${id})">Add Recipients</button>
           <button class="btn btn-ghost" onclick="sendExam(${id})">${I.wa} Send Exam to Recipients</button>
         </div>
+        <div id="recipientReview" hidden></div>
       </div>
       ${totalR > 0 ? `
       <div class="card" style="margin-top:14px">
@@ -1292,6 +1293,37 @@ async function regenerateScheme(id, qid) {
 
 // ── Recipients ───────────────────────────────────────────────────
 
+// Renders the Task 4 report into the host in the ADD MANY RECIPIENTS card:
+// name conflicts the server resolved by keeping the stored name, and input it
+// could not turn into a phone. Silent dedupe reads to the admin as data loss.
+function renderRecipientReview(report) {
+  var host = document.getElementById('recipientReview');
+  if (!host) return;
+  var parts = [];
+  if (report.conflicts && report.conflicts.length) {
+    parts.push('<div class="warn-box"><b class="warn">' + report.conflicts.length +
+      ' name conflict' + (report.conflicts.length === 1 ? '' : 's') +
+      ' &mdash; kept the existing name:</b><ul>');
+    for (var i = 0; i < report.conflicts.length; i++) {
+      var c = report.conflicts[i];
+      parts.push('<li>' + esc(c.phone) + ': kept &quot;' + esc(c.existingName) +
+        '&quot;, ignored &quot;' + esc(c.incomingName) + '&quot;</li>');
+    }
+    parts.push('</ul></div>');
+  }
+  if (report.invalid && report.invalid.length) {
+    parts.push('<div class="fail-box"><b class="fail">' + report.invalid.length +
+      ' could not be added:</b><ul>');
+    for (var j = 0; j < report.invalid.length; j++) {
+      parts.push('<li>&quot;' + esc(report.invalid[j].input) + '&quot; &mdash; ' +
+        esc(report.invalid[j].reason) + '</li>');
+    }
+    parts.push('</ul></div>');
+  }
+  host.innerHTML = parts.join('');
+  host.hidden = parts.length === 0;
+}
+
 async function addStudent(id) {
   const name = document.querySelector('#stu_name').value.trim();
   const phone = document.querySelector('#stu_phone').value.trim();
@@ -1300,29 +1332,52 @@ async function addStudent(id) {
   try {
     const res = await api(`/api/exams/${id}/recipients`, { method: 'POST', body: { students: [{ name, phone }] } });
     invalidateCache(`/api/exams/${id}`);
-    toast(`Added ${res.added[0]?.name || 'student'}.`);
-    renderExam(id);
+    if (res.conflicts && res.conflicts.length) {
+      const c = res.conflicts[0];
+      toast(`Kept the existing name "${c.existingName}" for ${c.phone}; ignored "${c.incomingName}".`, true);
+    } else if (res.invalid && res.invalid.length) {
+      // Checked before `added`: a rejected number was NOT already on the list,
+      // and saying so would hide the reason it was refused.
+      const v = res.invalid[0];
+      toast(`Rejected ${v.input}: ${v.reason}`, true);
+    } else if (res.added.length) {
+      toast(`Added ${res.added[0]?.name || 'student'}.`);
+    } else {
+      toast('Already on the list — no change.', true);
+    }
+    await renderExam(id);
   } catch (e) { toast(e.message, true); }
 }
 
 async function addRecipients(id) {
-  const lines = document.querySelector('#phones_input').value.split(/[\n,]+/).map((p) => p.trim()).filter(Boolean);
-  if (!lines.length) return toast('Enter at least one phone number.', true);
-  const students = lines.map((line) => {
-    const match = line.match(/([\d+\s()-]+)$/);
-    if (match) {
-      const phone = match[1].replace(/[\s()-]/g, '');
-      const name = line.slice(0, match.index).trim();
-      return { phone, name };
-    }
-    return { phone: line, name: '' };
-  }).filter((s) => s.phone);
+  const raw = document.querySelector('#phones_input').value;
+  const students = window.RecipientInput.parseRecipientInput(raw);
   if (!students.length) return toast('Enter at least one phone number.', true);
   try {
     const res = await api(`/api/exams/${id}/recipients`, { method: 'POST', body: { students } });
     invalidateCache(`/api/exams/${id}`);
-    toast(`Added ${res.added.length} recipient(s).`);
-    renderExam(id);
+    // New / already-on-the-list / rejected, not just the new count: a re-paste
+    // adds nothing and must not read as a failure. res.counts is always sent
+    // by the route; the fallback is only for a hand-rolled response.
+    const c = res.counts || { added: res.added.length, merged: res.merged };
+    const bits = [`${c.added} new`];
+    if (c.merged) bits.push(`${c.merged} already on the list`);
+    if (res.invalid && res.invalid.length) bits.push(`${res.invalid.length} rejected`);
+    toast(bits.join(', ') + '.');
+    // AFTER the await: renderExam assigns #view innerHTML, which destroys the host.
+    // A failed refetch must not swallow the report below — the conflict list is
+    // the whole point of this call, and it is the only record of a name
+    // mismatch the admin would otherwise have to find by eye.
+    let refetchFailed = false;
+    try {
+      await renderExam(id);
+    } catch {
+      refetchFailed = true;
+    }
+    renderRecipientReview(res);
+    if (refetchFailed) {
+      toast('Saved, but the recipient list could not be refreshed. Reload the page to see it.', true);
+    }
   } catch (e) { toast(e.message, true); }
 }
 

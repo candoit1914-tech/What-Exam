@@ -10,6 +10,7 @@ const pdfImport = require('../services/pdfImport');
 const examService = require('../services/exam');
 const results = require('../services/results');
 const config = require('../config');
+const { checkConfig } = require('../services/configCheck');
 const auth = require('../auth');
 
 const router = express.Router();
@@ -146,6 +147,11 @@ function asyncWrap(fn) {
 
 // ── Stats ──────────────────────────────────────────────────────────────
 
+router.get('/config-check', (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.json(checkConfig(config, process.env));
+});
+
 router.get('/stats', (req, res) => {
   res.json({
     exams: db.prepare('SELECT COUNT(*) c FROM exams').get().c,
@@ -279,30 +285,26 @@ router.delete('/exams/:id', (req, res) => {
 
 router.post('/exams/:id/recipients', (req, res) => {
   const { phones, students } = req.body || {};
-  const list = [];
+  const entries = [];
   if (Array.isArray(students)) {
     for (const s of students) {
-      if (s && s.phone) list.push({ phone: s.phone, name: s.name || '' });
+      if (s && s.phone) entries.push({ phone: s.phone, name: s.name || '' });
     }
   } else {
-    for (const p of (Array.isArray(phones) ? phones : [phones])) {
-      if (p) list.push({ phone: p, name: '' });
+    const flat = Array.isArray(phones) ? phones : [phones];
+    for (const p of flat) {
+      if (typeof p !== 'string') continue;
+      // One pasted string may hold many numbers; tokenize before validating
+      // so a semicolon- or space-separated list is not lost as a single
+      // invalid entry.
+      for (const token of examService.splitRecipients(p)) {
+        entries.push({ phone: token, name: '' });
+      }
     }
   }
-  const added = [];
-  for (const item of list) {
-    const phone = examService.normalizePhone(item.phone);
-    if (!phone) continue;
-    const student = examService.getOrCreateStudent(phone);
-    if (item.name) {
-      db.prepare('UPDATE students SET name = ? WHERE id = ?').run(String(item.name), student.id);
-    }
-    db.prepare(
-      `INSERT OR IGNORE INTO exam_recipients (exam_id, student_id) VALUES (?, ?)`
-    ).run(req.params.id, student.id);
-    added.push({ id: student.id, phone, name: item.name || student.name });
-  }
-  res.json({ added });
+
+  const report = examService.addRecipients(req.params.id, entries);
+  res.json({ ...report, counts: { added: report.added.length, merged: report.merged } });
 });
 
 router.delete('/exams/:id/recipients/:studentId', (req, res) => {
@@ -371,8 +373,8 @@ router.post('/exams/:id/questions/batch', asyncWrap(async (req, res) => {
 
   let nextOrder = (db.prepare('SELECT MAX(q_order) m FROM questions WHERE exam_id = ?').get(exam.id).m || 0) + 1;
   const insert = db.prepare(
-    `INSERT INTO questions (exam_id, q_order, type, text, passage, options, correct_answer, marks, difficulty, learning_objective, explanation, source)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`
+    `INSERT INTO questions (exam_id, q_order, type, text, passage, options, correct_answer, marks, difficulty, learning_objective, explanation, source, image)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`
   );
   const insertScheme = db.prepare(
     `INSERT INTO marking_schemes (question_id, type, scheme) VALUES (?, ?, ?)
@@ -393,7 +395,10 @@ router.post('/exams/:id/questions/batch', asyncWrap(async (req, res) => {
           : null,
         q.correct_answer || null,
         marks, q.difficulty || 'medium', q.learning_objective || '', q.explanation || '',
-        q.source || 'manual'
+        q.source || 'manual',
+        // Column list, placeholder count and bound values must move together —
+        // a dropped column silently discards the diagram instead of erroring.
+        q.image || ''
       );
       const qid = info.lastInsertRowid;
       created.push(qid);
@@ -646,12 +651,12 @@ router.post('/exams/:id/generate', asyncWrap(async (req, res) => {
 
   let nextOrder = (db.prepare('SELECT MAX(q_order) m FROM questions WHERE exam_id = ?').get(exam.id).m || 0) + 1;
   const insert = db.prepare(
-    `INSERT INTO questions (exam_id, q_order, type, text, passage, options, correct_answer, marks, difficulty, learning_objective, explanation, source)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`
+    `INSERT INTO questions (exam_id, q_order, type, text, passage, options, correct_answer, marks, difficulty, learning_objective, explanation, source, image)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`
   );
   const insertPool = db.prepare(
-    `INSERT INTO question_pool (exam_id, type, text, passage, options, correct_answer, marks, difficulty, learning_objective, explanation, scheme_json, source)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`
+    `INSERT INTO question_pool (exam_id, type, text, passage, options, correct_answer, marks, difficulty, learning_objective, explanation, scheme_json, source, image)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`
   );
   const created = [];
   for (const g of active) {
@@ -661,7 +666,10 @@ router.post('/exams/:id/generate', asyncWrap(async (req, res) => {
       const info = insert.run(
         exam.id, nextOrder, 'objective', g.text, g.passage || '', JSON.stringify(opts),
         correct || null, parseFloat(g.marks) || 1,
-        g.difficulty || 'medium', g.learning_objective || '', g.explanation || '', 'ai'
+        g.difficulty || 'medium', g.learning_objective || '', g.explanation || '', 'ai',
+        // A generated diagram is a real artefact: dropping it here left the
+        // student with an unanswerable question and no error anywhere.
+        g.image || ''
       );
       created.push(info.lastInsertRowid);
       const oq = db.prepare('SELECT * FROM questions WHERE id = ?').get(info.lastInsertRowid);
@@ -677,7 +685,8 @@ router.post('/exams/:id/generate', asyncWrap(async (req, res) => {
     } else {
       const info = insert.run(
         exam.id, nextOrder, 'theory', g.text, g.passage || '', null, null,
-        parseFloat(g.marks) || 5, g.difficulty || 'medium', g.learning_objective || '', '', 'ai'
+        parseFloat(g.marks) || 5, g.difficulty || 'medium', g.learning_objective || '', '', 'ai',
+        g.image || ''
       );
       created.push(info.lastInsertRowid);
       const q = db.prepare('SELECT * FROM questions WHERE id = ?').get(info.lastInsertRowid);
@@ -699,26 +708,28 @@ router.post('/exams/:id/generate', asyncWrap(async (req, res) => {
     if (g.type === 'objective') {
       const opts = (g.options || []).map((t, i) => ({ key: String.fromCharCode(65 + i), text: t }));
       const correct = g.correct_index != null ? opts[g.correct_index]?.key : g.correct_answer;
-      insertPool.run(
-        exam.id, 'objective', g.text, g.passage || '', JSON.stringify(opts), correct || null,
-        parseFloat(g.marks) || 1, g.difficulty || 'medium', g.learning_objective || '', g.explanation || '',
-        JSON.stringify({ type: 'objective', correct_answer: correct || null, marks: parseFloat(g.marks) || 1, explanation: g.explanation || '' }),
-        'ai'
-      );
+        insertPool.run(
+          exam.id, 'objective', g.text, g.passage || '', JSON.stringify(opts), correct || null,
+          parseFloat(g.marks) || 1, g.difficulty || 'medium', g.learning_objective || '', g.explanation || '',
+          JSON.stringify({ type: 'objective', correct_answer: correct || null, marks: parseFloat(g.marks) || 1, explanation: g.explanation || '' }),
+          'ai',
+          g.image || ''
+        );
     } else {
-      insertPool.run(
-        exam.id, 'theory', g.text, g.passage || '', null, null,
-        parseFloat(g.marks) || 5, g.difficulty || 'medium', g.learning_objective || '', '',
-        JSON.stringify({
-          type: 'theory',
-          model_answer: g.model_answer || '',
-          key_points: g.key_points || [],
-          rubric: g.rubric || [],
-          presentation_marks: g.presentation_marks || 0,
-          grammar_marks: g.grammar_marks || 0,
-        }),
-        'ai'
-      );
+        insertPool.run(
+          exam.id, 'theory', g.text, g.passage || '', null, null,
+          parseFloat(g.marks) || 5, g.difficulty || 'medium', g.learning_objective || '', '',
+          JSON.stringify({
+            type: 'theory',
+            model_answer: g.model_answer || '',
+            key_points: g.key_points || [],
+            rubric: g.rubric || [],
+            presentation_marks: g.presentation_marks || 0,
+            grammar_marks: g.grammar_marks || 0,
+          }),
+          'ai',
+          g.image || ''
+        );
     }
   }
   marking.recomputeExamTotal(exam.id);

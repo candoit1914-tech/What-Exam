@@ -6,6 +6,10 @@ const path = require('path');
 const config = require('../config');
 const { stripSourceWatermarks } = require('./textClean');
 
+function diag(event, details) {
+  if (process.env.PDF_DIAG === '1') console.log('[pdf-import:diag]', event, details);
+}
+
 // ── Import helpers ─────────────────────────────────────────────────────
 
 /**
@@ -69,29 +73,42 @@ function imageFileNameFor(examId, qOrder, markerIndex, now = Date.now()) {
  * `pageCache` renders each page at most once.
  */
 async function storeMathImages(g, questionId, mathExprs, pageCache, buffer, examId, qOrder) {
-  if (!Array.isArray(g.markerIndices) || !g.markerIndices.length) return;
-  const indices = g.markerIndices.slice().sort((a, b) => a - b);
+  const result = { requested: 0, attached: 0, failed: 0 };
+  if (!Array.isArray(g.markerIndices) || !g.markerIndices.length) return result;
+  const indices = [...new Set(g.markerIndices)].sort((a, b) => a - b);
+  result.requested = indices.length;
   // Insert AFTER all renders succeed so positions are never left scattered if
   // an earlier render throws mid-batch.
   const rows = [];
   for (const idx of indices) {
-    const expr = mathExprs[idx];
-    if (!expr) continue;
+    const expr = Number.isInteger(idx) && idx >= 0 ? mathExprs[idx] : null;
+    if (!expr) {
+      result.failed++;
+      diag('missing math expression', { questionId, marker: `[MATH:${idx}]` });
+      continue;
+    }
     try {
       const dest = path.join(config.uploadsDir, imageFileNameFor(examId, qOrder, idx));
       await pdf.renderMathRegion(buffer, expr, dest, 4, pageCache);
       rows.push(path.basename(dest));
     } catch (e) {
-      console.error('[pdfImport] math bubble render failed:', e.message);
+      result.failed++;
+      diag('math render failed', { questionId, page: expr.page, marker: `[MATH:${idx}]`, error: e.code || e.name });
     }
   }
-  if (!rows.length) return;
-  const insertImg = db.prepare(
-    `INSERT INTO question_images (question_id, position, image, kind) VALUES (?,?,?, 'math')`
-  );
-  for (let position = 0; position < rows.length; position++) {
-    insertImg.run(questionId, position, rows[position]);
+  for (const image of rows) {
+    try {
+      db.prepare(`INSERT INTO question_images (question_id, position, image, kind) VALUES (?,?,?, 'math')`)
+        .run(questionId, result.attached, image);
+      result.attached++;
+    } catch (e) {
+      result.failed++;
+      diag('math attachment failed', { questionId, error: e.code || e.name });
+    }
   }
+  if (result.failed) console.warn('[pdf-import] math attachments failed', { questionId, ...result });
+  diag('math attachments', { questionId, ...result });
+  return result;
 }
 
 // ── Job store ──────────────────────────────────────────────────────────
@@ -202,7 +219,10 @@ async function startJob(jobId, buffer, opts = {}) {
       (warning) => { blockWarning = warning; },
       { markers: sourceText.markers, mathMarkers: sourceText.mathExprs }
     );
+    diag('question extraction', { jobId, questions: parsed.length,
+      ...(sourceText.diagnostics || {}) });
     if (!parsed.length) {
+      console.warn('[pdf-import] extraction produced no questions', { jobId });
       throw new Error(
         'No questions could be parsed from this PDF. ' +
         (isOcr
@@ -302,8 +322,13 @@ async function startJob(jobId, buffer, opts = {}) {
                 : pdf.renderImage(buffer, entry, dest))
             );
           } catch (e) {
-            console.error('[pdfImport] image render failed:', e.message);
+            console.warn('[pdf-import] diagram attachment failed', { jobId, questionOrder: nextOrder,
+              marker: `[IMG:${g.markerIndex}]`, page: entry.page });
+            diag('diagram render error', { jobId, error: e.code || e.name });
           }
+        } else {
+          console.warn('[pdf-import] diagram marker has no image', { jobId, questionOrder: nextOrder,
+            marker: `[IMG:${g.markerIndex}]` });
         }
       }
 

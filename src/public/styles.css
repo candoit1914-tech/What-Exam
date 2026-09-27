@@ -1073,6 +1073,15 @@ tbody td a:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--green); }
 .pass { color: var(--green-light); font-weight: 700; }
 .fail { color: var(--red); font-weight: 700; }
 
+/* Recipient import review (name conflicts / rejected input) */
+.warn { color: var(--amber); font-weight: 700; }
+.warn-box, .fail-box {
+  margin-top: 12px; padding: 10px 12px; border-radius: var(--radius-sm);
+  background: var(--bg-surface); border: 1px solid var(--glass-border);
+}
+.warn-box { border-left: 3px solid var(--amber); }
+.fail-box { border-left: 3px solid var(--red); }
+
 /* ── Tabs ────────────────────────────────────────────────── */
 .tabbar {
   display: flex;

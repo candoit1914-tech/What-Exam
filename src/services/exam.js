@@ -8,6 +8,7 @@ const results = require('./results');
 const certificate = require('./certificate');
 const ai = require('./ai');
 const ocr = require('./ocr');
+const outbox = require('./outbox');
 const { stripSourceWatermarks } = require('./textClean');
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -43,30 +44,54 @@ async function drainSession(sessionId) {
 
 // ── Students ───────────────────────────────────────────────────────────
 
+/**
+ * Candidate phone formats, most specific first. A rule that matches owns the
+ * number outright. Length is validated BEFORE any country-code inference so a
+ * short national number can never be mistaken for an international one — the
+ * bug this table replaces checked `startsWith('1')` first, which turned every
+ * 9-digit Ghanaian number beginning with 1 into a 9-digit NANP fragment.
+ */
+const PHONE_RULES = [
+  // Explicit country code, with or without a stray national trunk 0. The
+  // number already carries the country code, so the build only strips that
+  // stray 0 — re-prefixing would double the country code.
+  { re: /^2330?\d{9}$/, build: (p) => p.replace(/^2330/, '233') },
+  { re: /^2340?\d{10}$/, build: (p) => p.replace(/^2340/, '234') },
+  // North American: country code 1 plus ten digits.
+  { re: /^1\d{10}$/, build: (p) => p },
+  // Ghana national: 0XXXXXXXXX (ten) or XXXXXXXXX (nine).
+  { re: /^0\d{9}$/, build: (p) => '233' + p.slice(1) },
+  { re: /^\d{9}$/, build: (p) => '233' + p },
+  // Nigeria national: 0XXXXXXXXXX (eleven) or XXXXXXXXXX (ten).
+  { re: /^0\d{10}$/, build: (p) => '234' + p.slice(1) },
+  // Ten digits beginning 2 is already an international local-part.
+  { re: /^2\d{9}$/, build: (p) => p },
+  // Remaining bare ten-digit numbers are Nigerian.
+  { re: /^\d{10}$/, build: (p) => '234' + p },
+];
+
 function normalizePhone(raw) {
-  let p = String(raw || '').replace(/[^\d]/g, '');
-  if (!p) return '';
-  // International dialing prefix 00 is equivalent to +; drop it.
-  if (p.startsWith('00')) p = p.slice(2);
-  // Already international (has a country code). Keep it, but strip a stray
-  // national-prefix 0 right after the country code (e.g. 2330269200946).
-  if (p.startsWith('233') || p.startsWith('234') || p.startsWith('1')) {
-    const cc = p.startsWith('234') ? '234' : p.startsWith('233') ? '233' : '1';
-    const national = p.slice(cc.length);
-    if (/^0\d/.test(national)) return cc + national.slice(1);
-    return cc + national;
+  const digits = String(raw == null ? '' : raw).replace(/[^\d]/g, '');
+  if (!digits) return '';
+  // 00 is the international access prefix; + was already stripped above.
+  const p = digits.startsWith('00') ? digits.slice(2) : digits;
+  for (const rule of PHONE_RULES) {
+    if (rule.re.test(p)) return rule.build(p);
   }
-  // Local number with a leading 0 (Ghana 0XX + 7 = 10 digits, Nigeria 0XX + 8 = 11 digits).
-  if (p.startsWith('0')) {
-    p = p.slice(1);
-    if (p.length === 9) return '233' + p; // Ghana local (0XX...) -> +233
-    if (p.length === 10) return '234' + p; // Nigeria local (0XX...) -> +234
-    return '233' + p; // conservative default: assume Ghana
-  }
-  // National number already missing its leading 0.
-  if (p.length === 9) return '233' + p; // Ghana
-  if (p.length === 10) return '234' + p; // Nigeria
-  return p; // already international (with country code, incl. 1, 233, 234, ...)
+  return '';
+}
+
+/**
+ * Split a pasted recipient list into raw tokens. Accepts commas, semicolons,
+ * pipes, tabs, newlines and runs of spaces. Does NOT validate: an invalid
+ * token must reach the caller so it can report the exact input and reason
+ * rather than silently disappearing.
+ */
+function splitRecipients(raw) {
+  return String(raw == null ? '' : raw)
+    .split(/[\s,;|]+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
 }
 
 function getOrCreateStudent(phone) {
@@ -76,6 +101,90 @@ function getOrCreateStudent(phone) {
     s = db.prepare('SELECT * FROM students WHERE id = ?').get(info.lastInsertRowid);
   }
   return s;
+}
+
+/**
+ * Link recipients to an exam, collapsing duplicates by normalized number.
+ *
+ * Runs in one transaction: `students.phone` is UNIQUE, so a read-then-write
+ * outside a transaction lets a concurrent import of the same new number raise
+ * SQLITE_CONSTRAINT_UNIQUE and lose every recipient in the batch.
+ *
+ * An existing student name ALWAYS wins. A differing incoming name is reported
+ * as a conflict for the admin to resolve — importing exam 2 must never rename
+ * a student on exam 1.
+ */
+function addRecipients(examId, entries) {
+  const added = [];
+  const conflicts = [];
+  const invalid = [];
+  let merged = 0;
+
+  const insertStudent = db.prepare('INSERT INTO students (phone, name) VALUES (?, ?)');
+  const findStudent = db.prepare('SELECT * FROM students WHERE phone = ?');
+  const linkRecipient = db.prepare(
+    'INSERT OR IGNORE INTO exam_recipients (exam_id, student_id) VALUES (?, ?)',
+  );
+
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    // Collapse on the normalized number, keeping first-seen order so the
+    // report reads in the order the admin pasted.
+    const byPhone = new Map();
+    for (const entry of entries || []) {
+      const raw = entry && entry.phone;
+      const phone = normalizePhone(raw);
+      if (!phone) {
+        invalid.push({ input: String(raw == null ? '' : raw), reason: 'Not a recognised phone number' });
+        continue;
+      }
+      const name = String((entry && entry.name) || '').trim();
+      const prior = byPhone.get(phone);
+      if (prior) {
+        // Same number pasted twice. It creates no second student, so it counts
+        // as merged: the admin pasted 5 lines and must be told 4 were folded
+        // into 1, not that nothing was a duplicate.
+        merged++;
+        // A name on the later copy that disagrees with the first is a
+        // conflict; an absent or equal one is not.
+        if (name && prior.name && name !== prior.name) {
+          conflicts.push({ phone, existingName: prior.name, incomingName: name });
+        } else if (name && !prior.name) {
+          prior.name = name;
+        }
+        continue;
+      }
+      byPhone.set(phone, { phone, name });
+    }
+
+    for (const { phone, name } of byPhone.values()) {
+      let student = findStudent.get(phone);
+      if (!student) {
+        insertStudent.run(phone, name);
+        // Re-read by phone, not by lastInsertRowid: findStudent filters on
+        // phone, and phone is UNIQUE, so this is the row just inserted.
+        student = findStudent.get(phone);
+        added.push({ id: student.id, phone, name: student.name || '' });
+      } else {
+        merged++;
+        if (name && !student.name) {
+          // Only ever fills a blank. Never overwrites a real name.
+          db.prepare('UPDATE students SET name = ? WHERE id = ?').run(name, student.id);
+          student = findStudent.get(phone);
+        } else if (name && student.name && name !== student.name) {
+          conflicts.push({ phone, existingName: student.name, incomingName: name });
+        }
+      }
+      linkRecipient.run(examId, student.id);
+    }
+
+    db.exec('COMMIT');
+  } catch (err) {
+    db.exec('ROLLBACK');
+    throw err;
+  }
+
+  return { added, merged, conflicts, invalid };
 }
 
 // ── Sessions ───────────────────────────────────────────────────────────
@@ -94,15 +203,49 @@ function sessionHasNoAnswers(sessionId) {
   return db.prepare('SELECT COUNT(*) c FROM answers WHERE session_id = ?').get(sessionId).c === 0;
 }
 
+/** The student's unfinished attempt for this exam, if any. */
+function activeSession(examId, studentId) {
+  return db
+    .prepare("SELECT * FROM sessions WHERE exam_id = ? AND student_id = ? AND status='in_progress' ORDER BY id DESC LIMIT 1")
+    .get(examId, studentId);
+}
+
+/** Most recent attempt regardless of status — the one to report or restart. */
+function latestSession(examId, studentId) {
+  return db
+    .prepare('SELECT * FROM sessions WHERE exam_id = ? AND student_id = ? ORDER BY id DESC LIMIT 1')
+    .get(examId, studentId);
+}
+
+function attemptsUsed(examId, studentId) {
+  return db
+    .prepare('SELECT COUNT(*) c FROM sessions WHERE exam_id = ? AND student_id = ?')
+    .get(examId, studentId).c;
+}
+
+/** Attempts this exam allows. 0 (the default) or a missing exam means unlimited. */
+function maxAttemptsFor(examId) {
+  const row = db.prepare('SELECT max_attempts FROM exams WHERE id = ?').get(examId);
+  return Number((row && row.max_attempts) || config.exam.maxAttempts || 0);
+}
+
 function createSession(examId, studentId) {
-  // Use INSERT OR IGNORE to handle race conditions where two simultaneous
-  // inbound messages both try to create a session for the same student+exam.
-  const info = db
-    .prepare('INSERT OR IGNORE INTO sessions (exam_id, student_id) VALUES (?, ?)')
-    .run(examId, studentId);
-  if (info.changes === 0) {
-    // Another request created the session — fetch the existing one.
-    return db.prepare('SELECT * FROM sessions WHERE exam_id = ? AND student_id = ?').get(examId, studentId);
+  // An unfinished attempt always wins: resuming keeps the student's progress
+  // instead of silently starting over.
+  const active = activeSession(examId, studentId);
+  if (active) return active;
+
+  let info;
+  try {
+    info = db
+      .prepare('INSERT INTO sessions (exam_id, student_id, attempt_no) VALUES (?, ?, ?)')
+      .run(examId, studentId, attemptsUsed(examId, studentId) + 1);
+  } catch (err) {
+    // Two simultaneous inbound messages raced. The partial unique index kept
+    // one, so resume the winner rather than failing the student's message.
+    const raced = activeSession(examId, studentId);
+    if (raced) return raced;
+    throw err;
   }
   const session = db.prepare('SELECT * FROM sessions WHERE id = ?').get(info.lastInsertRowid);
   drawSessionQuestions(session.id, examId);
@@ -533,15 +676,27 @@ function resolveObjectiveLetter(question, body, meta = {}) {
 
 /** Reset a session to a fresh attempt (wipes previous answers + result). */
 function restartSession(session) {
-  db.prepare('DELETE FROM answers WHERE session_id = ?').run(session.id);
-  db.prepare('DELETE FROM session_questions WHERE session_id = ?').run(session.id);
-  db.prepare(
-    `UPDATE sessions SET status='in_progress', current_q_order=1, started_at=NULL,
-       last_active_at=datetime('now'), ended_at=NULL, final_score=0, final_percentage=0, passed=0,
-       retry_count=0
-     WHERE id = ?`
-  ).run(session.id);
-  const fresh = db.prepare('SELECT * FROM sessions WHERE id = ?').get(session.id);
+  const current = db.prepare('SELECT * FROM sessions WHERE id = ?').get(session.id) || session;
+  const used = attemptsUsed(current.exam_id, current.student_id);
+  const max = maxAttemptsFor(current.exam_id);
+  // Checked before anything is written so a refused restart leaves the
+  // existing attempt — and its answers — exactly as they were.
+  if (max > 0 && used >= max) {
+    throw new Error(
+      `Attempt limit reached for this exam (${max} attempt${max === 1 ? '' : 's'} allowed).`
+    );
+  }
+
+  // Retire the old row rather than rewriting it: its answers, score and
+  // timestamps stay queryable, and retiring frees the partial unique index for
+  // the new active attempt.
+  if (current.status === 'in_progress') {
+    db.prepare("UPDATE sessions SET status='abandoned' WHERE id = ?").run(current.id);
+  }
+  const info = db
+    .prepare('INSERT INTO sessions (exam_id, student_id, attempt_no) VALUES (?, ?, ?)')
+    .run(current.exam_id, current.student_id, used + 1);
+  const fresh = db.prepare('SELECT * FROM sessions WHERE id = ?').get(info.lastInsertRowid);
   drawSessionQuestions(fresh.id, fresh.exam_id);
   return fresh;
 }
@@ -565,14 +720,29 @@ function friendlyError(err) {
   return msg;
 }
 
-async function sendQuestionTo(session, student) {
+/**
+ * Record that a recipient has received the exam. `sent_at` is the single source
+ * of truth for "this number was actually reached" — the admin dashboard and the
+ * participation list both read it, so it is only stamped once a send succeeds.
+ *
+ * Driven off the session, not the caller-supplied student: some delivery paths
+ * only have the phone number in hand, and the session always carries both ids.
+ */
+function recordAcceptance(session) {
+  db.prepare(
+    `UPDATE exam_recipients SET sent_at = datetime('now')
+      WHERE exam_id = ? AND student_id = ? AND sent_at IS NULL`
+  ).run(session.exam_id, session.student_id);
+}
+
+async function sendQuestionTo(session, student, qOrder = null) {
   session = db.prepare('SELECT * FROM sessions WHERE id = ?').get(session.id);
   const exam = db.prepare('SELECT * FROM exams WHERE id = ?').get(session.exam_id);
   if (!exam || (exam.status !== 'published' && exam.status !== 'live')) {
     await wa.sendText(student.phone, `The exam for this session is no longer active. No more questions will be sent.`);
     return false;
   }
-  const question = getSessionQuestion(session.id, session.current_q_order);
+  const question = getSessionQuestion(session.id, qOrder == null ? session.current_q_order : qOrder);
   if (!question) {
     await finalize(session, student);
     return false;
@@ -643,7 +813,89 @@ async function sendQuestionTo(session, student) {
     await wa.sendText(student.phone, combined);
   }
 
+  recordAcceptance(session);
   return true;
+}
+
+/**
+ * Move the student on to `nextQ` and deliver it, without ever losing the fact
+ * that a question is owed.
+ *
+ * The position used to be advanced *before* the send, so a WhatsApp outage left
+ * the student pointing at a question they never received and the answer a
+ * re-send could not recover. Now the intent is written to the outbox first,
+ * the question is sent, and only a successful send advances the position. A
+ * crash or outage in between leaves a queued row that recoverQueuedSends()
+ * replays exactly once.
+ */
+async function advanceAndSend(session, student, nextQ) {
+  const entry = outbox.enqueue({
+    sessionId: session.id,
+    questionId: nextQ.id,
+    qOrder: nextQ.q_order,
+    kind: 'question',
+    recipient: student.phone,
+  });
+  // Already delivered on an earlier attempt: just move the position on.
+  if (entry.state === 'sent') {
+    commitAdvance(session.id, entry.q_order);
+    return;
+  }
+  try {
+    await sendQuestionTo(session, student, nextQ.q_order);
+    commitAdvance(session.id, nextQ.q_order, entry.id);
+  } catch (err) {
+    outbox.markFailed(entry.id, err, Math.max(1, config.exam.sendRetries));
+    throw err;
+  }
+}
+
+/**
+ * Advance the position and retire the outbox row atomically, so the student can
+ * never be advanced without the send being recorded (or the reverse).
+ *
+ * A SAVEPOINT is used rather than BEGIN/COMMIT because callers may already be
+ * inside a transaction (bulk admin sends, and the regression tests wrap their
+ * fixtures). Releasing the outermost savepoint commits; releasing a nested one
+ * simply rejoins the enclosing transaction, which is the correct behaviour
+ * either way and keeps a failure from rolling back a caller's own work.
+ */
+function commitAdvance(sessionId, qOrder, entryId = null) {
+  db.exec('SAVEPOINT commit_advance');
+  try {
+    db.prepare(
+      `UPDATE sessions SET current_q_order = ?, last_active_at = datetime('now') WHERE id = ?`
+    ).run(qOrder, sessionId);
+    if (entryId != null) outbox.markSent(entryId);
+    db.exec('RELEASE commit_advance');
+  } catch (err) {
+    db.exec('ROLLBACK TO commit_advance');
+    db.exec('RELEASE commit_advance');
+    throw err;
+  }
+}
+
+/**
+ * Replay question deliveries that were recorded but never confirmed. Safe to
+ * call repeatedly: a row is only retried while it is still queued, and a
+ * successful replay marks it sent and advances the position in one step.
+ */
+async function recoverQueuedSends() {
+  let recovered = 0;
+  for (const entry of outbox.pending()) {
+    if (entry.kind !== 'question') continue;
+    const session = db.prepare('SELECT * FROM sessions WHERE id = ?').get(entry.session_id);
+    if (!session) continue;
+    const student = { id: session.student_id, phone: entry.recipient };
+    try {
+      await sendQuestionTo(session, student, entry.q_order);
+      commitAdvance(session.id, entry.q_order, entry.id);
+      recovered++;
+    } catch (err) {
+      outbox.markFailed(entry.id, err, Math.max(1, config.exam.sendRetries));
+    }
+  }
+  return recovered;
 }
 
 // ── Entry point for inbound WhatsApp messages ──────────────────────────
@@ -655,6 +907,16 @@ async function handleInbound(phone, body, meta = {}) {
   if (!session) {
     const started = await maybeStartSession(student);
     return { started: true, ok: started.ok, reason: started.reason };
+  }
+
+  // An approved template invites a reply; it does not open the service
+  // window. Deliver Q1 on that first reply instead of grading the greeting.
+  const invited = db.prepare("SELECT id FROM message_outbox WHERE session_id=? AND kind='intro' AND state='sent'").get(session.id);
+  const questionSent = db.prepare("SELECT id FROM message_outbox WHERE session_id=? AND kind='question' AND state='sent'").get(session.id);
+  if (invited && !questionSent && sessionHasNoAnswers(session.id)) {
+    db.prepare("UPDATE sessions SET started_at=datetime('now') WHERE id=?").run(session.id);
+    await sendQuestionTo(session, student);
+    return { started: true, ok: true, reason: 'started' };
   }
 
   // Bulk-sent sessions are created the moment the admin clicks Send, but the
@@ -713,9 +975,7 @@ async function maybeStartSession(student) {
   }
 
   const exam = candidates[0];
-  const existing = db
-    .prepare('SELECT * FROM sessions WHERE exam_id = ? AND student_id = ?')
-    .get(exam.id, student.id);
+  const existing = latestSession(exam.id, student.id);
 
   if (existing && existing.status === 'in_progress') {
     const questionCount =
@@ -820,8 +1080,7 @@ async function processAnswer(session, student, body, meta = {}) {
       nq = nextInSequence(session, nq);
     }
     if (nq) {
-      db.prepare('UPDATE sessions SET current_q_order = ? WHERE id = ?').run(nq.q_order, session.id);
-      await sendQuestionTo(session, student);
+      await advanceAndSend(session, student, nq);
     } else {
       await finalize(session, student, 'completed');
     }
@@ -838,10 +1097,7 @@ async function processAnswer(session, student, body, meta = {}) {
   // advance
   const nextQ = nextInSequence(session, question);
   if (nextQ) {
-    db.prepare(
-      `UPDATE sessions SET current_q_order = ?, last_active_at = datetime('now') WHERE id = ?`
-    ).run(nextQ.q_order, session.id);
-    await sendQuestionTo(session, student);
+    await advanceAndSend(session, student, nextQ);
   } else {
     await finalize(session, student, 'completed');
   }
@@ -1448,9 +1704,28 @@ async function mapLimit(items, limit, fn) {
 }
 
 /** Deliver (or nudge) the exam to one recipient, mutating `report`. */
+async function sendIntro(session, student, exam, count, template) {
+  const entry = outbox.enqueue({ sessionId: session.id, kind: 'intro', recipient: student.phone });
+  if (entry.state === 'sent') return;
+  try {
+    if (template) {
+      const values = config.whatsapp.templateParams.length ? config.whatsapp.templateParams
+        : [exam.title, exam.subject || 'General', String(exam.duration_minutes), String(count)];
+      await wa.sendTemplate(student.phone, template, config.whatsapp.templateLanguage, values.map(text => ({ type: 'text', text })));
+    } else {
+      await wa.sendText(student.phone, formatExamIntro(exam, count));
+    }
+    outbox.markSent(entry.id);
+    recordAcceptance(session.exam_id, session.student_id);
+  } catch (error) {
+    outbox.markFailed(entry.id, error, Math.max(1, config.exam.sendRetries));
+    throw error;
+  }
+}
+
 async function sendExamToStudent(exam, student, questionCount, template, report) {
   const phone = student.phone;
-  let session = db.prepare('SELECT * FROM sessions WHERE exam_id = ? AND student_id = ?').get(exam.id, student.id);
+  let session = latestSession(exam.id, student.id);
   let fresh = false;
 
   try {
@@ -1490,19 +1765,9 @@ async function sendExamToStudent(exam, student, questionCount, template, report)
 
     if (fresh) {
       const attemptCount = getSessionQuestionCount(session.id) || questionCount;
-      if (template) {
-        const params = config.whatsapp.templateParams.length
-          ? config.whatsapp.templateParams.map((p) => ({ type: 'text', text: p }))
-          : [
-              { type: 'text', text: exam.title },
-              { type: 'text', text: exam.subject || 'General' },
-              { type: 'text', text: String(exam.duration_minutes) },
-              { type: 'text', text: String(attemptCount) },
-            ];
-        await wa.sendTemplate(phone, template, config.whatsapp.templateLanguage, params);
-      } else {
-        await wa.sendText(phone, formatExamIntro(exam, attemptCount));
-      }
+      db.prepare('UPDATE sessions SET started_at=NULL WHERE id=?').run(session.id);
+      await sendIntro(session, student, exam, attemptCount, template);
+      if (template) { report.sent++; return; }
     }
     await sendQuestionTo(session, student);
     report.sent++;
@@ -1534,6 +1799,10 @@ async function sendExamToRecipients(examId) {
     )
     .all(examId);
   const report = { sent: 0, failed: 0, skipped: 0, resumed: 0, errors: [] };
+  if (!['published', 'live'].includes(exam.status)) {
+    report.skipped = recipients.length;
+    return report;
+  }
   const questionCount = db.prepare('SELECT COUNT(*) c FROM questions WHERE exam_id = ?').get(examId).c;
   const template = config.whatsapp.templateName;
   const limit = config.exam.sendConcurrency;
@@ -1546,9 +1815,12 @@ async function sendExamToRecipients(examId) {
 
 module.exports = {
   normalizePhone,
+  splitRecipients,
   getOrCreateStudent,
+  addRecipients,
   getActiveSession,
   createSession,
+  recoverQueuedSends,
   handleInbound,
   processAnswer,
   handleAnswer,

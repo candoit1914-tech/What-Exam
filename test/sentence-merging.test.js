@@ -1,4 +1,5 @@
 'use strict';
+require('./helpers/isolate');
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const pdf = require('../src/services/pdf');

@@ -26,7 +26,7 @@ const config = {
     .filter(Boolean),
 
   dbPath: path.resolve(root, process.env.DB_PATH || './data/exams.db'),
-  uploadsDir: path.resolve(root, './data/uploads'),
+  uploadsDir: path.resolve(root, process.env.UPLOADS_DIR || './data/uploads'),
 
   whatsapp: {
     accessToken: valid(process.env.WHATSAPP_ACCESS_TOKEN) ? process.env.WHATSAPP_ACCESS_TOKEN : '',
@@ -80,6 +80,9 @@ const config = {
     sendRetries: parseInt(process.env.SEND_RETRIES || '3', 10),
     sendRetryDelayMs: parseInt(process.env.SEND_RETRY_DELAY_MS || '5000', 10),
     staleSessionCleanupIntervalMs: parseInt(process.env.STALE_SESSION_CLEANUP_MS || '60000', 10),
+    // Global cap on attempts per student per exam. 0 = unlimited.
+    // An individual exam's max_attempts column overrides this.
+    maxAttempts: parseInt(process.env.MAX_ATTEMPTS || '0', 10) || 0,
   },
 
   puter: {

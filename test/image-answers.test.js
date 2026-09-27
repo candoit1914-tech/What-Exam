@@ -1,10 +1,14 @@
 'use strict';
+require('./helpers/isolate');
 const { test, after } = require('node:test');
 const assert = require('node:assert/strict');
 const db = require('../src/db');
 const marking = require('../src/services/marking');
 const config = require('../src/config');
 const results = require('../src/services/results');
+const ocr = require('../src/services/ocr');
+// Exercise unreadable-photo handling without downloading OCR models or spawning workers.
+ocr.readPhotoAnswer = async () => ({ success: false, text: '[unreadable]', confidence: 0 });
 
 // The photo-answer path spins up a Tesseract worker that otherwise keeps the
 // test process alive forever (node --test would hang instead of finishing).
@@ -297,6 +301,33 @@ test('reportHTML embeds the photo answer img', () => {
     const { html } = results.reportHTML(sessionId);
     assert.match(html, /student photo answer/);
     assert.match(html, new RegExp(`\\/report\\/${sessionId}\\/attachment\\?file=a-1-123\\.png`));
+  } finally {
+    db.exec('ROLLBACK');
+  }
+});
+
+test('reportHTML embeds the question diagram the student was shown', () => {
+  db.exec('BEGIN');
+  try {
+    const examId = db.prepare("INSERT INTO exams (title, subject, duration_minutes) VALUES (?,?,?)")
+      .run('__qimg_report_exam__', 'Math', 30).lastInsertRowid;
+    const studentId = db.prepare("INSERT INTO students (phone) VALUES (?)")
+      .run('__qimg_report_phone__' + Date.now()).lastInsertRowid;
+    // The question image is what the API routes now persist; a student must
+    // still see that diagram on their report, not just a bare question.
+    const questionId = db.prepare(
+      "INSERT INTO questions (exam_id, q_order, type, text, marks, image) VALUES (?,1,'objective','Which diagram?',1,'q-diagram-77.png')"
+    ).run(examId).lastInsertRowid;
+    const sessionId = db.prepare(
+      "INSERT INTO sessions (exam_id, student_id, status, current_q_order, started_at, ended_at) VALUES (?,?,'completed',1,datetime('now'),datetime('now'))"
+    ).run(examId, studentId).lastInsertRowid;
+    db.prepare(
+      `INSERT INTO answers (session_id, question_id, q_order, answer_text, is_correct, marks_awarded, max_marks, marked_by, ai_feedback, needs_review)
+       VALUES (?,?,1,'A',1,1,1,'auto','',0)`
+    ).run(sessionId, questionId);
+
+    const { html } = results.reportHTML(sessionId);
+    assert.match(html, new RegExp(`\\/report\\/${sessionId}\\/attachment\\?file=q-diagram-77\\.png`));
   } finally {
     db.exec('ROLLBACK');
   }
