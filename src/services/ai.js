@@ -69,6 +69,11 @@ async function callEndpointRaw({ baseUrl, apiKey, model, messages, temperature, 
   return content;
 }
 
+// How many times a single request may be repeated after a 429 before it is
+// treated as a provider failure. Kept small so a genuinely saturated account
+// fails over to the next provider quickly instead of stalling the caller.
+const RATE_LIMIT_RETRIES = 2;
+
 async function callEndpoint({ baseUrl, apiKey, model, messages, temperature, maxTokens, timeoutMs, maxRetries }) {
   const body = {
     model,
@@ -77,12 +82,27 @@ async function callEndpoint({ baseUrl, apiKey, model, messages, temperature, max
     max_tokens: maxTokens,
   };
 
-  // Log which endpoint we're calling (mask the API key for security)
-  const maskedKey = apiKey ? apiKey.slice(0, 8) + '...' + apiKey.slice(-4) : 'NONE';
+  // Log which endpoint we're calling. Never print the key itself: this line runs
+  // on every single request (150+ per exam generation), so even a partial key
+  // ends up all over the logs.
+  const maskedKey = apiKey ? `${apiKey.slice(0, 3)}***` : 'NONE';
   console.log(`[ai] Calling ${model} @ ${baseUrl} (key: ${maskedKey})`);
 
   let lastErr;
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+  // Rate limiting gets its own budget, independent of `maxRetries`. A 429 means
+  // the request was rejected before any output was produced, so waiting and
+  // repeating it is always worth it - and callers that deliberately disable
+  // generic retries (every PDF extraction block passes maxRetries: 0) must
+  // still survive a burst. Previously the 429 branch logged "retrying" and then
+  // fell straight through to the throw whenever maxRetries was 0, so a single
+  // rate-limited response silently dropped a whole block of questions.
+  let rateLimitAttempts = 0;
+  // `attempt` counts GENERIC failures only and is incremented explicitly, never
+  // by a loop expression: a 429 retry must not spend a generic attempt, or a
+  // caller that passed maxRetries: 0 (every PDF extraction block does) would
+  // exit the loop on the first rate-limited response and throw `undefined`.
+  let attempt = 0;
+  while (attempt <= maxRetries) {
     try {
       const res = await withHardTimeout(
         fetch(`${baseUrl}/chat/completions`, {
@@ -98,15 +118,23 @@ async function callEndpoint({ baseUrl, apiKey, model, messages, temperature, max
 
       // Handle 429 rate-limit with exponential backoff + retry
       if (res.status === 429) {
-        const retryAfter = res.headers.get('retry-after');
-        const backoffMs = retryAfter
-          ? parseInt(retryAfter, 10) * 1000
-          : Math.min(1000 * Math.pow(2, attempt), 15000);
-        console.warn(`[ai] Rate limited (429) by ${model} @ ${baseUrl}, retrying in ${backoffMs}ms (attempt ${attempt + 1}/${maxRetries})`);
-        if (attempt < maxRetries) {
+        const retryAfterHeader = res.headers.get('retry-after');
+        const retryAfterSec = parseInt(retryAfterHeader, 10);
+        const backoffMs = Number.isFinite(retryAfterSec) && retryAfterSec > 0
+          ? retryAfterSec * 1000
+          : Math.min(1000 * Math.pow(2, rateLimitAttempts), 15000);
+        if (rateLimitAttempts < RATE_LIMIT_RETRIES) {
+          rateLimitAttempts++;
+          console.warn(`[ai] Rate limited (429) by ${model} @ ${baseUrl}, retrying in ${backoffMs}ms (rate-limit attempt ${rateLimitAttempts}/${RATE_LIMIT_RETRIES})`);
           await delay(backoffMs);
           continue;
         }
+        console.error(`[ai] Rate limited (429) by ${model} @ ${baseUrl} after ${rateLimitAttempts} retry attempt(s)`);
+        const limited = new AIError(`AI request failed (429): ${model} is rate limiting this account`);
+        // Tagged so chatJSON can trip the provider's circuit breaker instead of
+        // re-hammering an endpoint that has already said "no" several times.
+        limited.rateLimited = true;
+        throw limited;
       }
 
       if (!res.ok) {
@@ -147,12 +175,13 @@ async function callEndpoint({ baseUrl, apiKey, model, messages, temperature, max
         const backoff = Math.min(500 * Math.pow(2, attempt), 10000);
         console.warn(`[ai] Retrying ${model} in ${backoff}ms (attempt ${attempt + 1}/${maxRetries})`);
         await delay(backoff);
+        attempt++;
         continue;
       }
       throw err;
     }
   }
-  throw lastErr;
+  throw lastErr || new AIError(`AI request to ${model} @ ${baseUrl} failed without a usable response`);
 }
 
 /**
@@ -173,8 +202,32 @@ function tertiaryConfigured() {
 }
 
 // Circuit breaker: track consecutive failures per provider to skip unreliable ones.
-// If a provider fails 3 times in a row, skip it for 30 seconds.
-const circuitBreaker = { secondary: { fails: 0, skipUntil: 0 }, tertiary: { fails: 0, skipUntil: 0 } };
+// The primary is tracked too. A rate-limited primary used to be exempt, so a
+// saturated account kept receiving every request and every one of them 429'd.
+//
+// The skip window escalates instead of staying flat. A provider that is hard
+// limited (the measured OpenAI account returned 429 for 69 of 69 calls) is not
+// going to recover in 30s, and every request sent into that window counts
+// against its rate limit, so a fixed 30s skip meant the primary was re-hammered
+// on a loop and stayed permanently throttled - the self-reinforcing part of the
+// "generation is very slow" report. A sustained failure backs off up to
+// PROVIDER_COOLDOWN_MAX_MS, and any success resets it immediately so a recovered
+// provider is used again at once.
+const PROVIDER_COOLDOWN_STEP_MS = 30000;
+const PROVIDER_COOLDOWN_MAX_MS = 300000;
+const PROVIDER_FAILURE_THRESHOLD = 3;
+
+const circuitBreaker = {
+  primary: { fails: 0, skipUntil: 0 },
+  secondary: { fails: 0, skipUntil: 0 },
+  tertiary: { fails: 0, skipUntil: 0 },
+};
+
+/** Escalating skip window for a provider that has failed `fails` times in a row. */
+function providerCooldownMs(fails) {
+  const steps = Math.max(0, fails - PROVIDER_FAILURE_THRESHOLD);
+  return Math.min(PROVIDER_COOLDOWN_STEP_MS * Math.pow(2, steps), PROVIDER_COOLDOWN_MAX_MS);
+}
 
 function isProviderAvailable(name) {
   const cb = circuitBreaker[name];
@@ -187,9 +240,10 @@ function recordProviderFailure(name) {
   const cb = circuitBreaker[name];
   if (!cb) return;
   cb.fails++;
-  if (cb.fails >= 3) {
-    cb.skipUntil = Date.now() + 30000; // skip for 30 seconds
-    console.warn(`[ai] Circuit breaker: ${name} failed ${cb.fails} times, skipping for 30s`);
+  if (cb.fails >= PROVIDER_FAILURE_THRESHOLD) {
+    const ms = providerCooldownMs(cb.fails);
+    cb.skipUntil = Date.now() + ms;
+    console.warn(`[ai] Circuit breaker: ${name} failed ${cb.fails} times, skipping for ${Math.round(ms / 1000)}s`);
   }
 }
 
@@ -211,9 +265,9 @@ async function chatJSON(messages, { temperature = 0.4, maxRetries = 2, timeoutMs
   }
 
   // Log configuration status
-  console.log(`[ai] Config: primary=${config.ai.model} @ ${config.ai.baseUrl} (key: ${config.ai.apiKey?.slice(0, 8)}...)`);
+  console.log(`[ai] Config: primary=${config.ai.model} @ ${config.ai.baseUrl} (key: ${config.ai.apiKey ? `${config.ai.apiKey.slice(0, 3)}***` : 'NONE'})`);
   if (secondaryConfigured()) {
-    console.log(`[ai] Config: secondary=${config.claude.model} @ ${config.claude.baseUrl} (key: ${config.claude.apiKey?.slice(0, 8)}...)`);
+    console.log(`[ai] Config: secondary=${config.claude.model} @ ${config.claude.baseUrl} (key: ${config.claude.apiKey ? `${config.claude.apiKey.slice(0, 3)}***` : 'NONE'})`);
   } else {
     console.log('[ai] Config: secondary=NOT configured');
   }
@@ -270,7 +324,7 @@ async function chatJSON(messages, { temperature = 0.4, maxRetries = 2, timeoutMs
   // surface the primary provider's error. Skip providers on the circuit breaker.
   const providers = [];
   const providerNames = [];
-  if (primary) {
+  if (primary && isProviderAvailable('primary')) {
     providers.push({ fn: primary, name: 'primary' });
     providerNames.push(config.ai.model);
   }
@@ -283,17 +337,37 @@ async function chatJSON(messages, { temperature = 0.4, maxRetries = 2, timeoutMs
     providerNames.push(config.xai.model || 'tertiary');
   }
 
+  // Last resort: if every provider's breaker is open we would otherwise fail
+  // every request for the next 30s. The primary is the only endpoint the user
+  // is guaranteed to have, so always fall back to it rather than serving an
+  // avoidable outage.
+  if (!providers.length && primary) {
+    providers.push({ fn: primary, name: 'primary' });
+    providerNames.push(config.ai.model);
+    console.warn('[ai] All provider breakers are open; falling back to the primary endpoint');
+  }
+
   if (!providers.length) {
     throw new AIError('No AI providers configured');
   }
 
   console.log('[ai] Racing providers:', providerNames.join(', '));
   const startTime = Date.now();
-  
-  return Promise.any(providers.map((p) => p.fn().then((result) => {
-    recordProviderSuccess(p.name);
-    return result;
-  }))).then((result) => {
+
+  return Promise.any(providers.map((p) => p.fn().then(
+    (result) => {
+      recordProviderSuccess(p.name);
+      return result;
+    },
+    (err) => {
+      // A rate-limited provider is recorded even when another provider won the
+      // race: waiting for the whole race to fail meant the breaker never tripped
+      // while a secondary was answering, so the saturated endpoint was never
+      // given any relief.
+      if (err && err.rateLimited) recordProviderFailure(p.name);
+      throw err;
+    }
+  ))).then((result) => {
     const elapsed = Date.now() - startTime;
     // Find which provider won
     const winner = providers.length === 1 ? providers[0].name : 'fastest';
@@ -394,9 +468,12 @@ const BLOCK_MAX_CHARS = 12000;
 // Blocks run several at a time: enough parallelism to collapse a long paper's
 // wall-clock time, so a slow block does not stall the whole wave. The cap is
 // still bounded so a single upload never floods a shared endpoint.
-// With 2 providers racing, concurrency = providerCount * 3 = 6; this is
-// high enough for fast providers but won't overwhelm slow ones.
-const BLOCK_CONCURRENCY = 6;
+// Every block asks for up to BLOCK_MAX_TOKENS output, so concurrency here is
+// really a token-throughput knob: 6 blocks in flight is ~100k output tokens
+// demanded at once, which is what drove the account into 429s. Tunable via
+// AI_BLOCK_CONCURRENCY for accounts on a tighter rate limit.
+const DIAGRAM_CONCURRENCY = 4;
+const BLOCK_CONCURRENCY = Math.max(1, parseInt(process.env.AI_BLOCK_CONCURRENCY, 10) || 4);
 // 16k tokens is enough for a block of 15 questions with full theory rubrics.
 // Previous 6k limit caused truncation on theory-heavy blocks, producing
 // invalid JSON that dropped entire blocks of questions.
@@ -1067,33 +1144,58 @@ ${avoidBlock}`);
   const fs = require('fs');
   const path = require('path');
 
-  for (const q of result) {
-    if (shouldHaveDiagram(q) && Math.random() < 0.8) {
-      const diagramType = selectDiagramType(q.text + ' ' + (q.passage || ''));
-      console.log(`[generate] generating ${diagramType} diagram for ${q.type} question: "${q.text.slice(0, 50)}..."`);
+  // Diagrams used to be generated one question at a time in a plain for-loop.
+  // A full paper asks for up to ~80 questions, so that was up to ~80 serial AI
+  // calls (plus a second one for theory follow-ups) dominating the entire
+  // wall-clock time of a generation. Bounded parallelism overlaps them.
+  // Concurrency is kept modest because the batch phase runs first and the
+  // account is already close to its rate limit.
+  //
+  // Every task below is total: it can never reject. mapLimit awaits
+  // Promise.all over its workers without catching per-task errors, so a rejected
+  // task would reject the whole batch while its siblings kept running
+  // unsupervised - the paper would come back truncated, and a sibling rejecting
+  // afterwards would be an unhandled rejection, which terminates the process on
+  // Node >=15. generateDiagram() does catch its own failures and return null
+  // today, so this is defence in depth rather than a live bug: it keeps the
+  // guarantee local to the concurrency change instead of depending on a
+  // function several layers down to keep swallowing its errors, and it also
+  // covers selectDiagramType and any future change to generateDiagram. A
+  // missing diagram is a cosmetic loss; it must never cost the questions or
+  // the server.
+  const diagramTasks = result
+    .filter((q) => q && shouldHaveDiagram(q) && Math.random() < 0.8)
+    .map((q) => async () => {
+      try {
+        const diagramType = selectDiagramType(q.text + ' ' + (q.passage || ''));
+        console.log(`[generate] generating ${diagramType} diagram for ${q.type} question: "${q.text.slice(0, 50)}..."`);
 
-      const svg = await generateDiagram({ subject, topics, questionText: q.text, diagramType });
-      if (svg) {
-        try {
-          const pngBuffer = await svgToPng(svg);
-          const filename = `diagram-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.png`;
-          fs.writeFileSync(path.join(config.uploadsDir, filename), pngBuffer);
-          q.image = filename;
-          console.log(`[generate] saved diagram: ${filename}`);
+        const svg = await generateDiagram({ subject, topics, questionText: q.text, diagramType });
+        if (!svg) return;
+        const pngBuffer = await svgToPng(svg);
+        const filename = `diagram-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.png`;
+        fs.writeFileSync(path.join(config.uploadsDir, filename), pngBuffer);
+        q.image = filename;
+        console.log(`[generate] saved diagram: ${filename}`);
 
-          // Generate follow-up questions for theory questions with diagrams
-          if (q.type === 'theory') {
-            const followUps = await generateFollowUpQuestions({ subject, topics, questionText: q.text, diagramType });
-            if (followUps.length > 0) {
-              q.follow_ups = JSON.stringify(followUps);
-              console.log(`[generate] generated ${followUps.length} follow-up questions`);
-            }
+        // Generate follow-up questions for theory questions with diagrams
+        if (q.type === 'theory') {
+          const followUps = await generateFollowUpQuestions({ subject, topics, questionText: q.text, diagramType });
+          if (followUps.length > 0) {
+            q.follow_ups = JSON.stringify(followUps);
+            console.log(`[generate] generated ${followUps.length} follow-up questions`);
           }
-        } catch (err) {
-          console.error('[generate] diagram render failed:', err.message);
         }
+      } catch (err) {
+        // Logged and swallowed on purpose: see the note above. The question
+        // stays in the paper, just without its figure.
+        console.error('[generate] diagram failed for question, continuing without it:', err.message);
       }
-    }
+    });
+
+  if (diagramTasks.length) {
+    console.log(`[generate] rendering ${diagramTasks.length} diagram(s) with concurrency ${DIAGRAM_CONCURRENCY}`);
+    await mapLimit(diagramTasks, DIAGRAM_CONCURRENCY, (run) => run());
   }
 
   // ── Log to global history so future generations avoid these ──────────
@@ -2490,6 +2592,7 @@ module.exports = {
   aiConfigured,
   chatJSON,
   mapLimit,
+  providerCooldownMs,
   EXAMINER_PERSONA,
   examinerPrompt,
   generateQuestions,

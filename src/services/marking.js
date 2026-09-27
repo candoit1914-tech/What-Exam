@@ -164,17 +164,31 @@ function markObjective(question, studentAnswer) {
   };
 }
 
+/**
+ * Whether a scheme actually carries markable content.
+ *
+ * buildMarkingScheme() never throws - when the AI is unavailable or rate
+ * limited it persists a structurally valid but empty placeholder
+ * (model_answer '', key_points [], blank rubric). That placeholder passes any
+ * "scheme is not null" check while awarding nothing, so callers that need to
+ * warn a human (PDF import) must test the contents, not the row's existence.
+ */
+function schemeHasContent(sch) {
+  if (!sch) return false;
+  return !!(
+    (sch.model_answer && String(sch.model_answer).trim()) ||
+    (Array.isArray(sch.key_points) && sch.key_points.length > 0 && sch.key_points.some((kp) => kp && String(kp).trim())) ||
+    (Array.isArray(sch.rubric) && sch.rubric.length > 0 && sch.rubric.some((r) => r && r.point && String(r.point).trim()))
+  );
+}
+
 /** AI theory marking against the scheme + rubric. Falls back to heuristic keyword matching if AI fails. */
 async function markTheoryAnswer(question, studentAnswer, scheme) {
   const sch = scheme || getScheme(question.id);
   const total = Number(question.marks) || 0;
-  
+
   // Determine if we have a usable scheme (must have model_answer or rubric with content)
-  const hasScheme = sch && (
-    (sch.model_answer && sch.model_answer.trim()) ||
-    (Array.isArray(sch.key_points) && sch.key_points.length > 0 && sch.key_points.some(kp => kp && kp.trim())) ||
-    (Array.isArray(sch.rubric) && sch.rubric.length > 0 && sch.rubric.some(r => r && r.point && r.point.trim()))
-  );
+  const hasScheme = schemeHasContent(sch);
 
   if (!ai.aiConfigured()) {
     // AI not configured — use heuristic directly
@@ -477,6 +491,7 @@ function recomputeExamTotal(examId) {
 module.exports = {
   buildMarkingScheme,
   getScheme,
+  schemeHasContent,
   normalizeAnswer,
   isObjectiveAnswer,
   resolveCorrectKey,

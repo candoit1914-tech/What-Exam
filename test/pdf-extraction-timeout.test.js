@@ -195,3 +195,42 @@ test('"no questions parsed" explains that blocks timed out', async () => {
     'a failed import must not leave questions behind'
   );
 });
+
+test('theory questions left without a real marking scheme are reported, not silently imported', async () => {
+  // buildMarkingScheme() never throws: when the AI cannot produce a scheme it
+  // writes an empty placeholder (model_answer '', key_points []) and the import
+  // reports success. Under the 429 conditions seen in production that produced
+  // papers full of questions an examiner cannot actually mark, with nothing in
+  // the job telling the user which ones.
+  const buffer = await makePdf(['MATHEMATICS PAPER 1', 'Question 1', 'Explain why the sky is blue.']);
+  const examId = db
+    .prepare("INSERT INTO exams (title, subject, duration_minutes, status) VALUES ('__scheme__','Physics',60,'draft')")
+    .run().lastInsertRowid;
+  const jobId = pdfImport.createJob(examId, 'paper.pdf');
+
+  const original = ai.extractQuestionsFromText;
+  // Isolate the test harness has no AI configured, so every theory scheme comes
+  // back as the empty placeholder - exactly the failure being reported on.
+  ai.extractQuestionsFromText = async () => [
+    { type: 'theory', text: 'Explain why the sky appears blue.', marks: 5 },
+    { type: 'theory', text: 'Describe the water cycle in detail.', marks: 5 },
+  ];
+  try {
+    await pdfImport.startJob(jobId, buffer, {});
+  } finally {
+    ai.extractQuestionsFromText = original;
+  }
+
+  const job = pdfImport.getJob(jobId);
+  assert.equal(job.status, 'done', 'the questions themselves did import');
+  assert.equal(
+    db.prepare('SELECT COUNT(*) c FROM questions WHERE exam_id = ?').get(examId).c,
+    2,
+    'the questions must still be imported'
+  );
+  assert.match(
+    job.warning || '',
+    /marking scheme/i,
+    'the import must tell the user which questions cannot be graded yet'
+  );
+});

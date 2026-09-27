@@ -407,7 +407,27 @@ async function startJob(jobId, buffer, opts = {}) {
     // Theory scheme generation is one AI call per question; run up to 12 in
     // parallel (capped like the other bulk AI phases so a shared endpoint is
     // not flooded) instead of one at a time.
-    await ai.mapLimit(tasks, 12, (run) => run());
+    const builtSchemes = await ai.mapLimit(tasks, 12, (run) => run());
+
+    // buildMarkingScheme() deliberately never throws: when the AI is rate
+    // limited or unavailable it persists a valid-looking but empty placeholder
+    // scheme, which awards nothing when the paper is marked. Without counting
+    // those the job reports a clean "done" over questions no examiner can mark,
+    // which is exactly how a paper ends up looking like it has no usable
+    // questions once it is sent.
+    const emptySchemes = builtSchemes.filter((s) => !marking.schemeHasContent(s)).length;
+    if (emptySchemes) {
+      const msg = `${emptySchemes} of ${totalSchemes} theory question(s) have no marking scheme yet, so they will be marked by keyword heuristic only — review them before sending.`;
+      // Appended defensively: anything thrown in this success path lands in the
+      // catch block below, which deletes every question this job inserted. A
+      // warning must never be able to destroy a good import.
+      try {
+        const prior = (getJob(jobId) || {}).warning;
+        updateJob(jobId, { warning: [prior, msg].filter(Boolean).join(' ') });
+      } catch (e) {
+        console.error('[pdfImport] could not record marking-scheme warning:', e.message);
+      }
+    }
 
     marking.recomputeExamTotal(job.exam_id);
     updateJob(jobId, { status: 'done', stage: 'Done', progress: 100, count: created.length });

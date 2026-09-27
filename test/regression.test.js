@@ -1221,14 +1221,17 @@ test('extractQuestionsFromText caps concurrent extraction blocks at BLOCK_CONCUR
   };
   try {
     // 200 numbered questions split into ~25 blocks (perBlock 8) — enough to
-    // exceed BLOCK_CONCURRENCY (20) so the cap is actually exercised. This
+    // exceed BLOCK_CONCURRENCY (4) so the cap is actually exercised. This
     // couples the test to the current cap value on purpose: it is a
     // deliberate performance tuning constant, so the test is updated when
-    // the cap is tuned.
+    // the cap is tuned. It was lowered from 6 to 4 after a real upload filled
+    // the account's token budget: each block asks for up to 16k output tokens,
+    // so 6 in flight is ~100k tokens demanded at once and the primary returned
+    // 429 for nearly every block, dropping questions from the import.
     const lines = [];
     for (let i = 1; i <= 200; i++) lines.push(`${i}. Guard question ${i}?`, 'A. X', 'B. Y', 'C. Z', 'D. W');
     const out = await ai.extractQuestionsFromText(lines.join('\n'));
-    assert.equal(state.max, 6, `extraction fires no more than 6 blocks at once (saw ${state.max})`);
+    assert.equal(state.max, 4, `extraction fires no more than 4 blocks at once (saw ${state.max})`);
     assert.ok(out.length >= 1, 'capped extraction still parses questions');
   } finally {
     ai.chatJSON = orig;
