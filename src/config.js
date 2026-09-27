@@ -45,7 +45,18 @@ const config = {
   ai: {
     baseUrl: (process.env.AI_BASE_URL || 'https://api.openai.com/v1').replace(/\/$/, ''),
     apiKey: valid(process.env.AI_API_KEY) ? process.env.AI_API_KEY : '',
-    model: process.env.AI_MODEL || 'gpt-4o-mini',
+    // gpt-5.6-terra is the current OpenAI generation's balance tier. It is a
+    // 2026 model and, unlike the previous flagship gpt-6-astra, it accepts
+    // `reasoning.effort: 'none'`, which turns off reasoning tokens entirely.
+    // That matters here: this app makes ~80 calls per paper, and reasoning
+    // tokens bill as output and add latency to every one of them.
+    defaultModel: 'gpt-5.6-terra',
+    model: process.env.AI_MODEL || 'gpt-5.6-terra',
+    // 'none' = no reasoning tokens. Raise to 'low'/'medium' if extraction
+    // quality on a hard paper needs it. Set AI_REASONING_EFFORT='' to disable.
+    reasoningEffort: process.env.AI_REASONING_EFFORT !== undefined
+      ? process.env.AI_REASONING_EFFORT
+      : 'none',
     timeoutMs: parseInt(process.env.AI_TIMEOUT_MS || '120000', 10),
     // Per-block budget for PDF question extraction. This is deliberately much
     // larger than timeoutMs: a block that overruns is not retried into
@@ -55,9 +66,9 @@ const config = {
     vision: process.env.AI_VISION === 'true',
   },
 
-  // Optional second OpenAI-compatible provider. When configured, every AI
-  // call is raced against the primary in `ai.chatJSON` and the first
-  // successful response wins. Leave CLAUDE_API_KEY/CLAUDE_BASE_URL empty to
+  // Optional second OpenAI-compatible provider. The primary is the main AI:
+  // it is called on its own, and this endpoint is only tried if the primary
+  // fails (see `ai.chatJSON`). Leave CLAUDE_API_KEY/CLAUDE_BASE_URL empty to
   // keep the primary as the sole provider.
   claude: {
     baseUrl: (process.env.CLAUDE_BASE_URL || '').replace(/\/$/, ''),
@@ -66,8 +77,9 @@ const config = {
     timeoutMs: parseInt(process.env.CLAUDE_TIMEOUT_MS || '0', 10),
   },
 
-  // Optional third OpenAI-compatible provider (xAI / Grok). Raced against
-  // the primary and secondary for faster responses. Leave empty to skip.
+  // Optional third OpenAI-compatible provider (xAI / Grok). A last-resort
+  // fallback, tried only after the primary and secondary have both failed.
+  // Leave empty to skip.
   xai: {
     baseUrl: (process.env.XAI_BASE_URL || 'https://api.x.ai/v1').replace(/\/$/, ''),
     apiKey: valid(process.env.XAI_API_KEY) ? process.env.XAI_API_KEY : '',

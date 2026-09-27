@@ -35,14 +35,47 @@ function withHardTimeout(promise, ms) {
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
+// OpenAI reasoning-family models (gpt-5*, gpt-6*, o1/o3/o4*) reject a
+// non-default `temperature` outright - the request fails with a 400 rather
+// than degrading. They also accept a `reasoning.effort` control, where
+// 'none' skips reasoning tokens entirely, which is what keeps a ~80-call
+// paper fast. Non-reasoning models keep temperature and must not receive a
+// `reasoning` key they do not understand.
+const REASONING_MODEL_RE = /^(gpt-5|gpt-6|o[134])/i;
+
+/**
+ * Whether a model id belongs to OpenAI's reasoning family.
+ * @param {string} model
+ * @returns {boolean}
+ */
+function isReasoningModel(model) {
+  return REASONING_MODEL_RE.test(String(model || ''));
+}
+
+/**
+ * Build the JSON body for a chat request, adapting to the model's family.
+ * @returns {object}
+ */
+function buildChatBody({ model, messages, temperature, maxTokens, reasoningEffort }) {
+  const body = { model, messages, max_tokens: maxTokens };
+  if (isReasoningModel(model)) {
+    // temperature omitted deliberately - see note above.
+    const effort = reasoningEffort === undefined ? config.ai.reasoningEffort : reasoningEffort;
+    if (effort) body.reasoning = { effort };
+  } else {
+    if (typeof temperature === 'number') body.temperature = temperature;
+  }
+  return body;
+}
+
 /**
  * POST one chat request to an OpenAI-compatible endpoint and parse the JSON
  * content from the response. Retries transient failures with backoff; a hard
  * timeout surfaces immediately (never retried) so a hanging endpoint can never
  * stall a job forever.
  */
-async function callEndpointRaw({ baseUrl, apiKey, model, messages, temperature, maxTokens, timeoutMs }) {
-  const body = { model, messages, temperature, max_tokens: maxTokens };
+async function callEndpointRaw({ baseUrl, apiKey, model, messages, temperature, maxTokens, timeoutMs, reasoningEffort }) {
+  const body = buildChatBody({ model, messages, temperature, maxTokens, reasoningEffort });
   const res = await withHardTimeout(
     fetch(`${baseUrl}/chat/completions`, {
       method: 'POST',
@@ -74,18 +107,19 @@ async function callEndpointRaw({ baseUrl, apiKey, model, messages, temperature, 
 // fails over to the next provider quickly instead of stalling the caller.
 const RATE_LIMIT_RETRIES = 2;
 
-async function callEndpoint({ baseUrl, apiKey, model, messages, temperature, maxTokens, timeoutMs, maxRetries }) {
-  const body = {
-    model,
-    messages,
-    temperature,
-    max_tokens: maxTokens,
-  };
+// 429s that report a billing/quota condition rather than a temporary rate
+// limit. These are permanent until the account is topped up, so they must not
+// consume the rate-limit retry budget.
+const QUOTA_429_RE = /insufficient_quota|credit_balance_exhausted|quota_exceeded|billing_hard_limit_reached|billing_not_active/i;
 
-  // Log which endpoint we're calling. Never print the key itself: this line runs
-  // on every single request (150+ per exam generation), so even a partial key
-  // ends up all over the logs.
-  const maskedKey = apiKey ? `${apiKey.slice(0, 3)}***` : 'NONE';
+async function callEndpoint({ baseUrl, apiKey, model, messages, temperature, maxTokens, timeoutMs, maxRetries }) {
+  const body = buildChatBody({ model, messages, temperature, maxTokens });
+
+  // Log which endpoint we're calling. Never print any part of the key itself:
+  // this line runs on every single request (150+ per exam generation), so even a
+  // prefix ends up all over the logs. A real key always starts "sk-", which is
+  // not identifying, so report presence only.
+  const maskedKey = apiKey ? 'present' : 'NONE';
   console.log(`[ai] Calling ${model} @ ${baseUrl} (key: ${maskedKey})`);
 
   let lastErr;
@@ -118,6 +152,28 @@ async function callEndpoint({ baseUrl, apiKey, model, messages, temperature, max
 
       // Handle 429 rate-limit with exponential backoff + retry
       if (res.status === 429) {
+        // Not every 429 is a temporary rate limit. An exhausted billing balance
+        // also arrives as 429 (`insufficient_quota` /
+        // `credit_balance_exhausted`) and can never be fixed by repeating the
+        // request - only a billing change can. Retrying those spends the whole
+        // backoff budget to reach the same answer, and because providers are
+        // now tried one at a time that delay is paid in full before the
+        // fallback is even reached. On a ~80-call paper this turned an
+        // out-of-credits primary into minutes of pure delay.
+        const errText = await res.text().catch(() => '');
+        if (QUOTA_429_RE.test(errText)) {
+          console.error(
+            `[ai] Quota exhausted for ${model} @ ${baseUrl} (not retryable): ${errText.slice(0, 200)}`
+          );
+          const quotaErr = new AIError(
+            `AI request failed (429): ${model} account has no remaining quota — top up billing or switch provider`
+          );
+          // Still tagged rateLimited so the circuit breaker trips and stops
+          // sending requests to an account that cannot serve them.
+          quotaErr.rateLimited = true;
+          quotaErr.permanent = true;
+          throw quotaErr;
+        }
         const retryAfterHeader = res.headers.get('retry-after');
         const retryAfterSec = parseInt(retryAfterHeader, 10);
         const backoffMs = Number.isFinite(retryAfterSec) && retryAfterSec > 0
@@ -168,6 +224,9 @@ async function callEndpoint({ baseUrl, apiKey, model, messages, temperature, max
       if (err instanceof TypeError) {
         console.error(`[ai] Network error calling ${model} @ ${baseUrl}: ${err.message}`);
       }
+      // A permanent failure (exhausted quota) can never be resolved by
+      // repeating the identical request, so it must not spend retry budget.
+      if (err && err.permanent) throw err;
       // Retry transient network failures (ECONNRESET etc.) and HTTP errors with
       // exponential backoff; concurrent extraction blocks make these more likely.
       const retryable = err instanceof AIError || err instanceof TypeError;
@@ -186,8 +245,8 @@ async function callEndpoint({ baseUrl, apiKey, model, messages, temperature, max
 
 /**
  * Whether a second OpenAI-compatible provider (CLAUDE_*) is configured. When
- * it is, `chatJSON` races it against the primary and the first successful
- * response wins, so whichever endpoint answers faster drives the result.
+ * it is, `chatJSON` uses it as a fallback for the primary: the primary is
+ * tried alone, and this is only reached if the primary fails.
  */
 function secondaryConfigured() {
   return !!(config.claude.apiKey && config.claude.baseUrl);
@@ -195,7 +254,8 @@ function secondaryConfigured() {
 
 /**
  * Whether a third OpenAI-compatible provider (XAI_*) is configured. When
- * it's configured, `chatJSON` races it against the primary and secondary.
+ * it's configured, `chatJSON` uses it as a last-resort fallback, tried only
+ * after both the primary and the secondary have failed.
  */
 function tertiaryConfigured() {
   return !!(config.xai && config.xai.apiKey && config.xai.baseUrl);
@@ -254,6 +314,19 @@ function recordProviderSuccess(name) {
   cb.skipUntil = 0;
 }
 
+/**
+ * Clear all circuit-breaker state. The breaker is module-global by design, so
+ * tests need a way to start from a known state - otherwise a test that
+ * deliberately fails the primary leaves the next test's primary skipped, and
+ * the suite's pass/fail result depends on execution order.
+ */
+function resetCircuitBreakers() {
+  for (const cb of Object.values(circuitBreaker)) {
+    cb.fails = 0;
+    cb.skipUntil = 0;
+  }
+}
+
 function puterConfigured() {
   const puter = require('./puter');
   return puter.isConfigured();
@@ -265,9 +338,9 @@ async function chatJSON(messages, { temperature = 0.4, maxRetries = 2, timeoutMs
   }
 
   // Log configuration status
-  console.log(`[ai] Config: primary=${config.ai.model} @ ${config.ai.baseUrl} (key: ${config.ai.apiKey ? `${config.ai.apiKey.slice(0, 3)}***` : 'NONE'})`);
+  console.log(`[ai] Config: primary=${config.ai.model} @ ${config.ai.baseUrl} (key: ${config.ai.apiKey ? 'present' : 'NONE'})`);
   if (secondaryConfigured()) {
-    console.log(`[ai] Config: secondary=${config.claude.model} @ ${config.claude.baseUrl} (key: ${config.claude.apiKey ? `${config.claude.apiKey.slice(0, 3)}***` : 'NONE'})`);
+    console.log(`[ai] Config: secondary=${config.claude.model} @ ${config.claude.baseUrl} (key: ${config.claude.apiKey ? 'present' : 'NONE'})`);
   } else {
     console.log('[ai] Config: secondary=NOT configured');
   }
@@ -320,8 +393,9 @@ async function chatJSON(messages, { temperature = 0.4, maxRetries = 2, timeoutMs
       ...common,
     });
 
-  // Race all configured providers; first success wins. When all fail,
-  // surface the primary provider's error. Skip providers on the circuit breaker.
+  // Ordered list of candidates: the primary first, then fallbacks. They are
+  // tried one at a time in this order. Providers on the circuit breaker are
+  // skipped; the last resort below still reaches the primary.
   const providers = [];
   const providerNames = [];
   if (primary && isProviderAvailable('primary')) {
@@ -351,38 +425,55 @@ async function chatJSON(messages, { temperature = 0.4, maxRetries = 2, timeoutMs
     throw new AIError('No AI providers configured');
   }
 
-  console.log('[ai] Racing providers:', providerNames.join(', '));
   const startTime = Date.now();
+  const [first, ...fallbacks] = providers;
 
-  return Promise.any(providers.map((p) => p.fn().then(
-    (result) => {
+  // The primary is the main AI, not one of several racers. It is tried alone
+  // and the fallbacks are only reached after it fails.
+  //
+  // Racing every configured provider sent the same prompt to all of them at
+  // once, so every call cost full price on every endpoint and every request
+  // counted against every provider's rate limit - the primary included. That
+  // is what drove the primary into sustained 429s during a large import. It
+  // also made the slower fallback the thing that actually answered whenever
+  // the primary was briefly saturated, so "the main AI" was not even the one
+  // producing the result.
+  console.log(
+    `[ai] Using ${first.name} (${providerNames[0]})${fallbacks.length ? `, fallbacks: ${fallbacks.map((p) => p.name).join(', ')}` : ''}`
+  );
+
+  const attemptProvider = async (p) => {
+    try {
+      const result = await p.fn();
       recordProviderSuccess(p.name);
       return result;
-    },
-    (err) => {
-      // A rate-limited provider is recorded even when another provider won the
-      // race: waiting for the whole race to fail meant the breaker never tripped
-      // while a secondary was answering, so the saturated endpoint was never
-      // given any relief.
+    } catch (err) {
+      // Record rate limiting immediately. Waiting for every provider in a race
+      // to fail before recording meant the breaker never tripped while a
+      // fallback was answering, so a saturated endpoint got no relief.
       if (err && err.rateLimited) recordProviderFailure(p.name);
       throw err;
     }
-  ))).then((result) => {
-    const elapsed = Date.now() - startTime;
-    // Find which provider won
-    const winner = providers.length === 1 ? providers[0].name : 'fastest';
-    console.log(`[ai] Provider responded in ${elapsed}ms (${winner})`);
-    return result;
-  }).catch((agg) => {
-    const elapsed = Date.now() - startTime;
-    // Record failures for circuit breaker
-    for (const p of providers) {
-      recordProviderFailure(p.name);
+  };
+
+  let firstErr = null;
+  for (const p of providers) {
+    try {
+      const result = await attemptProvider(p);
+      const elapsed = Date.now() - startTime;
+      console.log(`[ai] Provider responded in ${elapsed}ms (${p.name})`);
+      return result;
+    } catch (err) {
+      if (!firstErr) firstErr = err;
+      console.warn(
+        `[ai] ${p.name} failed (${err.message}); ${providers.indexOf(p) === providers.length - 1 ? 'no fallbacks left' : 'trying the next provider'}`
+      );
     }
-    console.error(`[ai] All providers failed after ${elapsed}ms:`, agg?.errors?.map(e => e.message).join(', '));
-    const err = agg && agg.errors ? agg.errors[0] : agg;
-    throw err instanceof Error ? err : new AIError(`All AI providers failed: ${String(agg && agg.message)}`);
-  });
+  }
+
+  const elapsed = Date.now() - startTime;
+  console.error(`[ai] All providers failed after ${elapsed}ms:`, firstErr && firstErr.message);
+  throw firstErr instanceof Error ? firstErr : new AIError('All AI providers failed');
 }
 
 /**
@@ -1064,10 +1155,12 @@ ${avoidBlock}`);
         { temperature: 0.95, maxRetries: 2, maxTokens: 16384 }
       )
     );
-    const providerCount = (secondaryConfigured() ? 1 : 0) + (tertiaryConfigured() ? 1 : 0) + 1;
     // Conservative concurrency: 1-2 parallel requests to avoid 429s.
-    // With 2 providers racing, concurrency=2 means 1 OpenAI + 1 Nvidia at a time.
-    const concurrency = Math.min(maxCalls, providerCount <= 1 ? 2 : 3);
+    // This no longer scales with the number of configured fallbacks. Providers
+    // are tried one at a time now, so a fallback can never absorb parallel
+    // load - every request still lands on the primary's rate limit, and extra
+    // concurrency only burns that budget faster.
+    const concurrency = Math.min(maxCalls, 2);
     console.log(`[generate] attempt ${attempt}: launching ${maxCalls} batches with concurrency ${concurrency}`);
     const settled = await mapLimit(tasks, concurrency, async (run, idx) => {
       try {
@@ -1316,7 +1409,15 @@ async function extractQuestionsFromText(rawText, onProgress, onWarning, opts = {
   // Read the export so tests can stub it.
   const chatJSON = module.exports.chatJSON;
   const text = String(rawText || '').trim();
-  if (!text) return [];
+  if (!text) {
+    // Returning [] in silence here is what made a scanned PDF report "the
+    // document may not contain exam questions": no blocks were ever built, so
+    // no block could fail, so no warning was raised, and the caller fell
+    // through to its generic "wrong format" message. Say what actually
+    // happened - there was nothing to read.
+    if (onWarning) onWarning('No readable text could be extracted from this PDF');
+    return [];
+  }
 
   const { cleanText, answerMap, answerKey, modelSolutions: markingScheme } =
     splitSolutionSections(text);
@@ -2593,6 +2694,8 @@ module.exports = {
   chatJSON,
   mapLimit,
   providerCooldownMs,
+  resetCircuitBreakers,
+  isReasoningModel,
   EXAMINER_PERSONA,
   examinerPrompt,
   generateQuestions,

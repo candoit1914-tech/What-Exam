@@ -43,6 +43,7 @@ function rateLimited() {
 }
 
 function usePrimaryOnly() {
+  ai.resetCircuitBreakers();
   config.ai.baseUrl = 'https://primary.test/v1';
   config.ai.apiKey = 'sk-test-primary-key-000000000000';
   config.ai.model = 'test-model';
@@ -74,6 +75,40 @@ test('a 429 is retried even when the caller disabled generic retries', async () 
   assert.ok(
     calls >= 2,
     `a 429 must be retried rather than failing the caller outright (saw ${calls} call(s))`
+  );
+});
+
+test('a billing-exhausted 429 fails immediately instead of burning retries', async () => {
+  usePrimaryOnly();
+  let calls = 0;
+  global.fetch = async () => {
+    calls++;
+    return {
+      ok: false,
+      status: 429,
+      headers: { get: () => null },
+      text: async () =>
+        JSON.stringify({
+          error: {
+            code: 'insufficient_quota',
+            type: 'insufficient_quota',
+            message: 'You have no credits remaining.',
+          },
+        }),
+    };
+  };
+
+  await assert.rejects(
+    () => ai.chatJSON([{ role: 'user', content: 'hi' }], { maxRetries: 0 }),
+    /quota|credit|billing/i
+  );
+  // A billing failure cannot be fixed by repeating the request, so the retry
+  // budget is pure waste. It is also paid in full before the fallback is even
+  // reached, because providers are now tried one at a time.
+  assert.equal(
+    calls,
+    1,
+    `an exhausted-quota 429 must fail fast (expected 1 call, saw ${calls})`
   );
 });
 
@@ -302,4 +337,112 @@ test('one failing diagram neither aborts the paper nor escapes as an unhandled r
   );
   assert.ok(Array.isArray(generated), 'generation must still return the paper');
   assert.equal(generated.length, questionCount, 'no question may be lost because a sibling diagram failed');
+});
+
+// ---------------------------------------------------------------------------
+// The primary provider is the main AI, not one of several racers.
+// ---------------------------------------------------------------------------
+
+test('the primary answers alone; the secondary is only used after it fails', async () => {
+  usePrimaryOnly();
+  config.claude.baseUrl = 'https://secondary.test/v1';
+  config.claude.apiKey = 'sk-test-secondary-key-000000000';
+  config.claude.model = 'test-secondary-model';
+
+  const calls = [];
+  const realFetch = global.fetch;
+  global.fetch = async (url) => {
+    calls.push(String(url));
+    if (url.includes('secondary.test')) {
+      return contentResponse('{"ok":"from secondary"}');
+    }
+    return contentResponse('{"ok":"from primary"}');
+  };
+  try {
+    const out = await ai.chatJSON([{ role: 'user', content: 'hi' }]);
+    // The primary answered, so nothing else should have been spent.
+    assert.equal(out.ok, 'from primary');
+    assert.equal(calls.length, 1, 'secondary must not be called when the primary succeeds');
+    assert.ok(calls[0].includes('primary.test'), 'the primary must be tried first');
+  } finally {
+    global.fetch = realFetch;
+  }
+});
+
+test('the secondary takes over when the primary is rate limited', async () => {
+  usePrimaryOnly();
+  config.claude.baseUrl = 'https://secondary.test/v1';
+  config.claude.apiKey = 'sk-test-secondary-key-000000000';
+  config.claude.model = 'test-secondary-model';
+
+  const calls = [];
+  const realFetch = global.fetch;
+  global.fetch = async (url) => {
+    calls.push(String(url));
+    if (url.includes('secondary.test')) {
+      return contentResponse('{"ok":"from secondary"}');
+    }
+    return rateLimited();
+  };
+  try {
+    const out = await ai.chatJSON(
+      [{ role: 'user', content: 'hi' }],
+      { maxRetries: 0, maxTokens: 100 }
+    );
+    assert.equal(out.ok, 'from secondary');
+    assert.ok(calls[0].includes('primary.test'), 'the primary is still tried first');
+    assert.ok(calls.some((u) => u.includes('secondary.test')), 'the secondary covers the failure');
+  } finally {
+    global.fetch = realFetch;
+  }
+});
+
+test('reasoning models are sent reasoning effort and no temperature', async () => {
+  usePrimaryOnly();
+  config.ai.model = 'gpt-5.6-terra';
+  config.ai.reasoningEffort = 'none';
+
+  let sentBody = null;
+  const realFetch = global.fetch;
+  global.fetch = async (_url, init) => {
+    sentBody = JSON.parse(init.body);
+    return contentResponse('{"ok":true}');
+  };
+  try {
+    await ai.chatJSON([{ role: 'user', content: 'hi' }], { temperature: 0.3, maxTokens: 50 });
+  } finally {
+    global.fetch = realFetch;
+  }
+  assert.equal(sentBody.model, 'gpt-5.6-terra');
+  // Reasoning-family models reject a non-default temperature outright, which
+  // would fail every single call rather than degrade gracefully.
+  assert.equal(sentBody.temperature, undefined, 'temperature must be omitted for reasoning models');
+  assert.deepEqual(sentBody.reasoning, { effort: 'none' });
+});
+
+test('non-reasoning models keep their temperature', async () => {
+  usePrimaryOnly();
+  config.ai.model = 'gpt-4o-mini';
+  config.ai.reasoningEffort = '';
+
+  let sentBody = null;
+  const realFetch = global.fetch;
+  global.fetch = async (_url, init) => {
+    sentBody = JSON.parse(init.body);
+    return contentResponse('{"ok":true}');
+  };
+  try {
+    await ai.chatJSON([{ role: 'user', content: 'hi' }], { temperature: 0.3, maxTokens: 50 });
+  } finally {
+    global.fetch = realFetch;
+  }
+  assert.equal(sentBody.temperature, 0.3);
+  assert.equal(sentBody.reasoning, undefined);
+});
+
+test('the default model is the current OpenAI generation', () => {
+  const fresh = require('../src/config');
+  // Read through a fresh require of the module's own default, not the mutated
+  // singleton other tests in this file poke at.
+  assert.equal(fresh.ai.defaultModel, 'gpt-5.6-terra');
 });

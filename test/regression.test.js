@@ -1453,9 +1453,11 @@ test('outbound messages to the same phone are serialized with a pacing gap', asy
 
 // ── Dual-provider AI race (CLAUDE_* secondary vs primary) ──
 //
-// When a second OpenAI-compatible provider is configured, chatJSON fires both
-// in parallel and the first SUCCESSFUL response wins. A fast failure on one
-// side must never abort the race, and both-fail must surface an error.
+// The primary is the main AI, not one of several racers. chatJSON calls it
+// alone and only reaches a fallback after it fails. A fast secondary must
+// never take over a call the primary can answer, and a fast failure on the
+// primary must hand off cleanly rather than aborting. Both-fail still surfaces
+// the primary's error.
 
 function fakeAIResponse(content, delayMs = 0) {
   return async () => {
@@ -1502,10 +1504,11 @@ function configureDualProviders() {
   cfg.claude.model = 'Fable 5';
 }
 
-test('chatJSON races both providers and returns the fastest successful answer', async () => {
+test('chatJSON uses the primary alone even when a fallback would answer faster', async () => {
   const ai = require('../src/services/ai');
   const state = saveAIState();
   configureDualProviders();
+  ai.resetCircuitBreakers();
   const calls = [];
   global.fetch = async (url) => {
     const host = new URL(url).host;
@@ -1515,12 +1518,14 @@ test('chatJSON races both providers and returns the fastest successful answer', 
   };
   try {
     const out = await ai.chatJSON([{ role: 'user', content: 'hi' }], { timeoutMs: 1000 });
-    assert.equal(out.winner, 'fable', 'the faster (secondary) response wins');
+    assert.equal(out.winner, 'nvidia', 'the primary answers, not the faster fallback');
     assert.ok(
-      calls.includes('fable.test') && calls.includes('nvidia.test'),
-      'both providers were fired in parallel'
+      !calls.includes('fable.test'),
+      'the fallback is never called while the primary succeeds'
     );
+    assert.deepEqual(calls, ['nvidia.test'], 'exactly one provider was called');
   } finally {
+    ai.resetCircuitBreakers();
     restoreAIState(state);
   }
 });
@@ -1529,6 +1534,7 @@ test('chatJSON falls back to the secondary when the primary provider fails', asy
   const ai = require('../src/services/ai');
   const state = saveAIState();
   configureDualProviders();
+  ai.resetCircuitBreakers();
   global.fetch = async (url) => {
     if (new URL(url).host.includes('fable')) return fakeAIResponse('{"winner":"fable"}')();
     return fakeAIError(500)();
@@ -1537,6 +1543,7 @@ test('chatJSON falls back to the secondary when the primary provider fails', asy
     const out = await ai.chatJSON([{ role: 'user', content: 'hi' }], { timeoutMs: 1000, maxRetries: 0 });
     assert.equal(out.winner, 'fable', 'secondary rescues the call when the primary errors');
   } finally {
+    ai.resetCircuitBreakers();
     restoreAIState(state);
   }
 });
@@ -1545,6 +1552,7 @@ test('chatJSON surfaces the primary error when both providers fail', async () =>
   const ai = require('../src/services/ai');
   const state = saveAIState();
   configureDualProviders();
+  ai.resetCircuitBreakers();
   global.fetch = async (url) => {
     if (new URL(url).host.includes('fable')) return fakeAIError(503)();
     return fakeAIError(500)();
@@ -1556,6 +1564,7 @@ test('chatJSON surfaces the primary error when both providers fail', async () =>
       'the primary provider error surfaces when both sides fail'
     );
   } finally {
+    ai.resetCircuitBreakers();
     restoreAIState(state);
   }
 });
