@@ -417,7 +417,11 @@ test('reasoning models are sent reasoning effort and no temperature', async () =
   // Reasoning-family models reject a non-default temperature outright, which
   // would fail every single call rather than degrade gracefully.
   assert.equal(sentBody.temperature, undefined, 'temperature must be omitted for reasoning models');
-  assert.deepEqual(sentBody.reasoning, { effort: 'none' });
+  // The Chat Completions surface takes a FLAT `reasoning_effort`. The nested
+  // `reasoning: { effort }` object is the Responses API shape and is not part
+  // of this endpoint's contract, so sending it here is a malformed request.
+  assert.equal(sentBody.reasoning_effort, 'none');
+  assert.equal(sentBody.reasoning, undefined, 'nested reasoning is Responses-only, not Chat Completions');
 });
 
 test('non-reasoning models keep their temperature', async () => {
@@ -438,6 +442,7 @@ test('non-reasoning models keep their temperature', async () => {
   }
   assert.equal(sentBody.temperature, 0.3);
   assert.equal(sentBody.reasoning, undefined);
+  assert.equal(sentBody.reasoning_effort, undefined);
 });
 
 test('the default model is the current OpenAI generation', () => {

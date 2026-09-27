@@ -37,10 +37,11 @@ function withHardTimeout(promise, ms) {
 
 // OpenAI reasoning-family models (gpt-5*, gpt-6*, o1/o3/o4*) reject a
 // non-default `temperature` outright - the request fails with a 400 rather
-// than degrading. They also accept a `reasoning.effort` control, where
-// 'none' skips reasoning tokens entirely, which is what keeps a ~80-call
-// paper fast. Non-reasoning models keep temperature and must not receive a
-// `reasoning` key they do not understand.
+// than degrading. They also accept a reasoning-effort control, where 'none'
+// skips reasoning tokens entirely, which is what keeps a ~80-call paper fast.
+// On /chat/completions that control is the flat `reasoning_effort` field.
+// Non-reasoning models keep temperature and must not receive a
+// `reasoning_effort` they do not understand.
 const REASONING_MODEL_RE = /^(gpt-5|gpt-6|o[134])/i;
 
 /**
@@ -61,7 +62,12 @@ function buildChatBody({ model, messages, temperature, maxTokens, reasoningEffor
   if (isReasoningModel(model)) {
     // temperature omitted deliberately - see note above.
     const effort = reasoningEffort === undefined ? config.ai.reasoningEffort : reasoningEffort;
-    if (effort) body.reasoning = { effort };
+    // This endpoint is /chat/completions, whose contract is a FLAT
+    // `reasoning_effort` field. The nested `reasoning: { effort }` object is
+    // the Responses API shape; sending it here is not part of this endpoint's
+    // parameters. Effort values are model-dependent (gpt-6-astra rejects
+    // 'none' with a 400), which is why AI_REASONING_EFFORT is configurable.
+    if (effort) body.reasoning_effort = effort;
   } else {
     if (typeof temperature === 'number') body.temperature = temperature;
   }
