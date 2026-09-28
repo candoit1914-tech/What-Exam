@@ -586,9 +586,12 @@ const BLOCK_MAX_CHARS = 12000;
 // Every block asks for up to BLOCK_MAX_TOKENS output, so concurrency here is
 // really a token-throughput knob: 6 blocks in flight is ~100k output tokens
 // demanded at once, which is what drove the account into 429s. Tunable via
-// AI_BLOCK_CONCURRENCY for accounts on a tighter rate limit.
+// AI_BLOCK_CONCURRENCY for accounts on a tighter rate limit. The default is 3
+// rather than 4 because a shared gateway fronts many accounts, so the ceiling
+// on how fast the underlying provider can absorb the demand is not ours alone
+// to raise.
 const DIAGRAM_CONCURRENCY = 4;
-const BLOCK_CONCURRENCY = Math.max(1, parseInt(process.env.AI_BLOCK_CONCURRENCY, 10) || 4);
+const BLOCK_CONCURRENCY = Math.max(1, parseInt(process.env.AI_BLOCK_CONCURRENCY, 10) || 3);
 // 16k tokens is enough for a block of 15 questions with full theory rubrics.
 // Previous 6k limit caused truncation on theory-heavy blocks, producing
 // invalid JSON that dropped entire blocks of questions.

@@ -445,9 +445,16 @@ test('non-reasoning models keep their temperature', async () => {
   assert.equal(sentBody.reasoning_effort, undefined);
 });
 
-test('the default model is the current OpenAI generation', () => {
+test('the shipped default provider pair is internally consistent', () => {
   const fresh = require('../src/config');
-  // Read through a fresh require of the module's own default, not the mutated
-  // singleton other tests in this file poke at.
-  assert.equal(fresh.ai.defaultModel, 'gpt-5.6-terra');
+  // Read through a fresh require of the module's own defaults, not the mutated
+  // singleton other tests in this file poke at. Only hardcoded literals are
+  // asserted here: config.js loads .env, so model/baseUrl/reasoningEffort
+  // reflect the developer's local environment.
+  assert.equal(fresh.ai.defaultModel, 'gpt-6-astra');
+  // The default model rejects reasoning_effort 'none' with a 400, so shipping
+  // 'none' alongside it would fail every call on a deploy that sets AI_MODEL
+  // but not AI_REASONING_EFFORT.
+  assert.equal(fresh.ai.defaultReasoningEffort, 'low');
+  assert.notEqual(fresh.ai.defaultReasoningEffort, 'none');
 });

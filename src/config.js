@@ -43,26 +43,36 @@ const config = {
   },
 
   ai: {
-    baseUrl: (process.env.AI_BASE_URL || 'https://api.openai.com/v1').replace(/\/$/, ''),
+    // AshnaAI is a multi-model gateway that speaks the OpenAI chat-completions
+    // contract, so switching the primary provider is a base-URL change, not a
+    // code change. Point AI_BASE_URL/AI_MODEL at any OpenAI-compatible host to
+    // trade quality for cost.
+    baseUrl: (process.env.AI_BASE_URL || 'https://api.ashna.ai/v1/api').replace(/\/$/, ''),
     apiKey: valid(process.env.AI_API_KEY) ? process.env.AI_API_KEY : '',
-    // gpt-5.6-terra is the current OpenAI generation's balance tier. It is a
-    // 2026 model and, unlike the previous flagship gpt-6-astra, it accepts
-    // `reasoning.effort: 'none'`, which turns off reasoning tokens entirely.
-    // That matters here: this app makes ~80 calls per paper, and reasoning
-    // tokens bill as output and add latency to every one of them.
-    defaultModel: 'gpt-5.6-terra',
-    model: process.env.AI_MODEL || 'gpt-5.6-terra',
-    // 'none' = no reasoning tokens. Raise to 'low'/'medium' if extraction
-    // quality on a hard paper needs it. Set AI_REASONING_EFFORT='' to disable.
+    // gpt-6-astra is a reasoning-family flagship, and the most expensive tier
+    // the gateway offers: a single paper costs ~80 AI calls, so per-call price
+    // dominates the bill. It is the default because it is the quality ceiling
+    // for hard papers; drop AI_MODEL to a cheaper catalog id (gpt-5-mini,
+    // glm-5.3-flash) when volume, not quality, is the constraint.
+    defaultModel: 'gpt-6-astra',
+    model: process.env.AI_MODEL || 'gpt-6-astra',
+    // 'none' skips reasoning tokens entirely, which is the dominant latency
+    // and cost term at this call volume - but gpt-6-astra rejects 'none' with a
+    // 400, so it cannot be the default. 'low' is the cheapest effort astra
+    // accepts. Raise to 'medium'/'high' if extraction quality on a hard paper
+    // needs it. Set AI_REASONING_EFFORT='' to omit the field entirely.
+    defaultReasoningEffort: 'low',
     reasoningEffort: process.env.AI_REASONING_EFFORT !== undefined
       ? process.env.AI_REASONING_EFFORT
-      : 'none',
+      : 'low',
     timeoutMs: parseInt(process.env.AI_TIMEOUT_MS || '120000', 10),
     // Per-block budget for PDF question extraction. This is deliberately much
     // larger than timeoutMs: a block that overruns is not retried into
     // oblivion, it is SKIPPED, so a tight budget silently deletes questions.
-    // Measured on a real 17-page paper: blocks took 28s-89s to answer.
-    blockTimeoutMs: parseInt(process.env.AI_BLOCK_TIMEOUT_MS || '240000', 10),
+    // Measured on a real 17-page paper: blocks took 28s-89s to answer. The
+    // default carries extra headroom for a flagship reasoning model behind a
+    // gateway, which is slower than the host the range was measured on.
+    blockTimeoutMs: parseInt(process.env.AI_BLOCK_TIMEOUT_MS || '360000', 10),
     vision: process.env.AI_VISION === 'true',
   },
 
