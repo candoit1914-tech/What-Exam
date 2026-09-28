@@ -49,18 +49,23 @@ const config = {
     // trade quality for cost.
     baseUrl: (process.env.AI_BASE_URL || 'https://api.ashna.ai/v1/api').replace(/\/$/, ''),
     apiKey: valid(process.env.AI_API_KEY) ? process.env.AI_API_KEY : '',
-    // gpt-6-astra is a reasoning-family flagship, and the most expensive tier
-    // the gateway offers: a single paper costs ~80 AI calls, so per-call price
-    // dominates the bill. It is the default because it is the quality ceiling
-    // for hard papers; drop AI_MODEL to a cheaper catalog id (gpt-5-mini,
-    // glm-5.3-flash) when volume, not quality, is the constraint.
-    defaultModel: 'gpt-6-astra',
-    model: process.env.AI_MODEL || 'gpt-6-astra',
-    // 'none' skips reasoning tokens entirely, which is the dominant latency
-    // and cost term at this call volume - but gpt-6-astra rejects 'none' with a
-    // 400, so it cannot be the default. 'low' is the cheapest effort astra
-    // accepts. Raise to 'medium'/'high' if extraction quality on a hard paper
-    // needs it. Set AI_REASONING_EFFORT='' to omit the field entirely.
+    // gpt-5-mini, not the flagship gpt-6-astra. A single paper costs ~80 AI
+    // calls, so per-call price multiplies fast and a flagship burns a small
+    // credit balance within a few papers. It is the same reasoning family, so
+    // `reasoning_effort` applies and reasoning tokens can be held down - which
+    // is the dominant cost term at this call volume. Measured on a PDF-extraction
+    // block through this gateway: 3275 total tokens against astra's 4923 for
+    // the same 8 questions. Raise to gpt-5.4 or gpt-6-astra via AI_MODEL if
+    // question quality on hard papers needs it.
+    defaultModel: 'gpt-5-mini',
+    model: process.env.AI_MODEL || 'gpt-5-mini',
+    // 'low' keeps reasoning tokens down without dropping the structured
+    // extraction quality the app depends on. 'none' is accepted by this
+    // gateway and measured slightly cheaper still (3213 vs 3275 tokens on a
+    // PDF block), so it is a valid cheaper setting - but 'low' is the shipped
+    // default because the margin is small and hard-paper extraction quality is
+    // worth more than ~2% of the token spend. Raise to 'medium'/'high' if
+    // extraction degrades. Set AI_REASONING_EFFORT='' to omit the field.
     defaultReasoningEffort: 'low',
     reasoningEffort: process.env.AI_REASONING_EFFORT !== undefined
       ? process.env.AI_REASONING_EFFORT
