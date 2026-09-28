@@ -512,6 +512,18 @@ function repairTruncatedJSON(text) {
   return null;
 }
 
+// Counters for JSON parsing outcomes. `parseRepaired` is the important one: a
+// block whose output hit the token cap is salvaged by repairTruncatedJSON, so it
+// SUCCEEDS while silently returning fewer questions than were asked for. A
+// repair therefore hides question loss that no failure count would reveal.
+// Plain increments are race-safe here because Node runs this single-threaded.
+const parseCounters = { ok: 0, repaired: 0, failed: 0 };
+
+/** Snapshot of JSON parse outcomes. Used to explain silent question loss. */
+function parseStats() {
+  return { ...parseCounters };
+}
+
 function parseJSON(content) {
   let text = String(content).trim();
   const fence = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
@@ -524,15 +536,21 @@ function parseJSON(content) {
   }
   for (const c of candidates) {
     try {
-      return JSON.parse(c);
+      const parsed = JSON.parse(c);
+      parseCounters.ok++;
+      return parsed;
     } catch { /* try next */ }
   }
   // Last resort: the payload may have been truncated mid-question by the token
   // cap. Salvage what the model finished.
   for (const c of candidates) {
     const repaired = repairTruncatedJSON(c);
-    if (repaired) return repaired;
+    if (repaired) {
+      parseCounters.repaired++;
+      return repaired;
+    }
   }
+  parseCounters.failed++;
   throw new AIError('AI response was not valid JSON: ' + text.slice(0, 200));
 }
 
@@ -1544,6 +1562,26 @@ Rules:
   }
 
   let completed = 0;
+  // Instrumentation only. `blockStats` accumulates what each block cost and why
+  // it failed so a slow or lossy import can be explained from real numbers
+  // instead of inferred from a comment. It changes no control flow.
+  const blockStats = { blocks: 0, ok: 0, dropped: 0, requested: 0, returned: 0, reasons: {} };
+
+  /** Classify a block failure so the log says WHY, not just "skipped". */
+  function classifyBlockFailure(err) {
+    if (!err) return 'unknown';
+    if (err.permanent) return 'quota-exhausted';
+    if (err.rateLimited) return 'rate-limited-429';
+    if (typeof err.message === 'string' && /timed out/i.test(err.message)) return 'timeout';
+    if (typeof err.message === 'string' && /not valid JSON/i.test(err.message)) return 'invalid-json';
+    if (typeof err.message === 'string' && /no questions/i.test(err.message)) return 'empty-block';
+    if (typeof err.message === 'string' && /AI request failed \((\d+)\)/.exec(err.message)) {
+      return `http-${/AI request failed \((\d+)\)/.exec(err.message)[1]}`;
+    }
+    if (err.name === 'TypeError') return 'network';
+    return 'other';
+  }
+
   // A single block runs on its own shorter clock with a couple of retries. If
   // it still fails (timeout, HTTP error, bad JSON) the block is re-run
   // serially after the wave (flaky shared endpoints usually succeed once they
@@ -1555,7 +1593,9 @@ Rules:
   // produced 429 storms and multi-minute imports.
   const runBlock = async (bp, maxRetries) => {
     const retries = maxRetries === undefined ? BLOCK_WAVE_RETRIES : maxRetries;
+    const label = `block${bp.index != null ? `#${bp.index}` : ''}`;
     for (let attempt = 0; attempt <= retries; attempt++) {
+      const startedAt = Date.now();
       try {
         const result = await chatJSON(
           [
@@ -1575,14 +1615,33 @@ Rules:
         if (!Array.isArray(list) || list.length === 0) {
           throw new AIError('block returned no questions');
         }
+        const took = Date.now() - startedAt;
+        const short = list.length < BLOCK_QUESTIONS;
+        blockStats.ok++;
+        blockStats.returned += list.length;
+        if (short) blockStats.reasons.short = (blockStats.reasons.short || 0) + 1;
+        console.log(
+          `[ai] ${label} ok in ${took}ms (attempt ${attempt + 1}/${retries + 1}) returned ${list.length}`
+        );
         return result;
       } catch (err) {
         const isTimeout = err && err.name === 'AIError' && /timed out/i.test(err.message);
+        const reason = classifyBlockFailure(err);
+        const took = Date.now() - startedAt;
         if (attempt < retries) {
+          console.warn(
+            `[ai] ${label} failed in ${took}ms (attempt ${attempt + 1}/${retries + 1}) reason=${reason}` +
+            ` - ${isTimeout ? 'timeout' : err.message}`
+          );
           await delay(500 * (attempt + 1));
           continue;
         }
-        console.error('[ai] extraction block skipped:', isTimeout ? 'timeout' : err.message);
+        blockStats.dropped++;
+        blockStats.reasons[reason] = (blockStats.reasons[reason] || 0) + 1;
+        console.error(
+          `[ai] extraction block skipped: ${reason} after ${took}ms and ${attempt + 1} attempt(s) -` +
+          ` ${isTimeout ? 'timeout' : err.message}`
+        );
         return null;
       }
     }
@@ -1603,6 +1662,8 @@ Rules:
   });
 
   const settled = await mapLimit(tasks, BLOCK_CONCURRENCY, (run) => run());
+  blockStats.blocks = blockPrompts.length;
+  blockStats.requested = blockStats.blocks * BLOCK_QUESTIONS;
 
   // Re-run every failed block serially (concurrency 1). This recovers most
   // transient failures and is what stops a whole theory section disappearing.
@@ -1617,6 +1678,25 @@ Rules:
         `${stillFailed.length} question block(s) could not be parsed — some questions may be missing. Retry the upload to recover them.`
       );
     }
+  }
+
+  // One summary line per import. `parseStats.repaired` is the honest truncation
+  // signal: repairTruncatedJSON only runs when a response hit the output token
+  // cap, and a repaired block SUCCEEDS while silently returning fewer questions.
+  // Block return counts are logged but deliberately NOT used to warn - a block
+  // holding 15 questions is a cap, not an expectation, so a short block may be
+  // perfectly normal. The user-facing loss detector stays completenessWarning(),
+  // which compares the estimated question count against what was extracted.
+  {
+    const ps = parseStats();
+    const reasonStr = Object.entries(blockStats.reasons)
+      .map(([k, v]) => `${k}=${v}`).join(' ') || 'none';
+    console.log(
+      `[ai] extraction summary: blocks=${blockStats.blocks} ok=${blockStats.ok} dropped=${blockStats.dropped} ` +
+      `shortBlocks=${blockStats.reasons.short || 0} ` +
+      `questions=${blockStats.returned}/${blockStats.requested} ` +
+      `parse(ok=${ps.ok} repaired=${ps.repaired} failed=${ps.failed}) reasons: ${reasonStr}`
+    );
   }
 
   const seen = new Set();
@@ -2722,6 +2802,7 @@ module.exports = {
   trailingContext,
   estimateQuestionCount,
   completenessWarning,
+  parseStats,
   splitSolutionSections,
   cleanExamText,
   extractAnswerKeySection,
