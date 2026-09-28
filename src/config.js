@@ -46,6 +46,14 @@ const config = {
     .map((s) => s.trim())
     .filter(Boolean),
 
+  // Storage. Both must point at a PERSISTENT volume on Render: the container
+  // filesystem is discarded on every deploy and restart, so leaving these on the
+  // default ./data wipes the database, every student and every graded answer,
+  // plus uploaded photos and voice notes. render.yaml mounts a disk at
+  // /opt/render/project/src/data and sets both variables to match.
+  //
+  // Warnings on boot when the path is still the ephemeral default, so a new
+  // deploy does not quietly destroy a live exam database again.
   dbPath: path.resolve(root, process.env.DB_PATH || './data/exams.db'),
   uploadsDir: path.resolve(root, process.env.UPLOADS_DIR || './data/uploads'),
 
@@ -84,6 +92,14 @@ const config = {
     // default carries extra headroom for a flagship reasoning model behind a
     // gateway, which is slower than the host the range was measured on.
     blockTimeoutMs: parseInt(process.env.AI_BLOCK_TIMEOUT_MS || '360000', 10),
+    // How many question-generation batches may be in flight at once. A batch of
+    // 10 questions takes ~19s on the gateway, so this dominates how long a paper
+    // takes. It used to be hardcoded to 2 "to avoid 429s", which serialized a
+    // 15-call paper into 8 waves. Measured against AshnaAI: 4 concurrent batches
+    // finished in 29.5s and 8 in 29.6s, with zero 429s at either level - the
+    // wall-clock is the provider's latency, not a queue. Rate limits are handled
+    // by retry-with-backoff in chatJSON, which is the correct place for them.
+    generateConcurrency: parseInt(process.env.AI_GENERATE_CONCURRENCY || '6', 10),
     vision: process.env.AI_VISION === 'true',
   },
 

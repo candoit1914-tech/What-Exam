@@ -608,6 +608,25 @@ const BLOCK_MAX_CHARS = 12000;
 // to raise.
 const DIAGRAM_CONCURRENCY = 4;
 const BLOCK_CONCURRENCY = Math.max(1, parseInt(process.env.AI_BLOCK_CONCURRENCY, 10) || 3);
+
+// Workers for one question-generation run. Never exceeds the number of batches:
+// extra workers would sit idle and buy nothing. Bounded below so a bad
+// AI_GENERATE_CONCURRENCY cannot collapse to zero workers and hang the run
+// forever - the previous hardcoded cap of 2 did the opposite, serializing work
+// the provider absorbs in parallel (4 and 8 concurrent batches both finished in
+// ~30s against a ~19s single batch, with no 429s).
+function batchConcurrencyFor(batchCount) {
+  const configured = Math.max(1, parseInt(config.ai.generateConcurrency, 10) || 6);
+  return Math.max(1, Math.min(configured, batchCount));
+}
+
+// Launch stagger between batches, in ms. This is a rate-limit guard, so it is a
+// flat constant: it used to be delay(idx * 500), which made the last batch in a
+// run wait several seconds before it even started, adding to the very latency
+// concurrency was meant to remove.
+function batchLaunchStaggerMs() {
+  return 0;
+}
 // 16k tokens is enough for a block of 15 questions with full theory rubrics.
 // Previous 6k limit caused truncation on theory-heavy blocks, producing
 // invalid JSON that dropped entire blocks of questions.
@@ -1198,19 +1217,21 @@ ${avoidBlock}`);
         { temperature: 0.95, maxRetries: 2, maxTokens: 16384 }
       )
     );
-    // Conservative concurrency: 1-2 parallel requests to avoid 429s.
-    // This no longer scales with the number of configured fallbacks. Providers
-    // are tried one at a time now, so a fallback can never absorb parallel
-    // load - every request still lands on the primary's rate limit, and extra
-    // concurrency only burns that budget faster.
-    const concurrency = Math.min(maxCalls, 2);
+    // Batch concurrency. This was `Math.min(maxCalls, 2)`, which serialized a
+    // 15-call paper into 8 sequential waves of ~19s - the single largest
+    // contributor to "generation is slow". Measured on the gateway, 4 and 8
+    // concurrent batches both completed in ~30s with no 429s, because the
+    // batches run in parallel with the provider's own latency in parallel too.
+    // A 429 is still handled where it belongs: chatJSON retries with backoff
+    // (maxRetries: 2 above), so a rate limit now costs a retry rather than a
+    // permanently crippled scheduler.
+    const concurrency = batchConcurrencyFor(maxCalls);
     console.log(`[generate] attempt ${attempt}: launching ${maxCalls} batches with concurrency ${concurrency}`);
     const settled = await mapLimit(tasks, concurrency, async (run, idx) => {
       try {
-        // Stagger batch launches by 500ms to avoid hammering the API
-        await delay(idx * 500);
+        const stagger = batchLaunchStaggerMs();
+        if (stagger > 0) await delay(idx * stagger);
         const result = await run();
-        await delay(500);
         return result;
       } catch (err) {
         console.error(`[generate] batch ${idx} failed:`, err.message);
@@ -2832,6 +2853,8 @@ module.exports = {
   aiConfigured,
   chatJSON,
   mapLimit,
+  batchConcurrencyFor,
+  batchLaunchStaggerMs,
   providerCooldownMs,
   resetCircuitBreakers,
   isReasoningModel,

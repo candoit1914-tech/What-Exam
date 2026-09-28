@@ -258,11 +258,47 @@ if (require.main === module) {
     // Start periodic background cleanup so expired sessions are finalized
     // automatically instead of only on server restart.
     require('./services/exam').startStaleSessionCleanup();
+
+    // Loud, unmissable warning when storage is still on the container
+    // filesystem. Render discards that on every deploy and restart, which
+    // silently wipes the database - students, sessions and graded answers - and
+    // every uploaded photo and voice note. It then re-seeds a fresh exam, which
+    // made the loss look like a normal boot. Losing a live exam database is far
+    // too expensive to discover from a log line further down.
+    const onEphemeralStorage = !process.env.DB_PATH && !process.env.UPLOADS_DIR;
+    if (onEphemeralStorage) {
+      console.warn('');
+      console.warn('  ============================================================================');
+      console.warn('   DATA LOSS RISK: DB_PATH and UPLOADS_DIR are not set.');
+      console.warn('');
+      console.warn('   The database and uploads are inside the container filesystem, which');
+      console.warn('   Render DELETES on every deploy and restart. Every student, session,');
+      console.warn('   graded answer, photo and voice note will be gone.');
+      console.warn('');
+      console.warn('   Fix: mount a Render disk at /opt/render/project/src/data, then set');
+      console.warn('        DB_PATH=/opt/render/project/src/data/exams.db');
+      console.warn('        UPLOADS_DIR=/opt/render/project/src/data/uploads');
+      console.warn('        (render.yaml in the repo has this ready to apply.)');
+      console.warn('  ============================================================================');
+      console.warn('');
+    }
+
     if (config.seedOnBoot) {
       try {
         const s = seedIfEmpty(db);
         if (s.seeded) {
           console.log(`[seed] DB was empty — seeded exam "${s.title}" (id ${s.examId}, status ${s.status})`);
+          // An empty database is NORMAL on a first boot against a fresh
+          // persistent disk. On an already-deployed service it means the disk is
+          // not mounted, so a redeploy destroyed the previous data - say so
+          // plainly, because the seed line above reads like routine startup.
+          if (onEphemeralStorage) {
+            console.error(
+              '[seed] WARNING: this re-seeded an empty database on an already-deployed service. ' +
+              'If exams have run before, that data was lost with the container filesystem. ' +
+              'Mount a persistent disk and set DB_PATH/UPLOADS_DIR.'
+            );
+          }
         }
       } catch (e) {
         console.error('[seed] failed:', e.message);

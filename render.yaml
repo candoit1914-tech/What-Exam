@@ -1,0 +1,67 @@
+services:
+  - type: web
+    name: what-exam
+    runtime: node
+    plan: starter
+    region: oregon
+    buildCommand: npm install
+    startCommand: node src/server.js
+    healthCheckPath: /health
+    # ── Persistent storage ────────────────────────────────────────────────
+    # Without this disk, ./data lives on the container filesystem, which Render
+    # discards on every deploy and restart. That silently wiped the SQLite
+    # database - and every student, session and graded answer with it - on each
+    # deploy, which is why the app logged "[seed] DB was empty" and lost
+    # in-progress exams. It also destroyed uploaded student photos and voice
+    # notes, which are written to the same ./data/uploads directory.
+    #
+    # The mount path MUST match DB_PATH and UPLOADS_DIR below, otherwise the app
+    # keeps writing to the ephemeral filesystem and the problem returns.
+    disk:
+      name: what-exam-data
+      mountPath: /opt/render/project/src/data
+      sizeGB: 1
+    envVars:
+      - key: NODE_VERSION
+        value: "22.11.0"
+      # Point both at the mounted disk. Absolute, not relative: the app resolves
+      # them against the project root, but an absolute path is unambiguous about
+      # living on the disk rather than the container.
+      - key: DB_PATH
+        value: /opt/render/project/src/data/exams.db
+      - key: UPLOADS_DIR
+        value: /opt/render/project/src/data/uploads
+      # SEED_ON_BOOT only seeds when the table is empty, so on a persistent disk
+      # it is a no-op after the first boot. It cannot re-seed over real data.
+      - key: SEED_ON_BOOT
+        value: "true"
+      # ── AI provider (AshnaAI) ──────────────────────────────────────────
+      - key: AI_BASE_URL
+        value: https://api.ashna.ai/v1/api
+      - key: AI_MODEL
+        value: gpt-5-mini
+      - key: AI_REASONING_EFFORT
+        value: low
+      - key: AI_VISION
+        value: "true"
+      - key: AI_TIMEOUT_MS
+        value: "120000"
+      - key: AI_BLOCK_TIMEOUT_MS
+        value: "360000"
+      - key: AI_BLOCK_CONCURRENCY
+        value: "3"
+      # How many question-generation batches run at once. Measured on AshnaAI:
+      # 4 concurrent batches finished in 29.5s and 8 in 29.6s with no 429s, so
+      # the old hardcoded 2 was serializing work the gateway absorbs at once.
+      # Lower this only if your account hits 429s; chatJSON retries with backoff.
+      - key: AI_GENERATE_CONCURRENCY
+        value: "6"
+      # ── Secrets: set these in the Render dashboard, NOT here ────────────
+      # AI_API_KEY                 (AshnaAI)
+      # AI_TRANSCRIBE_API_KEY      (speech-to-text; chat gateway cannot do audio)
+      # ADMIN_PASSWORD             (a STABLE value - without it a new one is
+      #                             generated per boot and you lose admin access
+      #                             on every deploy)
+      # WHATSAPP_APP_SECRET        (Meta app secret - webhook signatures are
+      #                             rejected without it)
+      # WHATSAPP_TEMPLATE_NAME     (approved template for exam invites)
