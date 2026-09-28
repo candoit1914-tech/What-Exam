@@ -87,6 +87,30 @@ const config = {
     vision: process.env.AI_VISION === 'true',
   },
 
+  // Speech-to-text is a SEPARATE provider from chat, deliberately. The chat
+  // primary is AshnaAI, whose catalog holds no speech model at all (90 chat
+  // models, no whisper), /audio/transcriptions 404s, and every model that
+  // accepts an `input_audio` part returns 200 with no transcript. So audio
+  // cannot share the chat base URL, and the previous arrangement - gating the
+  // Whisper call on the chat base URL containing "api.openai.com" - meant
+  // moving chat to a gateway silently disabled voice notes.
+  //
+  // Any OpenAI-compatible /audio/transcriptions endpoint works here (OpenAI,
+  // Groq, a self-hosted faster-whisper). Setting only the key is enough: the
+  // base URL defaults to OpenAI and the model to whisper-1. With no key,
+  // `enabled` is false and transcribeAudio() refuses rather than sending audio
+  // to a chat endpoint that would answer 200 with silence.
+  aiTranscribe: (() => {
+    const key = process.env.AI_TRANSCRIBE_API_KEY || '';
+    const usable = valid(key);
+    return {
+      baseUrl: (process.env.AI_TRANSCRIBE_BASE_URL || 'https://api.openai.com/v1').replace(/\/$/, ''),
+      apiKey: usable ? key : '',
+      model: process.env.AI_TRANSCRIBE_MODEL || 'whisper-1',
+      enabled: usable,
+    };
+  })(),
+
   // Optional second OpenAI-compatible provider. The primary is the main AI:
   // it is called on its own, and this endpoint is only tried if the primary
   // fails (see `ai.chatJSON`). Leave CLAUDE_API_KEY/CLAUDE_BASE_URL empty to

@@ -2644,12 +2644,19 @@ RULES:
 
 /**
  * Transcribe an audio file (voice message) to text.
- * Strategy: try OpenAI Whisper API first (most reliable for audio),
- * then try provider chat endpoints with input_audio, then Gemini native.
+ * Strategy: a dedicated speech-to-text provider first (most reliable for
+ * audio), then provider chat endpoints with input_audio, then Gemini native.
  */
 async function transcribeAudio(audioPath, questionText) {
-  if (!aiConfigured()) {
-    throw new AIError('AI is not configured');
+  // Entry depends on EITHER provider, not the chat one: audio can be fully
+  // transcribable by a speech endpoint even while the chat provider is
+  // missing or misconfigured, and gating on chat alone would reject that.
+  const sttConfigured = !!(config.aiTranscribe && config.aiTranscribe.enabled && config.aiTranscribe.apiKey);
+  if (!sttConfigured && !aiConfigured()) {
+    throw new AIError(
+      'No provider configured for audio transcription. Set AI_TRANSCRIBE_API_KEY ' +
+      'to a speech-to-text endpoint, or configure a chat provider.'
+    );
   }
 
   const fs = require('fs');
@@ -2679,24 +2686,27 @@ RULES:
 
   const effectiveTimeout = Math.max(config.ai.timeoutMs, 60000);
 
-  // ── Strategy 1: OpenAI Whisper API (most reliable for audio) ─────────
-  // The /v1/audio/transcriptions endpoint accepts multipart form data.
-  if (config.ai.baseUrl.includes('api.openai.com') && config.ai.apiKey) {
+  // ── Strategy 1: dedicated speech-to-text provider (most reliable) ─────
+  // Independent of the chat primary on purpose: a chat gateway usually has no
+  // speech model, and `input_audio` against one returns 200 with no transcript,
+  // which is indistinguishable from silence. Failing loudly here is what keeps
+  // a broken STT setup from grading a voice note as blank.
+  if (config.aiTranscribe && config.aiTranscribe.enabled && config.aiTranscribe.apiKey) {
     try {
-      console.log('[ai] Transcribing audio via OpenAI Whisper API...');
+      console.log(`[ai] Transcribing audio via ${config.aiTranscribe.model} at ${config.aiTranscribe.baseUrl}...`);
       // Node 18+ has built-in FormData and Blob
       const formData = new FormData();
       const blob = new Blob([audioBuffer], { type: mimeType });
       formData.append('file', blob, `audio.${ext}`);
-      formData.append('model', 'whisper-1');
+      formData.append('model', config.aiTranscribe.model);
       formData.append('language', 'en');
       formData.append('response_format', 'text');
       formData.append('prompt', questionText);
 
       const res = await withHardTimeout(
-        fetch(`${config.ai.baseUrl}/audio/transcriptions`, {
+        fetch(`${config.aiTranscribe.baseUrl}/audio/transcriptions`, {
           method: 'POST',
-          headers: { Authorization: `Bearer ${config.ai.apiKey}` },
+          headers: { Authorization: `Bearer ${config.aiTranscribe.apiKey}` },
           body: formData,
         }),
         effectiveTimeout
@@ -2705,16 +2715,25 @@ RULES:
       if (res.ok) {
         const text = await res.text();
         if (text && text.trim() && text.trim() !== '[inaudible]') {
-          console.log(`[ai] Audio transcribed via Whisper: "${text.trim().slice(0, 150)}..."`);
+          console.log(`[ai] Audio transcribed via ${config.aiTranscribe.model}: "${text.trim().slice(0, 150)}..."`);
           return text.trim();
         }
+        // A 200 with an empty body means the endpoint accepted the file but
+        // could not decode it. Falling through to input_audio would then try
+        // a chat model, which on a gateway answers 200 with no transcript too.
+        throw new AIError(`${config.aiTranscribe.model} returned an empty transcript`);
       } else {
         const errText = await res.text().catch(() => '');
-        console.warn(`[ai] Whisper API returned ${res.status}: ${errText.slice(0, 200)}`);
+        console.warn(`[ai] Transcribe API returned ${res.status}: ${errText.slice(0, 200)}`);
       }
     } catch (err) {
-      console.warn(`[ai] Whisper API failed: ${err.message}`);
+      console.warn(`[ai] Transcribe API failed: ${err.message}`);
     }
+  } else {
+    console.warn(
+      '[ai] No speech-to-text provider configured (set AI_TRANSCRIBE_API_KEY). ' +
+      'Voice notes cannot be transcribed - they will be flagged for manual review.'
+    );
   }
 
   // ── Strategy 2: Provider chat endpoints with input_audio ──────────────
@@ -2792,6 +2811,18 @@ RULES:
       console.error(`[ai] ${p.name} provider failed for audio transcription: ${err.message}`);
       lastErr = err;
     }
+  }
+  // The raw error from the input_audio path ("no choices in payload") says
+  // nothing useful to whoever has to fix it. When no speech provider is
+  // configured, name the actual cause: chat providers on a gateway answer 200
+  // with no transcript, so this endpoint is not a viable transcription path.
+  if (lastErr && !(config.aiTranscribe && config.aiTranscribe.enabled)) {
+    throw new AIError(
+      'Audio transcription failed and no speech-to-text provider is configured. ' +
+      'Set AI_TRANSCRIBE_API_KEY - a chat gateway (AshnaAI, OpenRouter, Groq chat ' +
+      'models) cannot transcribe audio, so the input_audio fallback cannot work either. ' +
+      `Underlying error: ${lastErr.message}`
+    );
   }
   throw lastErr || new AIError('All providers failed for audio transcription');
 }
