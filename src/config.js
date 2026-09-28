@@ -15,6 +15,27 @@ const adminPassword = (() => {
 })();
 const adminPasswordIsGenerated = !valid(process.env.ADMIN_PASSWORD || '');
 
+// Shipped AI defaults, declared once. The `ai` block and the tests both read
+// these, so a test asserting the default really does pin the value the runtime
+// uses - a duplicated literal in two places could drift and still pass.
+const DEFAULT_AI_BASE_URL = 'https://api.ashna.ai/v1/api';
+// gpt-5-mini, not the flagship gpt-6-astra. A single paper costs ~80 AI calls,
+// so per-call price multiplies fast and a flagship burns a small credit balance
+// within a few papers. It is the same reasoning family, so `reasoning_effort`
+// applies and reasoning tokens can be held down - the dominant cost term at
+// this call volume. Measured on a PDF-extraction block through this gateway:
+// 3275 total tokens against astra's 4923 for the same 8 questions. Raise to
+// gpt-5.4 or gpt-6-astra via AI_MODEL if hard-paper question quality needs it.
+const DEFAULT_AI_MODEL = 'gpt-5-mini';
+// 'low' keeps reasoning tokens down without dropping the structured extraction
+// quality the app depends on. 'none' is accepted by this gateway and measured
+// slightly cheaper still (3213 vs 3275 tokens on a PDF block), so it is a valid
+// cheaper setting - but 'low' is the shipped default because the margin is small
+// and hard-paper extraction quality is worth more than ~2% of the token spend.
+// Raise to 'medium'/'high' if extraction degrades. Set AI_REASONING_EFFORT=''
+// to omit the field.
+const DEFAULT_REASONING_EFFORT = 'low';
+
 const config = {
   port: parseInt(process.env.PORT || '3000', 10),
   appUrl: (process.env.APP_URL || `http://localhost:${process.env.PORT || 3000}`).replace(/\/$/, ''),
@@ -47,29 +68,14 @@ const config = {
     // contract, so switching the primary provider is a base-URL change, not a
     // code change. Point AI_BASE_URL/AI_MODEL at any OpenAI-compatible host to
     // trade quality for cost.
-    baseUrl: (process.env.AI_BASE_URL || 'https://api.ashna.ai/v1/api').replace(/\/$/, ''),
+    baseUrl: (process.env.AI_BASE_URL || DEFAULT_AI_BASE_URL).replace(/\/$/, ''),
     apiKey: valid(process.env.AI_API_KEY) ? process.env.AI_API_KEY : '',
-    // gpt-5-mini, not the flagship gpt-6-astra. A single paper costs ~80 AI
-    // calls, so per-call price multiplies fast and a flagship burns a small
-    // credit balance within a few papers. It is the same reasoning family, so
-    // `reasoning_effort` applies and reasoning tokens can be held down - which
-    // is the dominant cost term at this call volume. Measured on a PDF-extraction
-    // block through this gateway: 3275 total tokens against astra's 4923 for
-    // the same 8 questions. Raise to gpt-5.4 or gpt-6-astra via AI_MODEL if
-    // question quality on hard papers needs it.
-    defaultModel: 'gpt-5-mini',
-    model: process.env.AI_MODEL || 'gpt-5-mini',
-    // 'low' keeps reasoning tokens down without dropping the structured
-    // extraction quality the app depends on. 'none' is accepted by this
-    // gateway and measured slightly cheaper still (3213 vs 3275 tokens on a
-    // PDF block), so it is a valid cheaper setting - but 'low' is the shipped
-    // default because the margin is small and hard-paper extraction quality is
-    // worth more than ~2% of the token spend. Raise to 'medium'/'high' if
-    // extraction degrades. Set AI_REASONING_EFFORT='' to omit the field.
-    defaultReasoningEffort: 'low',
+    defaultModel: DEFAULT_AI_MODEL,
+    defaultReasoningEffort: DEFAULT_REASONING_EFFORT,
+    model: process.env.AI_MODEL || DEFAULT_AI_MODEL,
     reasoningEffort: process.env.AI_REASONING_EFFORT !== undefined
       ? process.env.AI_REASONING_EFFORT
-      : 'low',
+      : DEFAULT_REASONING_EFFORT,
     timeoutMs: parseInt(process.env.AI_TIMEOUT_MS || '120000', 10),
     // Per-block budget for PDF question extraction. This is deliberately much
     // larger than timeoutMs: a block that overruns is not retried into

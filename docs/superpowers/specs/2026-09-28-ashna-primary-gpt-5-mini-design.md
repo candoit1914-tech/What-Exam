@@ -81,11 +81,11 @@ model:
    demand is not ours alone to raise. Lowered to 3, and the test that pins the
    cap was updated to match — that test deliberately couples to the constant.
 
-`src/config.js` also carried a `gpt-5.4-mini` default and an OpenAI base URL
-that no longer described the intended primary. Both now describe AshnaAI, so a
-deploy missing `AI_MODEL` still lands on a working provider. The default model
-is `gpt-5-mini`, not the `gpt-5.4-mini` the file previously named — that id is
-not in the gateway catalog, so it would have failed every call.
+`src/config.js` also carried a `gpt-5.6-terra` default — with an OpenAI base URL
+and `reasoning_effort: 'none'` — none of which describes the intended primary.
+All three now describe AshnaAI, so a deploy missing `AI_MODEL` still lands on a
+working provider. `gpt-5.6-terra` is also absent from the gateway catalog, so
+leaving it would have failed every call.
 
 ## Changes
 
@@ -119,8 +119,11 @@ AI_VISION=true
 ```
 
 `AI_VISION=true` is verified for this provider — see Verification. `AI_MODEL`
-overrides the repo default, so it must be set in Render; an unset or stale
-`gpt-5.4-mini` there silently overrides the default and every call fails.
+overrides the repo default, so it must be set in Render; a stale value there
+silently wins over the default. The id previously in `src/config.js`
+(`gpt-5.6-terra`) and any `*-mini` id are not in the gateway catalog, so a
+stale one of those fails every call and falls through to the NVIDIA fallback
+instead of erroring.
 
 ## Verification (all probes run live against the gateway)
 
@@ -194,8 +197,10 @@ before drawing any conclusion from production behaviour.
 
 Trigger one AI call (a WhatsApp answer, or a PDF import) and confirm the log
 reads `[ai] Calling gpt-5-mini @ https://api.ashna.ai/v1/api`. If it instead
-names `gpt-5.4-mini`, `gpt-6-astra` or `api.openai.com`, the Render env did not
-take — most likely a stale `AI_MODEL`, which overrides the repo default.
+names another model or `api.openai.com`, the Render env did not take. A
+`falling back to secondary` line right after the call is the signature of a
+model id the gateway does not serve: the app still works, on NVIDIA, but
+silently off the primary you are paying for.
 
 ## Rollback
 

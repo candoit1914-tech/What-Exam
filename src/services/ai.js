@@ -524,6 +524,22 @@ function parseStats() {
   return { ...parseCounters };
 }
 
+/**
+ * Parse outcomes since `baseline`, so a per-import log line reports that
+ * import's numbers. `parseCounters` is a module singleton and is never reset,
+ * so a raw `parseStats()` read would print totals accumulated since process
+ * boot and grow on every import - wrong for a line whose whole purpose is
+ * attributing question loss to one import.
+ */
+function parseStatsSince(baseline) {
+  const now = parseCounters;
+  return {
+    ok: now.ok - baseline.ok,
+    repaired: now.repaired - baseline.repaired,
+    failed: now.failed - baseline.failed,
+  };
+}
+
 function parseJSON(content) {
   let text = String(content).trim();
   const fence = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
@@ -1569,6 +1585,9 @@ Rules:
   // it failed so a slow or lossy import can be explained from real numbers
   // instead of inferred from a comment. It changes no control flow.
   const blockStats = { blocks: 0, ok: 0, dropped: 0, requested: 0, returned: 0, reasons: {} };
+  // `parseCounters` is a never-reset module singleton, so the import's own
+  // parse outcomes have to be read as a delta from here, not as a total.
+  const parseBaseline = parseStats();
 
   /** Classify a block failure so the log says WHY, not just "skipped". */
   function classifyBlockFailure(err) {
@@ -1691,7 +1710,7 @@ Rules:
   // perfectly normal. The user-facing loss detector stays completenessWarning(),
   // which compares the estimated question count against what was extracted.
   {
-    const ps = parseStats();
+    const ps = parseStatsSince(parseBaseline);
     const reasonStr = Object.entries(blockStats.reasons)
       .map(([k, v]) => `${k}=${v}`).join(' ') || 'none';
     console.log(
