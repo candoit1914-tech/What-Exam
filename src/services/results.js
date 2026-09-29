@@ -657,6 +657,33 @@ function sectionSlug(section) {
   return key === 'total' ? 'Total' : ROSTER_SECTIONS[key].label.replace(/\s+/g, '-');
 }
 
+// Declared once, consumed by the print page and the Word document. The three
+// simple groups genuinely share one shape; declaring it three times is how
+// they came to disagree.
+const ROSTER_FINISHED_COLS = ['Position', 'Name', 'Phone', 'Score', 'Percentage', 'Result', 'Attempt', 'Finished At'];
+const ROSTER_SIMPLE_COLS = ['Name', 'Phone', 'Questions answered', 'Started'];
+
+function rosterColumns(group) {
+  return group === 'finished' ? ROSTER_FINISHED_COLS : ROSTER_SIMPLE_COLS;
+}
+
+// section key -> the blocks to render, in roster order, each with its own
+// title, column names and rows. `ranked` says whether the group carries a
+// rank column, which the finished block uses and no other group does.
+const ROSTER_BLOCK_META = {
+  finished:   { title: 'Finished (ranked by percentage)', ranked: true,  field: 'finished' },
+  inProgress: { title: 'In Progress',                     ranked: false, field: 'inProgress' },
+  notStarted: { title: 'Not Started',                     ranked: false, field: 'notStarted' },
+  notSent:    { title: 'Not Sent',                        ranked: false, field: 'notSent' },
+};
+
+function rosterBlocks(roster, section) {
+  return sectionGroups(section).map((key) => {
+    const meta = ROSTER_BLOCK_META[key];
+    return { key, title: meta.title, ranked: meta.ranked, columns: rosterColumns(key), rows: roster[meta.field] };
+  });
+}
+
 function rosterPrintHTML(roster) {
   const exam = roster.exam;
   const dash = '<span class="none">&mdash;</span>';
@@ -686,7 +713,10 @@ function rosterPrintHTML(roster) {
   };
 
   const finishedHead = ['#', 'Name', 'Phone', 'Score', 'Percentage', 'Result', 'Attempt', 'Finished'];
-  const otherHead = ['Name', 'Phone', 'Questions answered', 'Started'];
+  // The simple groups' four names are identical in both renderers, so they are
+  // shared. The finished header stays compact ('#', 'Finished') to fit A4 and
+  // is deliberately NOT the Word document's longer header.
+  const otherHead = ROSTER_SIMPLE_COLS;
 
   const finishedRows = table(finishedHead, roster.finished, (r) =>
     '<tr>' +
@@ -738,4 +768,4 @@ ${otherRows(roster.notSent)}
 </html>`;
 }
 
-module.exports = { computeForSession, persistSessionTotals, sendResultMessage, sendResultAndCertificate, bulkResendResults, reportHTML, buildParticipantRoster, rosterPrintHTML, FINISHED_STATUSES, ROSTER_SECTIONS, normalizeSection, sectionGroups, sectionStamp, sectionSlug };
+module.exports = { computeForSession, persistSessionTotals, sendResultMessage, sendResultAndCertificate, bulkResendResults, reportHTML, buildParticipantRoster, rosterPrintHTML, FINISHED_STATUSES, ROSTER_SECTIONS, normalizeSection, sectionGroups, sectionStamp, sectionSlug, ROSTER_FINISHED_COLS, ROSTER_SIMPLE_COLS, rosterColumns, rosterBlocks };
