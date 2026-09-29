@@ -191,3 +191,99 @@ test('an abandoned session with a sent_at is reported as not started', () => {
   assert.deepEqual(roster.notSent, []);
 });
 
+test('the four sections are mutually exclusive and cover every recipient', () => {
+  const eid = newExam('Mix');
+  // addStudent() ALWAYS creates the exam_recipients row and only varies
+  // sent_at. That row is what makes someone a participant at all: it is created
+  // when the admin adds the student, and sent_at is stamped on delivery. So
+  // "never told" is a recipient with a NULL sent_at, NOT a student who was
+  // never added — a student with no recipient row is not on the exam and
+  // summary.total, which counts recipients, must not include them.
+  addSession(eid, addStudent(eid, 'Finished One'), { status: 'completed', pct: 80, score: 8, ended: '2026-01-01 10:00:00' });
+  addSession(eid, addStudent(eid, 'Running'), { status: 'in_progress' });
+  addStudent(eid, 'Waiting');               // delivered, never opened
+  addStudent(eid, 'Never Told', false);     // recipient, delivery never succeeded
+
+  const r = results.buildParticipantRoster(eid);
+  const all = [...r.finished, ...r.inProgress, ...r.notStarted, ...r.notSent];
+  const ids = all.map((x) => x.student_id);
+  assert.equal(ids.length, 4, 'every recipient appears exactly once');
+  assert.equal(new Set(ids).size, 4, 'no student appears in two sections');
+  assert.equal(r.finished.length, 1);
+  assert.equal(r.inProgress.length, 1);
+  assert.equal(r.notStarted.length, 1);
+  assert.equal(r.notSent.length, 1);
+  assert.deepEqual(r.finished.map((x) => x.name), ['Finished One']);
+  assert.deepEqual(r.inProgress.map((x) => x.name), ['Running']);
+  assert.deepEqual(r.notStarted.map((x) => x.name), ['Waiting']);
+  assert.deepEqual(r.notSent.map((x) => x.name), ['Never Told']);
+  assert.equal(r.summary.total, 4, 'summary.total counts recipients, nothing else');
+  assert.equal(r.summary.finished, r.finished.length);
+  assert.equal(r.summary.inProgress, r.inProgress.length);
+  assert.equal(r.summary.notStarted, r.notStarted.length);
+  assert.equal(r.summary.notSent, r.notSent.length);
+});
+
+test('a student with no final percentage sorts last instead of erroring', () => {
+  const eid = db
+    .prepare("INSERT INTO exams(title,duration_minutes,status) VALUES ('Nulls',30,'live')")
+    .run().lastInsertRowid;
+  // 'Ungraded' carries a real final_score on purpose. The score tie-break in
+  // the sort coalesces a NULL score to -1, so a row with BOTH fields NULL lands
+  // last no matter what the percentage line decides — the test would then pin
+  // nothing about NULL percentage ordering. A high score plus a missing
+  // percentage is the only shape where the percentage line alone decides.
+  const mk = (name, score, pct) => {
+    const sid = db.prepare('INSERT INTO students(phone,name) VALUES (?,?)').run('233' + Math.random().toString(36).slice(2, 8), name).lastInsertRowid;
+    db.prepare('INSERT INTO exam_recipients(exam_id,student_id) VALUES (?,?)').run(eid, sid);
+    db.prepare(
+      `INSERT INTO sessions(exam_id,student_id,status,final_score,final_percentage)
+       VALUES (?,?,'completed',?,?)`
+    ).run(eid, sid, score, pct);
+  };
+  mk('Graded', 7.5, 75);
+  mk('Zero', 0, 0);        // a genuine 0% result, not a missing one
+  mk('Ungraded', 9, null); // outscores Zero and still has no percentage
+
+  const r = results.buildParticipantRoster(eid);
+  assert.equal(r.finished.length, 3);
+  const names = r.finished.map((x) => x.name);
+  assert.equal(r.finished[r.finished.length - 1].name, 'Ungraded', 'NULL percentage must sort last');
+  assert.ok(
+    names.indexOf('Zero') < names.indexOf('Ungraded'),
+    'a missing percentage must sort after a real 0%, not tie with it'
+  );
+  assert.equal(
+    r.finished.find((x) => x.name === 'Ungraded').final_percentage,
+    null,
+    'sorting last must not turn a missing percentage into a 0'
+  );
+});
+
+test('a not-started recipient still reports the allotted time', () => {
+  const eid = db
+    .prepare("INSERT INTO exams(title,duration_minutes,status) VALUES ('Timer',45,'live')")
+    .run().lastInsertRowid;
+  // A delivered invite the student never opened: there is no session row, so
+  // every session column is NULL for this row.
+  addStudent(eid, 'Waiter');
+  // The other way a student lands in notStarted — a delivered invite whose
+  // session was abandoned. current_q_order is 7 with zero answers recorded, so
+  // a 0 in questions_answered can only have come from a real COUNT(*) over the
+  // answers table; an implementation echoing current_q_order reports 7 here.
+  const dropped = addStudent(eid, 'Dropper');
+  db.prepare(
+    "INSERT INTO sessions(exam_id,student_id,status,current_q_order,ended_at) VALUES (?,?,'abandoned',7,'2026-01-01 10:00:00')"
+  ).run(eid, dropped);
+
+  const r = results.buildParticipantRoster(eid);
+  const byName = Object.fromEntries(r.notStarted.map((x) => [x.name, x]));
+  assert.deepEqual(Object.keys(byName).sort(), ['Dropper', 'Waiter'], 'both delivered students are not started');
+  assert.equal(byName['Waiter'].questions_answered, 0, 'no session row at all');
+  assert.equal(byName['Dropper'].questions_answered, 0, 'current_q_order is 7, so this must be a real answer count');
+  assert.equal(r.exam.duration_minutes, 45);
+  for (const name of ['Dropper', 'Waiter']) {
+    assert.equal(byName[name].final_percentage, null, `${name} must not be shown a fabricated 0%`);
+  }
+});
+
