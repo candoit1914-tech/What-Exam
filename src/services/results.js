@@ -410,12 +410,23 @@ async function bulkResendResults(examId) {
   return report;
 }
 
-// ── Participant roster ──────────────────────────────────────────────────
-// One structure, three renderings (screen, CSV, print). Ranking is done in SQL
-// with a window function so the best attempt per student is chosen by the
-// database, not by JS sorting that could drift between the three views.
+// Statuses that carry a real, final result. Any other status has no score yet.
 const FINISHED_STATUSES = "('completed','ended','expired')";
+const isFinished = (status) => FINISHED_STATUSES.includes(`'${status}'`);
 
+/**
+ * Build the participant roster for one exam: every recipient, sorted into
+ * finished (ranked) / in progress / not started / not sent.
+ *
+ * This is the single data source behind all three renderings (screen, CSV,
+ * print) so the three can never disagree about who is on the roster or what
+ * rank they hold.
+ *
+ * Division of labour, which is not interchangeable: the SQL window function
+ * below picks each student's best attempt; the display order and the rank
+ * numbers are assigned here in JavaScript. The outer ORDER BY sorts rows for
+ * the per-student grouping only — it is NOT the leaderboard.
+ */
 function buildParticipantRoster(examId) {
   const exam = db.prepare('SELECT * FROM exams WHERE id = ?').get(examId);
   if (!exam) return null;
@@ -427,7 +438,6 @@ function buildParticipantRoster(examId) {
       `SELECT st.id AS student_id, st.name, st.phone, r.sent_at,
               s.id AS session_id, s.status, s.started_at, s.ended_at,
               s.final_score, s.final_percentage, s.passed, s.attempt_no,
-              s.current_q_order,
               ROW_NUMBER() OVER (
                 PARTITION BY st.id
                 ORDER BY COALESCE(s.final_percentage, -1) DESC,
@@ -450,37 +460,62 @@ function buildParticipantRoster(examId) {
     byId.get(row.student_id).push(row);
   }
 
-  const shape = (r) => ({
-    student_id: r.student_id,
-    name: r.name || '',
-    phone: r.phone,
-    sent_at: r.sent_at || '',
-    status: r.status || '',
-    started_at: r.started_at || '',
-    ended_at: r.ended_at || '',
-    final_score: r.final_score,
-    final_percentage: r.final_percentage,
-    passed: r.passed ? 1 : 0,
-    attempt_no: r.attempt_no,
-    questions_answered: r.current_q_order || 0,
-  });
+  // current_q_order is the NEXT question to serve (default 1), not a count of
+  // what the student answered, so the real count comes from the answers table.
+  // Only sessions that actually exist are queried; a recipient who never
+  // started has no session row and counts as 0.
+  const answered = new Map();
+  const countAnswers = db.prepare('SELECT COUNT(*) c FROM answers WHERE session_id = ?');
+  for (const sid of new Set(rows.map((r) => r.session_id).filter((v) => v != null))) {
+    answered.set(sid, countAnswers.get(sid).c);
+  }
+
+  // sessions.final_score / final_percentage / passed default to 0, not NULL, so
+  // a student still sitting the exam would otherwise be published with a real
+  // looking 0% score. Anything unfinished is reported as "no score" instead.
+  const shape = (r) => {
+    const scored = isFinished(r.status);
+    return {
+      student_id: r.student_id,
+      name: r.name || '',
+      phone: r.phone,
+      sent_at: r.sent_at || '',
+      status: r.status || '',
+      started_at: r.started_at || '',
+      ended_at: r.ended_at || '',
+      final_score: scored ? r.final_score : null,
+      final_percentage: scored ? r.final_percentage : null,
+      passed: scored ? (r.passed ? 1 : 0) : null,
+      attempt_no: r.attempt_no,
+      questions_answered: r.session_id == null ? 0 : answered.get(r.session_id) ?? 0,
+    };
+  };
 
   const finished = [];
   const inProgress = [];
   const notStarted = [];
   const notSent = [];
 
-  for (const sessions of byId.values()) {
-    // The best attempt is attempt_rank 1, whatever its status.
-    const best = sessions.find((r) => r.attempt_rank === 1) || sessions[0];
+  for (const attempts of byId.values()) {
+    // The best attempt is attempt_rank 1, whatever its status. ROW_NUMBER()
+    // always yields 1 for a non-empty partition, so the fallback is unneeded.
+    const best = attempts.find((r) => r.attempt_rank === 1);
     // Finished means SOME attempt finished, even if a later one is in progress:
     // a student who already has a final score belongs in the leaderboard.
-    const bestFinished = sessions.find((r) => FINISHED_STATUSES.includes(`'${r.status}'`));
+    const bestFinished = attempts.find((r) => isFinished(r.status));
 
     if (bestFinished) {
-      finished.push({ ...shape(bestFinished), rank: 0 });
+      finished.push(shape(bestFinished));
     } else if (best.status === 'in_progress') {
       inProgress.push(shape(best));
+    } else if (best.status === 'abandoned') {
+      // A session is only marked 'abandoned' once config.exam.sendRetries
+      // deliveries have all failed (services/exam.js), and recordAcceptance()
+      // stamps sent_at only when a send actually succeeds. So an abandoned
+      // session with a NULL sent_at genuinely was never delivered and "not
+      // sent" is the honest label; with a sent_at it did reach the student, so
+      // they were sent it and never began — "not started".
+      (best.sent_at ? notStarted : notSent).push(shape(best));
     } else if (best.sent_at) {
       notStarted.push(shape(best));
     } else {
@@ -488,6 +523,21 @@ function buildParticipantRoster(examId) {
     }
   }
 
+  // Rank by percentage descending, then score descending, then earlier ended_at.
+  // Done here, not in SQL: the array reaches this point in recipient order, and
+  // a student with a live retry contributes an ended_at of NULL, which SQLite
+  // sorts FIRST in an ASC ordering and which would otherwise promote them over
+  // a student who genuinely finished earlier. COALESCE'ing the timestamp to ''
+  // in JS keeps a missing value last rather than first.
+  finished.sort((a, b) => {
+    const pct = (b.final_percentage ?? -1) - (a.final_percentage ?? -1);
+    if (pct) return pct;
+    const score = (b.final_score ?? -1) - (a.final_score ?? -1);
+    if (score) return score;
+    const aEnd = String(a.ended_at || '');
+    const bEnd = String(b.ended_at || '');
+    return aEnd < bEnd ? -1 : aEnd > bEnd ? 1 : 0;
+  });
   finished.forEach((r, i) => { r.rank = i + 1; });
 
   return {
