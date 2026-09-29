@@ -250,26 +250,49 @@ router.get('/exams/:id/participants', (req, res) => {
 
 router.get('/exams/:id/participants.csv', (req, res) => {
   const roster = results.buildParticipantRoster(req.params.id);
-  if (!roster) return res.status(404).send('Exam not found');
-  // Exam titles are free text: keep only filename-safe characters so a
-  // crafted title cannot inject header syntax (quotes, CR/LF) or produce
-  // path separators, and cap the length for filesystem-safe downloads.
-  const safe =
-    String(roster.exam.title || '')
+  // JSON error even on a download route: an admin hitting this sees a failed
+  // download either way, so the 404 status is what carries the signal — the
+  // body only has to match the convention the rest of this file uses.
+  if (!roster) return res.status(404).json({ error: 'Exam not found' });
+  // Exam titles are free text and routinely non-ASCII, so the ASCII form is
+  // only a fallback: a strict allow-list alone would collapse every local
+  // script to the same "exam" name. RFC 6266 `filename*` carries the real
+  // UTF-8 title; the exam id disambiguates same-titled exams. Both values are
+  // stripped to header- and filename-safe characters before use.
+  const raw = String(roster.exam.title || '');
+  const ascii =
+    raw
       .replace(/[^a-z0-9]+/gi, '-')
       .replace(/^-+|-+$/g, '')
       .slice(0, 60)
       .replace(/-+$/g, '') || 'exam';
+  const utf8 =
+    raw
+      // eslint-disable-next-line no-control-regex
+      .replace(/[\x00-\x1f\x7f]/g, ' ')
+      .replace(/["\\;:/]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 120)
+      .trim() || `exam ${roster.exam.id}`;
+  const body = results.rosterToCsv(roster);
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-  res.setHeader('Content-Disposition', `attachment; filename="participants-${safe}.csv"`);
-  res.send(results.rosterToCsv(roster));
+  res.setHeader(
+    'Content-Disposition',
+    `attachment; filename="participants-${roster.exam.id}-${ascii}.csv"; ` +
+      `filename*=UTF-8''${encodeURIComponent(`participants-${roster.exam.id}-${utf8}.csv`)}`
+  );
+  res.send(body);
 });
 
 router.get('/exams/:id/participants/print', (req, res) => {
   const roster = results.buildParticipantRoster(req.params.id);
-  if (!roster) return res.status(404).send('<h1>Exam not found</h1>');
+  if (!roster) return res.status(404).json({ error: 'Exam not found' });
+  // Render before setting headers: a throw inside the renderer would otherwise
+  // ship Express's JSON error body under a text/html content type.
+  const html = results.rosterPrintHTML(roster);
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
-  res.send(results.rosterPrintHTML(roster));
+  res.send(html);
 });
 
 router.patch('/exams/:id', (req, res) => {
