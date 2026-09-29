@@ -628,4 +628,121 @@ function rosterToCsv(roster) {
   return '\uFEFF' + lines.join('\r\n');
 }
 
-module.exports = { computeForSession, persistSessionTotals, sendResultMessage, sendResultAndCertificate, bulkResendResults, reportHTML, buildParticipantRoster, csvCell, rosterToCsv, FINISHED_STATUSES };
+// The print view is deliberately a standalone document: no app stylesheet,
+// no JavaScript, no buttons. The browser's own print dialog turns it into
+// paper or a PDF in one click, which is why this feature needs no PDF
+// library and no headless renderer on the server.
+const PRINT_CSS = `
+  @page { size: A4 portrait; margin: 14mm 12mm; }
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+         color: #1a1a1a; margin: 0; font-size: 12px; line-height: 1.4; }
+  h1 { font-size: 19px; margin: 0 0 2px; }
+  .sub { color: #555; font-size: 11px; margin-bottom: 4px; }
+  .summary { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 16px; }
+  .chip { border: 1px solid #ccc; border-radius: 4px; padding: 4px 9px; }
+  .chip b { font-size: 14px; }
+  h2 { font-size: 13px; margin: 18px 0 6px; text-transform: uppercase;
+       letter-spacing: .5px; border-bottom: 2px solid #333; padding-bottom: 3px; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { border: 1px solid #bbb; padding: 5px 7px; text-align: left; }
+  th { background: #ececec; font-size: 11px; text-transform: uppercase; }
+  /* Rows must not be split by a page break - a student shown with a name on
+     one page and a score on the next is useless in a printed register. */
+  tr { break-inside: avoid; page-break-inside: avoid; }
+  /* Repeat the column headers on every printed page. */
+  thead { display: table-header-group; }
+  tfoot { display: table-footer-group; }
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .pass { color: #146c2e; font-weight: 600; }
+  .fail { color: #a4262c; font-weight: 600; }
+  .none { color: #777; font-style: italic; padding: 7px; }
+  .foot { margin-top: 18px; color: #666; font-size: 10px; }
+  @media print {
+    .none { color: #000; }
+    h2 { break-after: avoid; page-break-after: avoid; }
+  }
+`;
+
+function rosterPrintHTML(roster) {
+  const exam = roster.exam;
+  const dash = '<span class="none">&mdash;</span>';
+  const txt = (v) => (v === null || v === undefined || v === '' ? dash : esc(v));
+  const num = (v) => (v === null || v === undefined ? dash : esc(v));
+
+  // `passed` is null for anyone who has not finished, which is a THIRD state
+  // rather than a fail. Printing a score or a verdict for a student still
+  // sitting the exam would be a false statement on a signed-off register, so
+  // those columns are left empty instead of zeroed.
+  const outcome = (passed) =>
+    passed === null || passed === undefined
+      ? dash
+      : passed
+        ? '<span class="pass">Pass</span>'
+        : '<span class="fail">Fail</span>';
+
+  const table = (head, rows, render) => {
+    if (!rows.length) return '<p class="none">None</p>';
+    return (
+      '<table><thead><tr>' +
+      head.map((h, i) => `<th${i > 1 ? ' class="num"' : ''}>${esc(h)}</th>`).join('') +
+      '</tr></thead><tbody>' +
+      rows.map(render).join('') +
+      '</tbody></table>'
+    );
+  };
+
+  const finishedHead = ['#', 'Name', 'Phone', 'Score', 'Percentage', 'Result', 'Attempt', 'Finished'];
+  const otherHead = ['Name', 'Phone', 'Questions answered', 'Started'];
+
+  const finishedRows = table(finishedHead, roster.finished, (r) =>
+    '<tr>' +
+    `<td class="num">${esc(r.rank)}</td><td>${esc(r.name)}</td><td>${esc(r.phone)}</td>` +
+    `<td class="num">${num(r.final_score)}</td><td class="num">${num(r.final_percentage)}%</td>` +
+    `<td>${outcome(r.passed)}</td><td class="num">${r.attempt_no ? esc(r.attempt_no) : dash}</td>` +
+    `<td>${r.ended_at ? esc(r.ended_at) : dash}</td>` +
+    '</tr>');
+
+  const otherRows = (rows) => table(otherHead, rows, (r) =>
+    '<tr>' +
+    `<td>${esc(r.name)}</td><td>${esc(r.phone)}</td>` +
+    `<td class="num">${txt(r.questions_answered)}</td>` +
+    `<td>${r.started_at ? esc(r.started_at) : dash}</td>` +
+    '</tr>');
+
+  const chip = (label, n) => `<span class="chip">${esc(label)} <b>${n}</b></span>`;
+  const s = roster.summary;
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>${esc(exam.title)} - participants</title>
+<style>${PRINT_CSS}</style>
+</head>
+<body>
+<h1>${esc(exam.title)}</h1>
+<p class="sub">Duration ${esc(exam.duration_minutes)} min &middot; Pass mark ${esc(exam.pass_percentage)}% &middot; Status ${esc(exam.status || 'unknown')}</p>
+<div class="summary">
+${chip('Total', s.total)}${chip('Finished', s.finished)}${chip('In progress', s.inProgress)}
+${chip('Not started', s.notStarted)}${chip('Not sent', s.notSent)}
+</div>
+
+<h2>Finished (ranked by percentage)</h2>
+${finishedRows}
+
+<h2>In Progress</h2>
+${otherRows(roster.inProgress)}
+
+<h2>Not Started</h2>
+${otherRows(roster.notStarted)}
+
+<h2>Not Sent</h2>
+${otherRows(roster.notSent)}
+
+<p class="foot">Printed ${esc(new Date().toLocaleString())}</p>
+</body>
+</html>`;
+}
+
+module.exports = { computeForSession, persistSessionTotals, sendResultMessage, sendResultAndCertificate, bulkResendResults, reportHTML, buildParticipantRoster, csvCell, rosterToCsv, rosterPrintHTML, FINISHED_STATUSES };

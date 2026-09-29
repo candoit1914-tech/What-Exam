@@ -513,3 +513,57 @@ test('a leading = inside a quoted value is still forced to text', () => {
   assert.equal(rowFor(dde, '="x"')[1], '\'="x"');
 });
 
+
+// ── Print page ─────────────────────────────────────────────────────────
+// The print view is a standalone document: no app CSS, no JavaScript, no
+// buttons. The browser's own print dialog provides the paper output and
+// "Save as PDF" in one click, which is why no PDF library is needed.
+test('print HTML is self-contained, printable and shows every section', () => {
+  const html = results.rosterPrintHTML({
+    exam: { id: 7, title: 'Print Me', duration_minutes: 30, pass_percentage: 50, status: 'live' },
+    finished: [{ rank: 1, name: 'Alpha', phone: '233', final_score: 8, final_percentage: 80, passed: 1, attempt_no: 1, ended_at: '2026-01-01 10:00:00' }],
+    inProgress: [{ name: 'Beta', phone: '234', questions_answered: 3, started_at: '2026-01-01 10:00:00' }],
+    notStarted: [{ name: 'Gamma', phone: '235', questions_answered: 0 }],
+    notSent: [{ name: 'Delta', phone: '236' }],
+    summary: { finished: 1, inProgress: 1, notStarted: 1, notSent: 1, total: 4 },
+  });
+
+  assert.match(html, /<style>/, 'must be self-contained with inline CSS');
+  assert.match(html, /@page/, 'needs a page size and margins');
+  assert.match(html, /@media print/, 'needs print rules');
+  assert.match(html, /<thead>/, 'headers must repeat across pages');
+  assert.match(html, /display: table-header-group/, 'repeating headers need the header-group display');
+  assert.match(html, /break-inside: avoid/, 'rows must not split across a page boundary');
+  assert.match(html, /Print Me/, 'exam title must be visible');
+  for (const name of ['Alpha', 'Beta', 'Gamma', 'Delta']) {
+    assert.ok(html.includes(name), `${name} must appear in the printed roster`);
+  }
+  assert.ok(!/<script/i.test(html), 'print page must not need JavaScript');
+  assert.ok(!/class="btn/.test(html), 'no app chrome on the print page');
+});
+
+test('print HTML escapes a hostile exam title and student name', () => {
+  const html = results.rosterPrintHTML({
+    exam: { id: 1, title: '<script>alert(1)</script>', duration_minutes: 30, pass_percentage: 50 },
+    finished: [{ rank: 1, name: '<img src=x onerror=alert(1)>', phone: '1', final_score: 1, final_percentage: 100, passed: 1, attempt_no: 1, ended_at: '' }],
+    inProgress: [], notStarted: [], notSent: [],
+    summary: { finished: 1, inProgress: 0, notStarted: 0, notSent: 0, total: 1 },
+  });
+  assert.ok(!/<script>alert/.test(html), 'a title must never become a live script tag');
+  assert.ok(!/<img src=x/.test(html), 'a name must never become a live img tag');
+  assert.ok(html.includes('&lt;script&gt;'), 'the title must appear escaped instead');
+  assert.ok(html.includes('&lt;img src=x onerror=alert(1)&gt;'), 'the name must appear escaped instead');
+});
+
+test('an unfinished student prints no score, and an empty section says so', () => {
+  const html = results.rosterPrintHTML({
+    exam: { id: 3, title: 'Mixed', duration_minutes: 20, pass_percentage: 40 },
+    finished: [],
+    inProgress: [{ name: 'Runner', phone: '1', questions_answered: 2, started_at: '' }],
+    notStarted: [], notSent: [],
+    summary: { finished: 0, inProgress: 1, notStarted: 0, notSent: 0, total: 1 },
+  });
+  assert.ok(!/>\s*0%/.test(html), 'a student sitting the exam must not print as 0%');
+  assert.ok(!/>\s*Fail\s*</.test(html), 'an unfinished student must not be given a Fail verdict');
+  assert.match(html, /None/, 'an empty section must say so rather than render an empty table');
+});
