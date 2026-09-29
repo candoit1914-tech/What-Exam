@@ -136,9 +136,13 @@ const ROSTER_SECTIONS = {
 // click, and a section typo must not turn a register into a 404.
 // The hasOwnProperty guard is deliberate - a plain truthy lookup on
 // ROSTER_SECTIONS[key] would resolve 'constructor' and 'toString' to
-// something truthy and then fail confusingly further down.
+// something truthy and then fail confusingly further down. The typeof guard
+// is the other half of the same idea: a query string like ?section[]=finished
+// arrives as ['finished'], and String() of that is a valid key, so without
+// it an array would smuggle a section past the vocabulary entirely.
 function normalizeSection(value) {
-  const key = String(value == null ? '' : value).trim().toLowerCase();
+  if (typeof value !== 'string') return 'total';
+  const key = value.trim().toLowerCase();
   return Object.prototype.hasOwnProperty.call(ROSTER_SECTIONS, key) ? key : 'total';
 }
 
