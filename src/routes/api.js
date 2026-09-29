@@ -235,6 +235,43 @@ router.get('/exams/:id', (req, res) => {
   res.json({ exam: examSummary(exam), questions, recipients, results: resultsList });
 });
 
+// ── Participant roster: screen, CSV, print ──────────────────────────────
+// Registered below the admin guard at the top of this router, and Express
+// matches exact path segments, so `/exams/:id/participants.csv` is not
+// swallowed by `/exams/:id`. Every route null-checks the roster because
+// buildParticipantRoster returns null for an unknown exam and the
+// serialisers dereference roster.exam unguarded.
+
+router.get('/exams/:id/participants', (req, res) => {
+  const roster = results.buildParticipantRoster(req.params.id);
+  if (!roster) return res.status(404).json({ error: 'Exam not found' });
+  res.json(roster);
+});
+
+router.get('/exams/:id/participants.csv', (req, res) => {
+  const roster = results.buildParticipantRoster(req.params.id);
+  if (!roster) return res.status(404).send('Exam not found');
+  // Exam titles are free text: keep only filename-safe characters so a
+  // crafted title cannot inject header syntax (quotes, CR/LF) or produce
+  // path separators, and cap the length for filesystem-safe downloads.
+  const safe =
+    String(roster.exam.title || '')
+      .replace(/[^a-z0-9]+/gi, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 60)
+      .replace(/-+$/g, '') || 'exam';
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="participants-${safe}.csv"`);
+  res.send(results.rosterToCsv(roster));
+});
+
+router.get('/exams/:id/participants/print', (req, res) => {
+  const roster = results.buildParticipantRoster(req.params.id);
+  if (!roster) return res.status(404).send('<h1>Exam not found</h1>');
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.send(results.rosterPrintHTML(roster));
+});
+
 router.patch('/exams/:id', (req, res) => {
   const exam = db.prepare('SELECT * FROM exams WHERE id = ?').get(req.params.id);
   if (!exam) return res.status(404).json({ error: 'Exam not found' });
