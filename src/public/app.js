@@ -627,6 +627,7 @@ async function renderExam(id) {
       <button class="tab ${examState.tab === 'schemes' ? 'active' : ''}" onclick="setTab('schemes')">Marking Scheme</button>
       <button class="tab ${examState.tab === 'recipients' ? 'active' : ''}" onclick="setTab('recipients')">Recipients (${recipients.length})</button>
       <button class="tab ${examState.tab === 'results' ? 'active' : ''}" onclick="setTab('results')">Results (${results.length})</button>
+      <button class="tab ${examState.tab === 'participants' ? 'active' : ''}" onclick="setTab('participants')">Participants</button>
     </div>
     <div id="tabbody"></div>`;
   renderTab();
@@ -766,6 +767,155 @@ async function renderTab() {
         }).join('')}
       </tbody>
     </table></div>`;
+  } else if (tab === 'participants') {
+    // The roster is the official participation record, so it comes from its
+    // own endpoint rather than being rebuilt from the session list in the
+    // browser. That keeps the on-screen view, the CSV and the printed page
+    // in agreement, since all three are rendered from the same server query.
+    bodyEl.innerHTML = `<div class="skeleton skeleton-card"></div>`;
+    let roster;
+    try {
+      roster = await api(`/api/exams/${id}/participants`);
+    } catch (e) {
+      bodyEl.innerHTML = `<div class="empty-state">${I.empty}<p>${esc(e.message)}</p></div>`;
+      return;
+    }
+    const rosterTable = (rows, cols, render) => rows.length === 0
+      ? `<p class="muted qmeta" style="padding:8px 2px">None.</p>`
+      : `<div class="card table-card"><table>
+          <thead><tr>${cols.map((c) => `<th>${c}</th>`).join('')}</tr></thead>
+          <tbody>${rows.map(render).join('')}</tbody>
+        </table></div>`;
+    const dash = '<span class="muted">—</span>';
+    const s = roster.summary;
+    bodyEl.innerHTML = `
+      <div class="card" style="margin-top:14px">
+        <div class="spread">
+          <div>
+            <h3 style="margin-bottom:2px">PARTICIPANT <span class="gr">ROSTER</span></h3>
+            <p class="muted qmeta">The official participation record for this exam.</p>
+          </div>
+          <div class="row">
+            <button class="btn btn-ghost" onclick="printRoster(${id})">${I.doc} Print / Save PDF</button>
+            <button class="btn btn-ghost" onclick="downloadRosterCsv(${id})">${I.doc} Download CSV</button>
+          </div>
+        </div>
+        <div class="row" style="margin-top:12px;gap:16px;flex-wrap:wrap">
+          <div><b>${s.total}</b> <span class="muted">Total</span></div>
+          <div><b style="color:var(--green,#10b981)">${s.finished}</b> <span class="muted">Finished</span></div>
+          <div><b>${s.inProgress}</b> <span class="muted">In progress</span></div>
+          <div><b>${s.notStarted}</b> <span class="muted">Not started</span></div>
+          <div><b style="color:var(--red,#ef4444)">${s.notSent}</b> <span class="muted">Not sent</span></div>
+        </div>
+      </div>
+
+      <h3 style="margin:18px 0 8px">Finished <span class="muted qmeta">(ranked by percentage)</span></h3>
+      ${rosterTable(roster.finished, ['#', 'Name', 'Phone', 'Score', '%', 'Result', 'Attempt', 'Finished'], (r) => `<tr>
+        <td>${r.rank}</td>
+        <td>${esc(r.name || '—')}</td>
+        <td>${esc(r.phone)}</td>
+        <td>${r.final_score != null ? r.final_score : dash}</td>
+        <td>${r.final_percentage != null ? esc(r.final_percentage) + '%' : dash}</td>
+        <td>${r.passed ? '<span class="pass">Pass</span>' : '<span class="fail">Fail</span>'}</td>
+        <td>${r.attempt_no || dash}</td>
+        <td class="muted">${esc(r.ended_at || '—')}</td>
+      </tr>`)}
+
+      <h3 style="margin:18px 0 8px">In Progress</h3>
+      ${rosterTable(roster.inProgress, ['Name', 'Phone', 'Questions answered', 'Started'], (r) => `<tr>
+        <td>${esc(r.name || '—')}</td>
+        <td>${esc(r.phone)}</td>
+        <td>${r.questions_answered != null ? r.questions_answered : dash}</td>
+        <td class="muted">${esc(r.started_at || '—')}</td>
+      </tr>`)}
+
+      <h3 style="margin:18px 0 8px">Not Started</h3>
+      ${rosterTable(roster.notStarted, ['Name', 'Phone', 'Questions answered', 'Started'], (r) => `<tr>
+        <td>${esc(r.name || '—')}</td>
+        <td>${esc(r.phone)}</td>
+        <td>${r.questions_answered != null ? r.questions_answered : dash}</td>
+        <td class="muted">${esc(r.started_at || '—')}</td>
+      </tr>`)}
+
+      <h3 style="margin:18px 0 8px">Not Sent</h3>
+      ${rosterTable(roster.notSent, ['Name', 'Phone'], (r) => `<tr>
+        <td>${esc(r.name || '—')}</td>
+        <td>${esc(r.phone)}</td>
+      </tr>`)}`;
+  }
+}
+
+// Fetch a roster asset (CSV or print HTML) with the admin token, returning
+// the raw Response. The generic `api()` helper cannot be used here: it always
+// parses JSON and always sends a JSON Content-Type, so a CSV or HTML body
+// would be destroyed before we could save or display it. The admin token is
+// in localStorage, never a cookie, so a plain <a href> download would arrive
+// unauthenticated and be rejected with a 401 - the fetch is what carries auth.
+async function rosterFetch(path) {
+  const token = getToken();
+  const res = await fetch(API_BASE + path, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
+  if (res.status === 401) {
+    clearToken();
+    showLanding();
+    throw new Error('Session expired — please sign in.');
+  }
+  if (!res.ok) throw new Error(`Request failed (${res.status})`);
+  return res;
+}
+
+// Pull the filename the server chose, so the non-ASCII-aware name it built
+// (including any RFC 6266 UTF-8 form) is what lands in the downloads folder.
+function filenameFromHeader(res, fallback) {
+  const cd = res.headers.get('Content-Disposition') || '';
+  const star = /filename\*=UTF-8''([^;]+)/i.exec(cd);
+  if (star) { try { return decodeURIComponent(star[1].trim()); } catch { /* fall through */ } }
+  const plain = /filename="?([^";]+)"?/i.exec(cd);
+  return plain ? plain[1].trim() : fallback;
+}
+
+async function downloadRosterCsv(id) {
+  try {
+    const res = await rosterFetch(`/api/exams/${id}/participants.csv`);
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filenameFromHeader(res, `participants-${id}.csv`);
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    // Revoke on the next tick: revoking synchronously can cancel the download
+    // in Safari before it has read the blob.
+    setTimeout(() => URL.revokeObjectURL(url), 30_000);
+  } catch (e) {
+    alert(`Could not download the roster: ${e.message}`);
+  }
+}
+
+async function printRoster(id) {
+  // Open the window synchronously, inside the click handler, so the browser
+  // treats it as user-initiated and does not block it as a popup. The HTML is
+  // fetched afterwards and written into that already-open window.
+  const win = window.open('', '_blank');
+  if (!win) { alert('Please allow pop-ups for this site to print the roster.'); return; }
+  win.document.write('<p style="font-family:sans-serif;padding:24px">Preparing the roster…</p>');
+  try {
+    const res = await rosterFetch(`/api/exams/${id}/participants/print`);
+    const html = await res.text();
+    win.document.open();
+    win.document.write(html);
+    win.document.close();
+    // The document is self-contained, so once it has parsed there is nothing
+    // left to load and it is safe to invoke the print dialog.
+    win.focus();
+    const go = () => { try { win.print(); } catch { /* user can print manually */ } };
+    if (win.document.readyState === 'complete') setTimeout(go, 50);
+    else win.addEventListener('load', () => setTimeout(go, 50));
+  } catch (e) {
+    win.close();
+    alert(`Could not prepare the roster: ${e.message}`);
   }
 }
 
