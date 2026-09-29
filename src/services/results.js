@@ -613,6 +613,50 @@ const PRINT_CSS = `
   }
 `;
 
+// One definition of the five exportable sections. The keys are the URL
+// vocabulary; the labels are what the dropdown, the document stamp and the
+// filename use. The stored group names are camelCase, so `in_progress` and
+// `inProgress` are deliberately different strings.
+const ROSTER_SECTIONS = {
+  total:       { label: 'Total',       groups: ['finished', 'inProgress', 'notStarted', 'notSent'] },
+  finished:    { label: 'Finished',    groups: ['finished'] },
+  in_progress: { label: 'In progress', groups: ['inProgress'] },
+  not_started: { label: 'Not started', groups: ['notStarted'] },
+  not_sent:    { label: 'Not sent',    groups: ['notSent'] },
+};
+
+// Unknown, missing or malformed input resolves to 'total' rather than
+// throwing: these URLs are also built by bookmark and by a bare button
+// click, and a section typo must not turn a register into a 404.
+// The hasOwnProperty guard is deliberate - a plain truthy lookup on
+// ROSTER_SECTIONS[key] would resolve 'constructor' and 'toString' to
+// something truthy and then fail confusingly further down. The typeof guard
+// is the other half of the same idea: a query string like ?section[]=finished
+// arrives as ['finished'], and String() of that is a valid key, so without
+// it an array would smuggle a section past the vocabulary entirely.
+function normalizeSection(value) {
+  if (typeof value !== 'string') return 'total';
+  const key = value.trim().toLowerCase();
+  return Object.prototype.hasOwnProperty.call(ROSTER_SECTIONS, key) ? key : 'total';
+}
+
+function sectionGroups(section) {
+  return ROSTER_SECTIONS[normalizeSection(section)].groups;
+}
+
+// 'Not sent' for the document stamp, '' for total so an unfiltered export
+// keeps exactly today's appearance and filename.
+function sectionStamp(section) {
+  const key = normalizeSection(section);
+  return key === 'total' ? '' : ROSTER_SECTIONS[key].label;
+}
+
+// 'Not-sent' for a filename: no spaces, no case-destroying surprises.
+function sectionSlug(section) {
+  const key = normalizeSection(section);
+  return key === 'total' ? 'Total' : ROSTER_SECTIONS[key].label.replace(/\s+/g, '-');
+}
+
 function rosterPrintHTML(roster) {
   const exam = roster.exam;
   const dash = '<span class="none">&mdash;</span>';
@@ -694,4 +738,4 @@ ${otherRows(roster.notSent)}
 </html>`;
 }
 
-module.exports = { computeForSession, persistSessionTotals, sendResultMessage, sendResultAndCertificate, bulkResendResults, reportHTML, buildParticipantRoster, rosterPrintHTML, FINISHED_STATUSES };
+module.exports = { computeForSession, persistSessionTotals, sendResultMessage, sendResultAndCertificate, bulkResendResults, reportHTML, buildParticipantRoster, rosterPrintHTML, FINISHED_STATUSES, ROSTER_SECTIONS, normalizeSection, sectionGroups, sectionStamp, sectionSlug };
