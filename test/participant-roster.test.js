@@ -287,3 +287,49 @@ test('a not-started recipient still reports the allotted time', () => {
   }
 });
 
+test('CSV escapes values that a spreadsheet would run as a formula', () => {
+  const csv = results.rosterToCsv({
+    exam: { id: 1, title: 'Sheet' },
+    finished: [{ rank: 1, name: '=cmd|calc!A1', phone: '+233123', final_score: 5, final_percentage: 50, passed: 1, attempt_no: 1, ended_at: '2026-01-01 10:00:00' }],
+    inProgress: [],
+    notStarted: [],
+    notSent: [],
+    summary: { finished: 1, inProgress: 0, notStarted: 0, notSent: 0, total: 1 },
+  });
+  assert.match(csv, /'=cmd\|calc!A1/, 'leading = must be neutralised');
+  assert.match(csv, /'\+233123/, 'leading + must be neutralised');
+});
+
+test('CSV row order matches the ranked array', () => {
+  const roster = {
+    exam: { id: 1, title: 'Ordered' },
+    finished: [
+      { rank: 1, name: 'First', phone: '1', final_score: 9, final_percentage: 90, passed: 1, attempt_no: 1, ended_at: '' },
+      { rank: 2, name: 'Second', phone: '2', final_score: 6, final_percentage: 60, passed: 1, attempt_no: 1, ended_at: '' },
+    ],
+    inProgress: [], notStarted: [], notSent: [],
+    summary: { finished: 2, inProgress: 0, notStarted: 0, notSent: 0, total: 2 },
+  };
+  const csv = results.rosterToCsv(roster);
+  assert.ok(csv.indexOf('First') < csv.indexOf('Second'), 'rows must follow the ranked order');
+});
+
+test('an unfinished participant is never published as a Fail result', () => {
+  const csv = results.rosterToCsv({
+    exam: { id: 1, title: 'Pending' },
+    finished: [{ rank: 1, name: 'Genuine Failure', phone: '1', final_score: 4, final_percentage: 40, passed: 0, attempt_no: 1, ended_at: '2026-01-01 10:00:00' }],
+    inProgress: [{ student_id: 2, name: 'Still Sitting', phone: '2', final_score: null, final_percentage: null, passed: null, attempt_no: 2, ended_at: '' }],
+    notStarted: [],
+    notSent: [],
+    summary: { finished: 1, inProgress: 1, notStarted: 0, notSent: 0, total: 2 },
+  });
+  const resultOf = (name) =>
+    csv.split('\r\n').find((l) => l.includes(',' + name + ',')).split(',')[5];
+  // Column 5 is Result. buildParticipantRoster sets passed to null for every
+  // unfinished student precisely so no result is invented for them; a plain
+  // truthiness test would read that null as a fail and put "Fail" on a student
+  // who has not even been marked. A real 40% must still say Fail.
+  assert.equal(resultOf('Genuine Failure'), 'Fail', 'a real 40% is a fail and must say so');
+  assert.equal(resultOf('Still Sitting'), '—', 'passed is null, which means no result, not a fail');
+});
+
