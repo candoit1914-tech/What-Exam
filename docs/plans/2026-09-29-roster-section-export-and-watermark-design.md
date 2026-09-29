@@ -2,10 +2,12 @@
 
 Date: 2026-09-29
 Status: approved
+Revised: 2026-09-29 — the CSV download is removed (see Decisions 5 and 7).
 
 Extends [2026-09-28-participant-roster-export-design.md](2026-09-28-participant-roster-export-design.md),
-which built the roster, its CSV and its print page. That design stays in force;
-this one adds section-scoped export, a Word download, and watermark branding.
+which built the roster and its print page. That design stays in force except
+where this revision removes the CSV download; this one adds section-scoped
+export, a Word download, and watermark branding.
 
 ## Problem
 
@@ -14,9 +16,9 @@ only needs the not-sent list — to chase delivery failures, the most common
 follow-up action on a live exam — must print or export every table and throw the
 rest away.
 
-The export is also unbranded. The print page and the CSV carry no logo and no
-colour, so a register that leaves the building is indistinguishable from one
-produced by anything else.
+The export is also unbranded. The print page carries no logo and no colour, so a
+register that leaves the building is indistinguishable from one produced by
+anything else.
 
 ## Decisions
 
@@ -27,10 +29,10 @@ Settled with the user before implementation.
    in the summary chips. Total reproduces today's behaviour, so nothing changes
    for anyone who never touches the dropdown.
 
-2. **Word (`.docx`) as the download format, not CSV.** A `.csv` cannot carry a
-   watermark or a border, so the branded download had to change format. Word was
-   chosen over PDF (not editable by the recipient) and over Excel (the watermark
-   and outline story is weaker and needs a new dependency).
+2. **Word (`.docx`) as the download format.** A `.csv` cannot carry a watermark
+   or a border, so the branded download had to change format. Word was chosen
+   over PDF (not editable by the recipient) and over Excel (the watermark and
+   outline story is weaker and needs a new dependency).
 
 3. **Hand-rolled OOXML, no new dependency.** A `.docx` is a ZIP of XML parts.
    Node 24 ships `zlib.deflateRawSync` and `zlib.crc32`, both verified present,
@@ -46,17 +48,27 @@ Settled with the user before implementation.
    disproportionate: it needs a column on `exams`, a picker in the exam form, and
    per-exam resolution in every renderer.
 
-5. **The CSV stays.** The Download CSV button remains next to the new Word
-   button, and both honour the section dropdown. A roster that may be
-   sorted and re-sorted in a spreadsheet is a genuine use; removing it would be a
-   regression, not a simplification.
+5. **The CSV download is removed.** The Download CSV button, its route, its
+   serialiser and its tests are deleted. The Print / Save PDF path already gives
+   the recipient a shareable file, and the CSV was carrying its own bug: simple
+   groups exported eight columns instead of four. Removing it removes that
+   column-shape change entirely. This reverses the original decision, which kept
+   the CSV.
 
 6. **Not Sent aligns to four columns everywhere.** The screen shows two
-   (name, phone) while the CSV and print page show four (plus questions answered
-   and started). A shared section definition forces one answer, so the screen
-   gains the two columns it was missing. The roster is an official record, and a
+   (name, phone) while the print page shows four (plus questions answered and
+   started). A shared section definition forces one answer, so the screen gains
+   the two columns it was missing. The roster is an official record, and a
    not-sent recipient has genuinely answered nothing and started at nothing —
    those two fields should be visibly empty, not structurally absent.
+
+7. **PDF comes from the browser's print dialog, not a server-side generator.**
+   The Print / Save PDF button opens the standalone print page and the
+   administrator picks "Save as PDF" as the destination. This keeps the
+   zero-dependency promise: a server-side PDF needs a real renderer (pdfkit
+   re-implements pagination and font handling poorly; headless Chromium is a
+   large, fragile addition), and the browser already paginates, embeds fonts and
+   applies the print stylesheet correctly.
 
 ## Architecture
 
@@ -91,7 +103,7 @@ inherited properties — to something truthy and then fail confusingly later.
 
 ### Column definitions
 
-One table per group, declared once, consumed by all four renderings:
+One table per group, declared once, consumed by all three renderings:
 
 | group | columns |
 |---|---|
@@ -104,11 +116,10 @@ One table per group, declared once, consumed by all four renderings:
 
 ### Serialiser signatures
 
-All three gain a `section` parameter and emit only the groups that section
+Both gain a `section` parameter and emit only the groups that section
 names, reusing the headings they already have:
 
 ```js
-rosterToCsv(roster, section)          // existing, filtered
 rosterPrintHTML(roster, section)      // existing, filtered
 rosterDocx(roster, section)           // new
 ```
@@ -120,18 +131,17 @@ in a downloads folder explains itself. `total` keeps the unadorned filename.
 ### Data flow
 
 ```
-<select> onchange ──▶ printRoster(id) / downloadRosterDocx(id) / downloadRosterCsv(id)
+<select> onchange ──▶ printRoster(id) / downloadRosterDocx(id)
                             │
                             ▼  ?section=<key>
               GET /api/exams/:id/participants.docx?section=…
               GET /api/exams/:id/participants/print?section=…
-              GET /api/exams/:id/participants.csv?section=…
                             │
                             ▼
                  normalizeSection(req.query.section)
                             │
                             ▼
-                    rosterDocx / rosterPrintHTML / rosterToCsv
+                    rosterDocx / rosterPrintHTML
 ```
 
 The dropdown filters the export only. The on-screen roster keeps showing all
@@ -281,10 +291,9 @@ On the Participants tab, in the existing header row:
 - the five-option section `<select>`, reading `Total` by default
 - **Print / Save PDF** — unchanged, now section-scoped
 - **Download Word** — new, section-scoped
-- **Download CSV** — unchanged, now section-scoped
 - **Watermark logo** — file input, thumbnail preview, "Use default"
 
-The section value is read at click time by all three actions, so one selection
+The section value is read at click time by both actions, so one selection
 applies to whichever the administrator then presses.
 
 ## Testing
@@ -296,7 +305,7 @@ resolves unknown, missing, `null`, and inherited-property keys such as
 `constructor` to `total`. Each serialiser emits only its selected group; `total`
 emits all four; no group's rows leak into another's output.
 
-**Column alignment** — Not Sent renders the same four columns in the screen, CSV,
+**Column alignment** — Not Sent renders the same four columns in the screen,
 print and Word output.
 
 **The `.docx`** — ZIP magic and end-of-central-directory present; all nine parts
@@ -313,8 +322,8 @@ correctness property and not a cosmetic one.
 **Watermark** — produces a non-empty PNG; uploading a custom logo changes the
 bytes; deleting reverts to `icon.svg`; a non-image upload is rejected with 400.
 
-**Regressions** — the existing CSV formula-injection and roster
-section-coverage tests must still pass.
+**Regressions** — the existing roster section-coverage and print-page tests must
+still pass, and the removed CSV route must 404 rather than linger half-deleted.
 
 The ZIP reader in the tests parses the central directory independently with
 `zlib.inflateRawSync` rather than reusing the writer's own bookkeeping, so it

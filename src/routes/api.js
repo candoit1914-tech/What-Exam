@@ -235,9 +235,9 @@ router.get('/exams/:id', (req, res) => {
   res.json({ exam: examSummary(exam), questions, recipients, results: resultsList });
 });
 
-// ── Participant roster: screen, CSV, print ──────────────────────────────
+// ── Participant roster: screen, print ───────────────────────────────────────────
 // Registered below the admin guard at the top of this router, and Express
-// matches exact path segments, so `/exams/:id/participants.csv` is not
+// matches exact path segments, so `/exams/:id/participants/print` is not
 // swallowed by `/exams/:id`. Every route null-checks the roster because
 // buildParticipantRoster returns null for an unknown exam and the
 // serialisers dereference roster.exam unguarded.
@@ -246,43 +246,6 @@ router.get('/exams/:id/participants', (req, res) => {
   const roster = results.buildParticipantRoster(req.params.id);
   if (!roster) return res.status(404).json({ error: 'Exam not found' });
   res.json(roster);
-});
-
-router.get('/exams/:id/participants.csv', (req, res) => {
-  const roster = results.buildParticipantRoster(req.params.id);
-  // JSON error even on a download route: an admin hitting this sees a failed
-  // download either way, so the 404 status is what carries the signal — the
-  // body only has to match the convention the rest of this file uses.
-  if (!roster) return res.status(404).json({ error: 'Exam not found' });
-  // Exam titles are free text and routinely non-ASCII, so the ASCII form is
-  // only a fallback: a strict allow-list alone would collapse every local
-  // script to the same "exam" name. RFC 6266 `filename*` carries the real
-  // UTF-8 title; the exam id disambiguates same-titled exams. Both values are
-  // stripped to header- and filename-safe characters before use.
-  const raw = String(roster.exam.title || '');
-  const ascii =
-    raw
-      .replace(/[^a-z0-9]+/gi, '-')
-      .replace(/^-+|-+$/g, '')
-      .slice(0, 60)
-      .replace(/-+$/g, '') || 'exam';
-  const utf8 =
-    raw
-      // eslint-disable-next-line no-control-regex
-      .replace(/[\x00-\x1f\x7f]/g, ' ')
-      .replace(/["\\;:/]/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim()
-      .slice(0, 120)
-      .trim() || `exam ${roster.exam.id}`;
-  const body = results.rosterToCsv(roster);
-  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-  res.setHeader(
-    'Content-Disposition',
-    `attachment; filename="participants-${roster.exam.id}-${ascii}.csv"; ` +
-      `filename*=UTF-8''${encodeURIComponent(`participants-${roster.exam.id}-${utf8}.csv`)}`
-  );
-  res.send(body);
 });
 
 router.get('/exams/:id/participants/print', (req, res) => {

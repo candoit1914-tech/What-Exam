@@ -418,9 +418,9 @@ const isFinished = (status) => FINISHED_STATUSES.includes(`'${status}'`);
  * Build the participant roster for one exam: every recipient, sorted into
  * finished (ranked) / in progress / not started / not sent.
  *
- * This is the single data source behind all three renderings (screen, CSV,
- * print) so the three can never disagree about who is on the roster or what
- * rank they hold.
+ * This is the single data source behind both renderings (screen, print) so
+ * the two can never disagree about who is on the roster or what rank they
+ * hold.
  *
  * Division of labour, which is not interchangeable: the SQL window function
  * below picks each student's best attempt; the display order and the rank
@@ -577,57 +577,6 @@ function buildParticipantRoster(examId) {
   };
 }
 
-// A leading =, +, - or @ makes Excel/LibreOffice evaluate the cell, so a
-// student named "=cmd|..." would run on open. Prefixing an apostrophe forces
-// text without changing what a human reads.
-function csvCell(value) {
-  if (value === null || value === undefined) return '';
-  let s = String(value);
-  if (/^[=+\-@]/.test(s)) s = "'" + s;
-  if (/[",\n\r]/.test(s)) s = '"' + s.replace(/"/g, '""') + '"';
-  return s;
-}
-
-function rosterToCsv(roster) {
-  const lines = [];
-  lines.push(csvCell(roster.exam.title));
-  lines.push('Generated,' + csvCell(new Date().toISOString()));
-  lines.push('');
-
-  const head = 'Position,Name,Phone,Score,Percentage,Result,Attempt,Finished At';
-  // `passed` is null for anyone who has not finished, which is a THIRD state,
-  // not a fail: a plain truthiness test would print "Fail" next to a student
-  // who has not been marked at all. So the em dash the report already uses for
-  // a missing value stands in for "no result yet".
-  const outcome = (passed) =>
-    passed === null || passed === undefined ? '—' : passed ? 'Pass' : 'Fail';
-  const row = (r, withRank) => [
-    withRank ? r.rank : '',
-    r.name, r.phone,
-    r.final_score === null || r.final_score === undefined ? '' : r.final_score,
-    r.final_percentage === null || r.final_percentage === undefined ? '' : r.final_percentage,
-    outcome(r.passed),
-    r.attempt_no || '',
-    r.ended_at || '',
-  ].map(csvCell).join(',');
-
-  const section = (title, rows, withRank) => {
-    lines.push(csvCell(title));
-    if (!rows.length) { lines.push('(none)'); lines.push(''); return; }
-    lines.push(head);
-    for (const r of rows) lines.push(row(r, withRank));
-    lines.push('');
-  };
-
-  section('Finished (ranked by percentage)', roster.finished, true);
-  section('In Progress', roster.inProgress, false);
-  section('Not Started', roster.notStarted, false);
-  section('Not Sent', roster.notSent, false);
-
-  // BOM so Excel opens UTF-8 names (accents, non-Latin) correctly.
-  return '\uFEFF' + lines.join('\r\n');
-}
-
 // The print view is deliberately a standalone document: no app stylesheet,
 // no JavaScript, no buttons. The browser's own print dialog turns it into
 // paper or a PDF in one click, which is why this feature needs no PDF
@@ -745,4 +694,4 @@ ${otherRows(roster.notSent)}
 </html>`;
 }
 
-module.exports = { computeForSession, persistSessionTotals, sendResultMessage, sendResultAndCertificate, bulkResendResults, reportHTML, buildParticipantRoster, csvCell, rosterToCsv, rosterPrintHTML, FINISHED_STATUSES };
+module.exports = { computeForSession, persistSessionTotals, sendResultMessage, sendResultAndCertificate, bulkResendResults, reportHTML, buildParticipantRoster, rosterPrintHTML, FINISHED_STATUSES };

@@ -26,7 +26,7 @@ app.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
     // Without this, cross-origin JavaScript cannot read Content-Disposition,
     // even though the browser is willing to send it. The dashboard runs on a
-    // different origin from the API, so the roster CSV download would always
+    // different origin from the API, so a roster file download would always
     // fall back to a generic name instead of the exam-specific one the server
     // chose (including its UTF-8 form for non-ASCII exam titles).
     res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');

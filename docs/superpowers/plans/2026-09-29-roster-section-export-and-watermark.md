@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Let an administrator export the exam roster for one selected section as CSV, a branded print page, or a branded Word `.docx`, and let them upload the app-wide watermark logo from the Participants tab.
+**Goal:** Let an administrator export the exam roster for one selected section as a branded print page or a branded Word `.docx`, and let them upload the app-wide watermark logo from the Participants tab.
 
 **Tech Stack:** Node 24 (`node:zlib` for the ZIP container), Express 5, `sharp` for image processing, `multer` memory storage, vanilla browser JS. **No new npm dependencies.**
 
@@ -28,17 +28,16 @@ Existing serialisers to modify:
 
 | symbol | location | current signature |
 |---|---|---|
-| `csvCell` | `src/services/results.js:582` | `(value) => string` — formula-injection guard, **keep unchanged** |
-| `rosterToCsv` | `src/services/results.js:591` | `(roster) => string` |
-| `rosterPrintHTML` | `src/services/results.js:667` | `(roster) => string` |
+| `rosterPrintHTML` | `src/services/results.js:616` | `(roster) => string` |
 | `esc` | `src/services/results.js:348` | escapes `&`, `<`, `>` only — **does not escape `"`** |
-| `PRINT_CSS` | `src/services/results.js:~618` | embedded in the print document |
+| `PRINT_CSS` | `src/services/results.js:584` | embedded in the print document |
+
+The CSV download (`csvCell`, `rosterToCsv`, the `/participants.csv` route and its tests) was **removed** in the same change that produced this plan; the print page and Word document replace it. Do not reintroduce it.
 
 Routes to add (all after the existing admin guard at `src/routes/api.js:81`, wrapped in `asyncWrap` at `src/routes/api.js:144`):
 
 ```
 GET    /api/exams/:id/participants/print?section=key
-GET    /api/exams/:id/participants.csv?section=key
 GET    /api/exams/:id/participants.docx?section=key
 GET    /api/watermark-logo          -> { custom, url }
 POST   /api/watermark-logo          -> multer memory image -> saved PNG
@@ -50,10 +49,9 @@ GET    /api/watermark-logo.png      -> processed PNG bytes (UI thumbnail)
 
 ---
 
-## Two deviations from the design doc — deliberate, flag them to the user
+## One deviation from the design doc — deliberate, flag it to the user
 
 1. **Tests go in focused new files**, not appended to `test/participant-roster.test.js`, which is already large. Each new file must `require('./helpers/isolate')` **first**, matching `test/participant-roster.test.js` and `test/recipient-route.test.js`.
-2. **Simple-group CSV blocks shrink from eight columns to four.** `rosterToCsv` today prints the finished eight-column `head` for *every* group (`src/services/results.js:600`, applied at lines 610-613), which is a bug: Not Sent rows have no score and no verdict. The design's column table says `notSent` is `Name, Phone, Questions answered, Started`. This changes the output shape of an existing export and requires updating the CSV assertion in `test/participant-roster.test.js` (~line 419). The print page and screen are **already** four columns; only the CSV is wrong.
 
 ---
 
@@ -118,7 +116,7 @@ test('sectionSlug is filename-safe: snake_case, non-empty for total', () => {
 
 - [ ] **Step 1.3** Run the test and watch it fail: `node --test test/roster-sections.test.js`
 
-- [ ] **Step 1.4** Implement in `src/services/results.js`, immediately above `rosterToCsv`:
+- [ ] **Step 1.4** Implement in `src/services/results.js`, immediately above `rosterPrintHTML`:
 
 ```js
 // One definition of the five exportable sections. The keys are the URL
@@ -169,22 +167,22 @@ module.exports = { /* ...existing... */ ROSTER_SECTIONS, normalizeSection, secti
 ```
 
 - [ ] **Step 1.6** Run `node --test test/roster-sections.test.js` — expect 5/5 pass.
-- [ ] **Step 1.7** Run `npm test` — expect no new failures (Task 2 is the only intentional behaviour change and is not made yet).
+- [ ] **Step 1.7** Run `npm test` — expect no new failures. Tasks 1 and 2 are additive: they export helpers and change no existing output.
 
 **Commit:** `feat(roster): add section vocabulary and filename slugs`
 
 ---
 
-## Task 2: One column definition per group, and section filtering in CSV
+## Task 2: One column definition per group
 
-**Files:** `src/services/results.js`, `test/roster-sections.test.js`, `test/participant-roster.test.js`
+**Files:** `src/services/results.js`, `test/roster-sections.test.js`
 
-The three simple groups share one shape. Declare it once so CSV, print, Word and the screen cannot drift.
+The three simple groups share one shape, and the Word document needs the same column names the print page uses. Declare them once so print, Word and the screen cannot drift. This task is a pure refactor: it replaces literals with shared constants and changes no output.
 
 - [ ] **Step 2.1** Add failing tests to `test/roster-sections.test.js`:
 
 ```js
-const { rosterToCsv, csvCell, buildParticipantRoster } = require('../src/services/results');
+const { rosterColumns, rosterBlocks } = require('../src/services/results');
 
 const stubExam = { exam: { id: 12, title: 'Maths', duration_minutes: 30, pass_percentage: 50, status: 'live' } };
 function stub(over = {}) {
@@ -196,105 +194,93 @@ function stub(over = {}) {
   };
 }
 
-test('rosterToCsv emits only the selected section', () => {
+test('rosterColumns gives the finished group eight columns and every simple group four', () => {
+  assert.deepEqual(rosterColumns('finished'),
+    ['Position', 'Name', 'Phone', 'Score', 'Percentage', 'Result', 'Attempt', 'Finished At']);
+  for (const group of ['inProgress', 'notStarted', 'notSent']) {
+    assert.deepEqual(rosterColumns(group), ['Name', 'Phone', 'Questions answered', 'Started']);
+  }
+});
+
+test('rosterBlocks returns only the groups the section names, in roster order', () => {
   const r = stub({
-    finished:    [{ rank: 1, name: 'Ann', phone: '1', final_score: 9, final_percentage: 90, passed: 1, attempt_no: 1, ended_at: 'T' }],
-    inProgress:  [{ name: 'Bob', phone: '2', questions_answered: 3, started_at: 'S1' }],
-    notStarted:  [{ name: 'Cid', phone: '3', questions_answered: 0, started_at: null }],
-    notSent:     [{ name: 'Dee', phone: '4', questions_answered: 0, started_at: null }],
+    finished:   [{ rank: 1, name: 'Ann' }],
+    inProgress: [{ name: 'Bob' }],
+    notStarted: [{ name: 'Cid' }],
+    notSent:    [{ name: 'Dee' }],
   });
-  const total = rosterToCsv(r, 'total');
-  for (const t of ['Finished', 'In Progress', 'Not Started', 'Not Sent']) {
-    assert.ok(total.includes(t), `total should contain ${t}`);
-  }
-  const notSent = rosterToCsv(r, 'not_sent');
-  assert.ok(notSent.includes('Not Sent'));
-  for (const t of ['Finished (ranked', 'In Progress', 'Not Started']) {
-    assert.ok(!notSent.includes(t), `${t} must not leak into not_sent`);
-  }
-  assert.ok(notSent.includes('Dee'));
-  assert.ok(!notSent.includes('Ann'));
-  // An unknown or missing section behaves exactly like total.
-  assert.equal(rosterToCsv(r, 'bogus'), total);
-  assert.equal(rosterToCsv(r, undefined), total);
-});
-
-test('simple-group CSV blocks use four columns, not the finished eight', () => {
-  const csv = rosterToCsv(stub({ notSent: [{ name: 'Dee', phone: '4', questions_answered: 0, started_at: null }] }), 'not_sent');
-  assert.ok(csv.includes('Name,Phone,Questions answered,Started'), csv);
-  assert.ok(!csv.includes('Position,Name,Phone,Score'), csv);
-  assert.ok(!csv.includes('Result,Attempt'), csv);
-});
-
-test('rosterToCsv still guards formula injection and still carries a BOM', () => {
-  const csv = rosterToCsv(stub({ notSent: [{ name: '=cmd|calc', phone: '4', questions_answered: 0, started_at: null }] }), 'not_sent');
-  assert.ok(csv.startsWith('\uFEFF'), 'BOM must survive so Excel reads UTF-8 names');
-  assert.ok(csv.includes("'=cmd|calc"), csv);
-  assert.ok(!/(^|,)"?=cmd/.test(csv.replace(/'/g, '')), 'leading = must be neutralised');
-  assert.equal(csvCell('=x'), "'=x");
+  assert.deepEqual(rosterBlocks(r, 'total').map((b) => b.key),
+    ['finished', 'inProgress', 'notStarted', 'notSent']);
+  assert.deepEqual(rosterBlocks(r, 'not_sent').map((b) => b.key), ['notSent']);
+  assert.deepEqual(rosterBlocks(r, 'finished').map((b) => b.key), ['finished']);
+  // Junk resolves to total, exactly as normalizeSection does.
+  assert.deepEqual(rosterBlocks(r, 'bogus').map((b) => b.key),
+    ['finished', 'inProgress', 'notStarted', 'notSent']);
+  // Each block carries its own title, column names, rank flag and rows.
+  const [first] = rosterBlocks(r, 'finished');
+  assert.equal(first.title, 'Finished (ranked by percentage)');
+  assert.equal(first.ranked, true);
+  assert.deepEqual(first.rows, r.finished);
+  assert.deepEqual(rosterBlocks(r, 'not_sent')[0].columns,
+    ['Name', 'Phone', 'Questions answered', 'Started']);
 });
 ```
 
-- [ ] **Step 2.2** Run and watch it fail. The `Position,Name,Phone,Score` assertion must fail today.
-- [ ] **Step 2.3** Rewrite `rosterToCsv` in `src/services/results.js`. **Note the rename:** the existing local helper is called `section(title, rows, withRank)`, which now collides with the `section` parameter — rename it to `block`.
+- [ ] **Step 2.2** Run and watch it fail: `node --test test/roster-sections.test.js`
+
+- [ ] **Step 2.3** Implement in `src/services/results.js`, immediately below `sectionSlug`:
 
 ```js
-// Declared once, consumed by CSV, print, Word and the screen. The three
+// Declared once, consumed by the print page and the Word document. The three
 // simple groups genuinely share one shape; declaring it three times is how
 // they came to disagree.
 const ROSTER_FINISHED_COLS = ['Position', 'Name', 'Phone', 'Score', 'Percentage', 'Result', 'Attempt', 'Finished At'];
 const ROSTER_SIMPLE_COLS = ['Name', 'Phone', 'Questions answered', 'Started'];
 
-// section key -> [ block title, column head, row builder, roster field ]
-function rosterBlocks(roster, section) {
-  const all = {
-    finished: ['Finished (ranked by percentage)', ROSTER_FINISHED_COLS, true, roster.finished],
-    inProgress: ['In Progress', ROSTER_SIMPLE_COLS, false, roster.inProgress],
-    notStarted: ['Not Started', ROSTER_SIMPLE_COLS, false, roster.notStarted],
-    notSent: ['Not Sent', ROSTER_SIMPLE_COLS, false, roster.notSent],
-  };
-  return sectionGroups(section).map((k) => all[k]);
+function rosterColumns(group) {
+  return group === 'finished' ? ROSTER_FINISHED_COLS : ROSTER_SIMPLE_COLS;
 }
 
-function rosterToCsv(roster, section) {
-  const lines = [];
-  lines.push(csvCell(roster.exam.title));
-  const stamp = sectionStamp(section);
-  if (stamp) lines.push('Section,' + csvCell(stamp));
-  lines.push('Generated,' + csvCell(new Date().toISOString()));
-  lines.push('');
+// section key -> the blocks to render, in roster order, each with its own
+// title, column names and rows. `ranked` says whether the group carries a
+// rank column, which the finished block uses and no other group does.
+const ROSTER_BLOCK_META = {
+  finished:   { title: 'Finished (ranked by percentage)', ranked: true,  field: 'finished' },
+  inProgress: { title: 'In Progress',                     ranked: false, field: 'inProgress' },
+  notStarted: { title: 'Not Started',                     ranked: false, field: 'notStarted' },
+  notSent:    { title: 'Not Sent',                        ranked: false, field: 'notSent' },
+};
 
-  // `passed` is null for anyone who has not finished, which is a THIRD state,
-  // not a fail: a plain truthiness test would print "Fail" next to a student
-  // who has not been marked at all. So the em dash the report already uses for
-  // a missing value stands in for "no result yet".
-  const outcome = (passed) =>
-    passed === null || passed === undefined ? '-' : passed ? 'Pass' : 'Fail';
-
-  const finishedRow = (r) => [r.rank, r.name, r.phone,
-    r.final_score ?? '', r.final_percentage ?? '',
-    outcome(r.passed), r.attempt_no || '', r.ended_at || ''].map(csvCell).join(',');
-  const simpleRow = (r) => [r.name, r.phone, r.questions_answered ?? '', r.started_at || '']
-    .map(csvCell).join(',');
-
-  for (const [title, head, withRank, rows] of rosterBlocks(roster, section)) {
-    lines.push(csvCell(title));
-    if (!rows.length) { lines.push('(none)'); lines.push(''); continue; }
-    lines.push(head.map(csvCell).join(','));
-    for (const r of rows) lines.push(withRank ? finishedRow(r) : simpleRow(r));
-    lines.push('');
-  }
-
-  // BOM so Excel opens UTF-8 names (accents, non-Latin) correctly.
-  return '\uFEFF' + lines.join('\r\n');
+function rosterBlocks(roster, section) {
+  return sectionGroups(section).map((key) => {
+    const meta = ROSTER_BLOCK_META[key];
+    return { key, title: meta.title, ranked: meta.ranked, columns: rosterColumns(key), rows: roster[meta.field] };
+  });
 }
 ```
 
-- [ ] **Step 2.4** Update the existing CSV assertion in `test/participant-roster.test.js` (~line 419) that expects the eight-column head for a simple group. Find it with `Select-String -Path test/participant-roster.test.js -Pattern "Position,Name,Phone,Score"` and change the simple-group expectation to the four-column head, keeping the finished block's eight-column expectation intact.
-- [ ] **Step 2.5** Run `node --test test/roster-sections.test.js test/participant-roster.test.js` — expect all pass.
-- [ ] **Step 2.6** Run `npm test`.
+- [ ] **Step 2.4** In `rosterPrintHTML` (`src/services/results.js:644`), replace the local `otherHead` literal with `ROSTER_SIMPLE_COLS`. Leave `finishedHead` local and comment why:
 
-**Commit:** `feat(roster): filter CSV by section and fix simple-group columns`
+```js
+  const finishedHead = ['#', 'Name', 'Phone', 'Score', 'Percentage', 'Result', 'Attempt', 'Finished'];
+  // The simple groups' four names are identical in both renderers, so they are
+  // shared. The finished header stays compact ('#', 'Finished') to fit A4 and
+  // is deliberately NOT the Word document's longer header.
+  const otherHead = ROSTER_SIMPLE_COLS;
+```
+
+Do **not** change the print output: the rendered `<th>` text and the section order must stay byte-identical. Task 6 is where print becomes section-scoped.
+
+- [ ] **Step 2.5** Append the new names to the `module.exports` object at `src/services/results.js:697`:
+
+```js
+module.exports = { /* ...existing... */ ROSTER_FINISHED_COLS, ROSTER_SIMPLE_COLS, rosterColumns, rosterBlocks };
+```
+
+- [ ] **Step 2.6** Run `node --test test/roster-sections.test.js test/participant-roster.test.js` — expect all to pass. The print tests at `test/participant-roster.test.js:294` and `:318` are the guard that this refactor changed nothing.
+- [ ] **Step 2.7** Run `npm test`.
+
+**Commit:** `refactor(roster): share one column definition per group`
 
 ---
 
@@ -952,13 +938,13 @@ function rosterDocx(roster, section, watermarkPngBuffer) {
     outcome(r.passed), txt(r.attempt_no), txt(r.ended_at)];
   const simpleCells = (r) => [txt(r.name), txt(r.phone), num(r.questions_answered), txt(r.started_at)];
 
-  const blocks = rosterBlocks(roster, section).map(([title, head, withRank, rows]) =>
-    withRank
-      ? renderBlock(title, ROSTER_FINISHED_COLS, rows, FIN_W, finishedCells)
-      : renderBlock(title, ROSTER_SIMPLE_COLS, rows, SIMPLE_W, simpleCells));
+  const blocks = rosterBlocks(roster, section).map(({ title, ranked, rows }) =>
+    ranked
+      ? renderBlock(title, DOCX_FINISHED_HEAD, rows, FIN_W, finishedCells)
+      : renderBlock(title, DOCX_SIMPLE_HEAD, rows, SIMPLE_W, simpleCells));
 ```
 
-`ROSTER_FINISHED_COLS` and `ROSTER_SIMPLE_COLS` come from Task 2 — but the DOCX needs its own display labels (`#`, `Score`, `Percentage`, `Result`, `Attempt`, `Finished`) rather than the CSV labels (`Position`, `Score`, `Percentage`, `Result`, `Attempt`, `Finished At`). Add a small mapping rather than mutating the shared arrays:
+`rosterBlocks` from Task 2 decides which groups appear and in what order. The DOCX supplies its own labels, because the document wants `#`/`Finished` where the print page uses longer names. Define them rather than mutating the shared arrays:
 
 ```js
 const DOCX_FINISHED_HEAD = ['#', 'Name', 'Phone', 'Score', 'Percentage', 'Result', 'Attempt', 'Finished'];
@@ -1273,7 +1259,7 @@ ${watermarkDataUri ? `<img class="wm" src="${esc(watermarkDataUri)}" alt="">` : 
 - [ ] **Step 6.6** Make the headings section-scoped and add the stamp. Replace the four hard-coded `<h2>` + rows block with:
 
 ```js
-${rosterBlocks(roster, section).map(([title, head, withRank, rows]) => withRank
+${rosterBlocks(roster, section).map(({ title, ranked, rows }) => ranked
   ? `<h2>${esc(title)}</h2>\n${finishedRowsOf(rows)}`
   : `<h2>${esc(title)}</h2>\n${otherRowsOf(rows)}`
 ).join('\n')}
@@ -1298,7 +1284,7 @@ Keep the existing `finishedHead` / `otherHead` local constants — they are alre
 
 **Files:** `src/routes/api.js`, `test/roster-routes.test.js`
 
-All five routes go after the admin guard at `src/routes/api.js:81`, wrapped in `asyncWrap` (`src/routes/api.js:144`).
+Every route below goes after the admin guard at `src/routes/api.js:81`, wrapped in `asyncWrap` (`src/routes/api.js:144`). The print route already exists at `src/routes/api.js:251` and is extended in place; the rest are new.
 
 - [ ] **Step 7.1** Write `test/roster-routes.test.js` (failing). Copy the harness from `test/recipient-route.test.js` **exactly**, because two things differ from a naive `fetch`-based test: `test/helpers/isolate.js` stubs `global.fetch` to throw, and `src/server.js:336` exports the express `app` (there is no `createApp()`), so the test mounts `src/routes/api` on its own express instance, exactly as `recipient-route.test.js` does.
 
@@ -1394,22 +1380,27 @@ const ICON_SVG = path.join(__dirname, '..', 'src', 'public', 'icon.svg');
 const iconUpload = () => multipart('file', 'icon.svg', 'image/svg+xml', fs.readFileSync(ICON_SVG));
 
 test('the section param is honoured and junk falls back to total', async () => {
-  const junk = await request('GET', `/api/exams/${examId}/participants.csv?section=constructor`);
-  const total = await request('GET', `/api/exams/${examId}/participants.csv`);
+  const junk = await request('GET', `/api/exams/${examId}/participants/print?section=constructor`);
   assert.equal(junk.status, 200, junk.text);
-  assert.equal(junk.text, total.text, 'an inherited-property key must fall back to total');
-  assert.equal((await request('GET', `/api/exams/${examId}/participants.csv?section=not_sent`)).status, 200);
+  assert.ok(!junk.text.includes('Section:'), 'an inherited-property key must fall back to total');
+  const filtered = await request('GET', `/api/exams/${examId}/participants/print?section=not_sent`);
+  assert.ok(filtered.text.includes('Section: Not sent'), 'the stamp must name the selected section');
+  assert.ok(!filtered.text.includes('<h2>Finished'), 'other sections must not leak in');
 });
 
-test('the csv is sent as an attachment with a section-aware filename', async () => {
-  const filtered = await request('GET', `/api/exams/${examId}/participants.csv?section=not_sent`);
+test('the removed csv route 404s rather than lingering half-deleted', async () => {
+  const gone = await request('GET', `/api/exams/${examId}/participants.csv`);
+  assert.equal(gone.status, 404, 'the CSV export was removed; the path must not answer');
+});
+
+test('the docx is sent as an attachment with a section-aware filename', async () => {
+  const filtered = await request('GET', `/api/exams/${examId}/participants.docx?section=not_sent`);
   assert.equal(filtered.status, 200, filtered.text);
-  assert.ok(filtered.headers['content-type'].includes('text/csv'), filtered.headers['content-type']);
   const cd = filtered.headers['content-disposition'];
   assert.ok(cd.includes('attachment'), cd);
   assert.ok(cd.includes('Not-sent'), `filename must name the section: ${cd}`);
-  const plain = await request('GET', `/api/exams/${examId}/participants.csv`);
-  assert.ok(plain.headers['content-disposition'].includes(`participants-${examId}.csv`),
+  const plain = await request('GET', `/api/exams/${examId}/participants.docx`);
+  assert.ok(plain.headers['content-disposition'].includes(`participants-${examId}.docx`),
     plain.headers['content-disposition']);
 });
 
@@ -1489,9 +1480,8 @@ test('delete reverts to the default watermark, and twice is not a 500', async ()
   assert.equal(again.status, 200, 'deleting twice must not 500');
 });
 
-test('all five routes require the admin token', async () => {
-  for (const p of [`/api/exams/${examId}/participants.csv`,
-                   `/api/exams/${examId}/participants/print`,
+test('every export and watermark route requires the admin token', async () => {
+  for (const p of [`/api/exams/${examId}/participants/print`,
                    `/api/exams/${examId}/participants.docx`,
                    '/api/watermark-logo', '/api/watermark-logo.png']) {
     const status = await new Promise((resolve, reject) => {
@@ -1504,7 +1494,6 @@ test('all five routes require the admin token', async () => {
 });
 
 test('a missing exam is a 404, not a 500', async () => {
-  assert.equal((await request('GET', '/api/exams/999999/participants.csv')).status, 404);
   assert.equal((await request('GET', '/api/exams/999999/participants/print')).status, 404);
   assert.equal((await request('GET', '/api/exams/999999/participants.docx')).status, 404);
 });
@@ -1520,22 +1509,12 @@ function rosterFilename(examId, section, ext) {
   return `participants-${examId}${slug === 'Total' ? '' : `-${slug}`}.${ext}`;
 }
 
-}
-
 router.get('/exams/:id/participants/print', asyncWrap(async (req, res) => {
   const roster = buildParticipantRoster(req.params.id);
   if (!roster) return res.status(404).json({ error: 'Exam not found' });
   const section = normalizeSection(req.query.section);
   const png = await watermarkService.watermarkPng();
   res.type('html').send(rosterPrintHTML(roster, section, `data:image/png;base64,${png.toString('base64')}`));
-}));
-
-router.get('/exams/:id/participants.csv', asyncWrap(async (req, res) => {
-  const roster = buildParticipantRoster(req.params.id);
-  if (!roster) return res.status(404).json({ error: 'Exam not found' });
-  const section = normalizeSection(req.query.section);
-  res.set('Content-Disposition', `attachment; filename="${rosterFilename(req.params.id, section, 'csv')}"`);
-  res.type('text/csv; charset=utf-8').send(rosterToCsv(roster, section));
 }));
 
 router.get('/exams/:id/participants.docx', asyncWrap(async (req, res) => {
@@ -1639,13 +1618,14 @@ test('the section dropdown offers exactly the five export sections and reads Tot
   assert.equal((m[0].match(/<option/g) || []).length, 5);
 });
 
-test('all three export actions read the section at click time', () => {
-  for (const fn of ['printRoster', 'downloadRosterDocx', 'downloadRosterCsv']) {
+test('both export actions read the section at click time', () => {
+  for (const fn of ['printRoster', 'downloadRosterDocx']) {
     assert.ok(app.includes(`function ${fn}(`), `${fn} missing`);
   }
+  assert.ok(!app.includes('downloadRosterCsv'), 'the CSV downloader was removed');
   assert.ok(app.includes('rosterSectionValue()'), 'one shared reader is required');
   const uses = (app.match(/rosterSectionValue\(\)/g) || []).length;
-  assert.ok(uses >= 4, `expected 3 call sites plus the definition, saw ${uses}`);
+  assert.ok(uses >= 3, `expected 2 call sites plus the definition, saw ${uses}`);
 });
 
 test('the docx action exists and asks for the right content type', () => {
@@ -1689,34 +1669,54 @@ function rosterSectionValue() {
 ```
 
 ```html
-<select id="rosterSection" title="Applies to print, Word and CSV exports">
+<select id="rosterSection" title="Applies to print and Word exports">
   ${ROSTER_SECTIONS.map(([v, l]) => `<option value="${v}"${v === 'total' ? ' selected' : ''}>${l}</option>`).join('')}
 </select>
 <button class="btn btn-ghost" onclick="printRoster(${id})">${I.doc} Print / Save PDF</button>
 <button class="btn btn-ghost" onclick="downloadRosterDocx(${id})">${I.doc} Download Word</button>
-<button class="btn btn-ghost" onclick="downloadRosterCsv(${id})">${I.doc} Download CSV</button>
 ${watermarkControls()}
 ```
 
 **Filter scope:** the dropdown filters the *export* only. The on-screen roster keeps showing all four tables, because that is where an administrator orients themselves. Do not filter `roster.finished` and friends.
 
-- [ ] **Step 8.4** Add the docx downloader, mirroring `downloadRosterCsv` at `src/public/app.js:878`:
+- [ ] **Step 8.4** Add the docx downloader plus the two small file helpers it needs. The CSV downloader was the only thing that ever turned a `Response` into a download, and it is gone, so this becomes the single mechanism: fetch through `rosterFetch` (which carries the admin token and already throws on a non-2xx), read the exposed `Content-Disposition` for the filename, and click a Blob-URL anchor.
 
 ```js
+function attachmentFilename(res, fallback) {
+  const cd = res.headers.get('content-disposition') || '';
+  const m = /filename="?([^";]+)"?/.exec(cd);
+  return m ? m[1] : fallback;
+}
+
+function saveBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
 async function downloadRosterDocx(id) {
   try {
     const section = rosterSectionValue();
     const res = await rosterFetch(`/api/exams/${id}/participants.docx?section=${encodeURIComponent(section)}`);
-    if (!res.ok) throw new Error(await res.text());
-    saveBlob(await res.blob(), filenameFrom(res, `participants-${id}.docx`));
+    saveBlob(await res.blob(), attachmentFilename(res, `participants-${id}.docx`));
   } catch (e) {
     alert(`Could not download the Word file: ${e.message}`);
   }
 }
 ```
 
-Reuse whatever the existing CSV/print code already uses for turning a `Response` into a file — do not introduce a second mechanism. Check `downloadRosterCsv` and `printRoster` first and match them.
-- [ ] **Step 8.5** Add `?section=` to the two existing calls: `printRoster` (`src/public/app.js:905`) and `downloadRosterCsv` (`src/public/app.js:880`).
+The filename parse works because `src/server.js:32` exposes `Content-Disposition` across origins.
+- [ ] **Step 8.5** Add `?section=` to `printRoster` (`src/public/app.js:875`). Read it at click time, inside the handler, so one selection applies to whichever button is pressed next:
+
+```js
+    const section = rosterSectionValue();
+    const res = await rosterFetch(`/api/exams/${id}/participants/print?section=${encodeURIComponent(section)}`);
+```
 - [ ] **Step 8.6** Add the watermark controls. Small, self-contained, and they must not require a page reload to be usable:
 
 ```js
@@ -1728,7 +1728,7 @@ function watermarkControls() {
       <input type="file" id="wmFile" accept="image/png,image/jpeg,image/svg+xml" hidden onchange="uploadWatermark(this)">
     </label>
     <img id="wmPreview" alt="" style="width:28px;height:28px;object-fit:contain;vertical-align:middle">
-    <button class="btn btn-ghost" onclick="resetWatermark()">Use default</button>
+    <button class="btn btn-ghost" id="wmReset" onclick="resetWatermark()">Use default</button>
   </span>`;
 }
 
@@ -1797,12 +1797,12 @@ Get-Content package.json | Select-String -Pattern '"scripts"' -Context 0,10
 
 If `lint` and `typecheck` exist, run both. If they do not, say so in the report rather than claiming they passed.
 - [ ] **Step 9.3** Confirm no stray artefacts: `git status --short` should show only the intended files. Check that no temp or scratch file landed in the repo, and that `data/uploads/watermark.png` is **not** committed — add it to `.gitignore` if it is not already ignored.
-- [ ] **Step 9.4** Review the diff for the two known deviations and confirm both are visible in the report to the user: the CSV simple-group columns changed from eight to four, and the tests live in focused new files.
+- [ ] **Step 9.4** Review the diff for the one known deviation and confirm it is visible in the report to the user: the tests live in focused new files rather than appended to `test/participant-roster.test.js`.
 - [ ] **Step 9.5** Commit: `feat(roster): section export, word download and watermark branding`
 - [ ] **Step 9.6** Write the final report. It must state plainly:
-  - what was built, and which of the three exports were verified in a real browser
+  - what was built, and which of the two exports (print page, Word download) were verified in a real browser
   - that the `.docx` was verified **structurally** — independent ZIP reader, XML well-formedness, relationship resolution, and a third-party ZIP tool — because no Word or LibreOffice binary is available on this machine, so nobody mistakes that for a visual check
-  - the CSV column change as a deliberate behaviour change, in case anyone depended on the old eight-column output
+  - that the CSV export was **removed** outright, not changed, in case anyone depended on it; the print page and the Word download replace it, and the `/participants.csv` path now 404s
   - the Vercel ephemeral-storage caveat: `vercel.json` sets no `UPLOADS_DIR`, so on Vercel an uploaded watermark is lost on redeploy, exactly like the existing student photos and voice notes
   - that `@page { border }` is ignored by Chrome, so the print frame is a `position: fixed` element; a print pipeline that discards fixed elements would show the watermark with no frame
 

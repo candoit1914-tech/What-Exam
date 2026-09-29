@@ -770,8 +770,8 @@ async function renderTab() {
   } else if (tab === 'participants') {
     // The roster is the official participation record, so it comes from its
     // own endpoint rather than being rebuilt from the session list in the
-    // browser. That keeps the on-screen view, the CSV and the printed page
-    // in agreement, since all three are rendered from the same server query.
+    // browser. That keeps the on-screen view and the printed page in
+    // agreement, since both are rendered from the same server query.
     bodyEl.innerHTML = `<div class="skeleton skeleton-card"></div>`;
     let roster;
     try {
@@ -797,7 +797,6 @@ async function renderTab() {
           </div>
           <div class="row">
             <button class="btn btn-ghost" onclick="printRoster(${id})">${I.doc} Print / Save PDF</button>
-            <button class="btn btn-ghost" onclick="downloadRosterCsv(${id})">${I.doc} Download CSV</button>
           </div>
         </div>
         <div class="row" style="margin-top:12px;gap:16px;flex-wrap:wrap">
@@ -845,12 +844,12 @@ async function renderTab() {
   }
 }
 
-// Fetch a roster asset (CSV or print HTML) with the admin token, returning
-// the raw Response. The generic `api()` helper cannot be used here: it always
-// parses JSON and always sends a JSON Content-Type, so a CSV or HTML body
-// would be destroyed before we could save or display it. The admin token is
-// in localStorage, never a cookie, so a plain <a href> download would arrive
-// unauthenticated and be rejected with a 401 - the fetch is what carries auth.
+// Fetch a roster asset (the print page) with the admin token, returning the
+// raw Response. The generic `api()` helper cannot be used here: it always
+// parses JSON and always sends a JSON Content-Type, so an HTML body would be
+// destroyed before we could display it. The admin token is in localStorage,
+// never a cookie, so a plain <a href> would arrive unauthenticated and be
+// rejected with a 401 - the fetch is what carries auth.
 async function rosterFetch(path) {
   const token = getToken();
   const res = await fetch(API_BASE + path, {
@@ -863,35 +862,6 @@ async function rosterFetch(path) {
   }
   if (!res.ok) throw new Error(`Request failed (${res.status})`);
   return res;
-}
-
-// Pull the filename the server chose, so the non-ASCII-aware name it built
-// (including any RFC 6266 UTF-8 form) is what lands in the downloads folder.
-function filenameFromHeader(res, fallback) {
-  const cd = res.headers.get('Content-Disposition') || '';
-  const star = /filename\*=UTF-8''([^;]+)/i.exec(cd);
-  if (star) { try { return decodeURIComponent(star[1].trim()); } catch { /* fall through */ } }
-  const plain = /filename="?([^";]+)"?/i.exec(cd);
-  return plain ? plain[1].trim() : fallback;
-}
-
-async function downloadRosterCsv(id) {
-  try {
-    const res = await rosterFetch(`/api/exams/${id}/participants.csv`);
-    const blob = await res.blob();
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = filenameFromHeader(res, `participants-${id}.csv`);
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    // Revoke on the next tick: revoking synchronously can cancel the download
-    // in Safari before it has read the blob.
-    setTimeout(() => URL.revokeObjectURL(url), 30_000);
-  } catch (e) {
-    alert(`Could not download the roster: ${e.message}`);
-  }
 }
 
 async function printRoster(id) {
