@@ -287,6 +287,101 @@ test('a not-started recipient still reports the allotted time', () => {
   }
 });
 
+// --- CSV test helpers -------------------------------------------------------
+// These fixtures deliberately contain commas, quotes and newlines inside
+// student names, so a record may not be read with split(',') — the first comma
+// in a name would slide every following column one to the left and the test
+// would happily assert on the wrong field. So the tests read the file the way a
+// spreadsheet does: RFC4180, where a quoted field may contain commas and CRLF,
+// and "" inside a quoted field is one literal quote.
+
+// Splits a whole document into records. A CRLF seen outside a quoted field ends
+// a record; inside one it is data, so an embedded newline cannot forge a row.
+function parseCsvRecords(text) {
+  const out = [];
+  let cur = '';
+  let quoted = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === '"') {
+      cur += ch;
+      if (quoted && text[i + 1] === '"') { cur += '"'; i++; }
+      else quoted = !quoted;
+    } else if (ch === '\r' && text[i + 1] === '\n' && !quoted) {
+      out.push(cur); cur = ''; i++;
+    } else {
+      cur += ch;
+    }
+  }
+  out.push(cur);
+  return out;
+}
+
+// Splits one record into its fields, undoing the quoting.
+function parseCsvRow(line) {
+  const out = [];
+  let field = '';
+  let quoted = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (quoted) {
+      if (ch !== '"') field += ch;
+      else if (line[i + 1] === '"') { field += '"'; i++; }
+      else quoted = false;
+    } else if (ch === '"') quoted = true;
+    else if (ch === ',') { out.push(field); field = ''; }
+    else field += ch;
+  }
+  out.push(field);
+  return out;
+}
+
+// Records with the BOM dropped from the first one, which is a byte-order mark
+// and not part of the first field.
+function csvLines(csv) {
+  return parseCsvRecords(csv).map((l, i) => (i === 0 ? l.replace(/^\uFEFF/, '') : l));
+}
+
+// The parsed fields of the data row belonging to `name`. The Name cell may
+// carry the leading apostrophe csvCell adds to force a spreadsheet to treat
+// the cell as text, so both the bare and the escaped form are accepted.
+function rowFor(csv, name) {
+  const line = csvLines(csv).find((l) => {
+    const f = parseCsvRow(l);
+    return f[1] === name || f[1] === "'" + name;
+  });
+  assert.ok(line, 'no row found for ' + JSON.stringify(name));
+  return parseCsvRow(line);
+}
+
+// Position,Name,Phone,Score,Percentage,Result,Attempt,Finished At
+const RESULT_COLUMN = 5;
+
+// One finished row; quoting tests only care about the field they are changing.
+function finishedRow(over = {}) {
+  return {
+    rank: 1, name: 'Plain', phone: '233000',
+    final_score: 5, final_percentage: 50, passed: 1, attempt_no: 1,
+    ended_at: '2026-01-01 10:00:00',
+    ...over,
+  };
+}
+
+function csvOf({ title = 'Sheet', finished = [], inProgress = [], notStarted = [], notSent = [] } = {}) {
+  return results.rosterToCsv({
+    exam: { id: 1, title },
+    finished,
+    inProgress,
+    notStarted,
+    notSent,
+    summary: {
+      finished: finished.length, inProgress: inProgress.length,
+      notStarted: notStarted.length, notSent: notSent.length,
+      total: finished.length + inProgress.length + notStarted.length + notSent.length,
+    },
+  });
+}
+
 test('CSV escapes values that a spreadsheet would run as a formula', () => {
   const csv = results.rosterToCsv({
     exam: { id: 1, title: 'Sheet' },
@@ -303,33 +398,118 @@ test('CSV escapes values that a spreadsheet would run as a formula', () => {
 test('CSV row order matches the ranked array', () => {
   const roster = {
     exam: { id: 1, title: 'Ordered' },
+    // Zoe is rank 1 but sorts LAST by name. Alphabetical and ranked order only
+    // disagree for a fixture like this one, so a localeCompare in place of the
+    // array order would pass an alphabet-ordered fixture and fail here.
     finished: [
-      { rank: 1, name: 'First', phone: '1', final_score: 9, final_percentage: 90, passed: 1, attempt_no: 1, ended_at: '' },
-      { rank: 2, name: 'Second', phone: '2', final_score: 6, final_percentage: 60, passed: 1, attempt_no: 1, ended_at: '' },
+      { rank: 1, name: 'Zoe', phone: '1', final_score: 9, final_percentage: 90, passed: 1, attempt_no: 1, ended_at: '' },
+      { rank: 2, name: 'Adam', phone: '2', final_score: 6, final_percentage: 60, passed: 1, attempt_no: 1, ended_at: '' },
     ],
     inProgress: [], notStarted: [], notSent: [],
     summary: { finished: 2, inProgress: 0, notStarted: 0, notSent: 0, total: 2 },
   };
   const csv = results.rosterToCsv(roster);
-  assert.ok(csv.indexOf('First') < csv.indexOf('Second'), 'rows must follow the ranked order');
+  assert.ok(csv.indexOf('Zoe') < csv.indexOf('Adam'), 'rows must follow the ranked order, not the alphabet');
+  // The Position column says which row is which, so a reorder cannot hide
+  // behind two rows that merely changed places.
+  assert.equal(rowFor(csv, 'Zoe')[0], '1', 'Zoe holds rank 1');
+  assert.equal(rowFor(csv, 'Adam')[0], '2', 'Adam holds rank 2');
 });
 
 test('an unfinished participant is never published as a Fail result', () => {
-  const csv = results.rosterToCsv({
-    exam: { id: 1, title: 'Pending' },
-    finished: [{ rank: 1, name: 'Genuine Failure', phone: '1', final_score: 4, final_percentage: 40, passed: 0, attempt_no: 1, ended_at: '2026-01-01 10:00:00' }],
+  const csv = csvOf({
+    finished: [finishedRow({ name: 'Genuine Failure', phone: '1', final_score: 4, final_percentage: 40, passed: 0 })],
     inProgress: [{ student_id: 2, name: 'Still Sitting', phone: '2', final_score: null, final_percentage: null, passed: null, attempt_no: 2, ended_at: '' }],
-    notStarted: [],
-    notSent: [],
-    summary: { finished: 1, inProgress: 1, notStarted: 0, notSent: 0, total: 2 },
   });
-  const resultOf = (name) =>
-    csv.split('\r\n').find((l) => l.includes(',' + name + ',')).split(',')[5];
-  // Column 5 is Result. buildParticipantRoster sets passed to null for every
-  // unfinished student precisely so no result is invented for them; a plain
-  // truthiness test would read that null as a fail and put "Fail" on a student
-  // who has not even been marked. A real 40% must still say Fail.
-  assert.equal(resultOf('Genuine Failure'), 'Fail', 'a real 40% is a fail and must say so');
-  assert.equal(resultOf('Still Sitting'), '—', 'passed is null, which means no result, not a fail');
+  // buildParticipantRoster sets passed to null for every unfinished student
+  // precisely so no result is invented for them; a plain truthiness test would
+  // read that null as a fail and put "Fail" on a student who has not even been
+  // marked. A real 40% must still say Fail.
+  assert.equal(rowFor(csv, 'Genuine Failure')[RESULT_COLUMN], 'Fail', 'a real 40% is a fail and must say so');
+  assert.equal(rowFor(csv, 'Still Sitting')[RESULT_COLUMN], '—', 'passed is null, which means no result, not a fail');
+});
+
+test('a genuine pass and a genuine fail are each reported as themselves', () => {
+  const csv = csvOf({
+    finished: [
+      finishedRow({ rank: 1, name: 'Passed', final_percentage: 90, passed: 1 }),
+      finishedRow({ rank: 2, name: 'Failed', final_percentage: 40, passed: 0 }),
+    ],
+  });
+  // Both branches of `outcome` are pinned here. 0 is a real verdict and must
+  // not be folded into the null case, and 1 must not be folded into anything.
+  assert.equal(rowFor(csv, 'Passed')[RESULT_COLUMN], 'Pass', 'passed: 1 must read Pass');
+  assert.equal(rowFor(csv, 'Failed')[RESULT_COLUMN], 'Fail', 'passed: 0 must read Fail, not the null marker');
+});
+
+test('the CSV starts with a UTF-8 BOM and is still parseable after it', () => {
+  const name = 'Kofi Ǹkoto 李雷';
+  const csv = csvOf({ title: 'Biología', finished: [finishedRow({ name })] });
+  // Excel reads a CSV's encoding from this one character. Without it Excel
+  // falls back to the system codepage and mangles precisely these names, and
+  // the damage is invisible in a diff.
+  assert.equal(csv.charCodeAt(0), 0xfeff, 'the very first character code must be the BOM');
+  assert.equal(csvLines(csv)[0], 'Biología', 'the BOM is a prefix, not part of the first field');
+  // ...and nothing after it shifted: the document still parses normally.
+  const row = rowFor(csv, name);
+  assert.equal(row.length, 8, 'a data row still has all eight columns');
+  assert.deepEqual(row, [ '1', name, '233000', '5', '50', 'Pass', '1', '2026-01-01 10:00:00' ]);
+});
+
+test('a comma in a name or title stays inside one quoted field', () => {
+  const csv = csvOf({ title: 'Biology, Term 1', finished: [finishedRow({ name: 'Osei, Kwame', phone: '233111' })] });
+  const lines = csvLines(csv);
+  assert.equal(lines[0], '"Biology, Term 1"', 'a title with a comma is wrapped in quotes');
+  assert.ok(lines.some((l) => l.includes('"Osei, Kwame"')), 'the name is wrapped in quotes');
+  // This is the corruption the quoting prevents: unwrapped, every column after
+  // the name slides one to the left and the result column reads a score.
+  const row = rowFor(csv, 'Osei, Kwame');
+  assert.equal(row.length, 8, 'the row still has eight fields');
+  assert.deepEqual(row, [ '1', 'Osei, Kwame', '233111', '5', '50', 'Pass', '1', '2026-01-01 10:00:00' ]);
+});
+
+test('a double quote in a name is doubled inside the quoted field', () => {
+  const name = 'Ana "The Great" Silva';
+  const csv = csvOf({ finished: [finishedRow({ name, phone: '233222' })] });
+  assert.ok(
+    csvLines(csv).some((l) => l.includes('"Ana ""The Great"" Silva"')),
+    'the inner quotes are doubled so the field does not end early'
+  );
+  const row = rowFor(csv, name);
+  assert.equal(row.length, 8, 'the row still has eight fields');
+  assert.equal(row[1], name, 'doubling round-trips back to the original name');
+  assert.equal(row[2], '233222', 'the phone stays in the phone column');
+  assert.equal(row[RESULT_COLUMN], 'Pass', 'the result stays in the result column');
+});
+
+test('a newline in a name is kept inside a quoted field', () => {
+  // A quoted field is never evaluated by a spreadsheet, which is what makes
+  // OWASP's CR/LF injection entries safe: a payload cannot open a new record,
+  // and therefore cannot start a new formula either.
+  const name = 'Line One\r\nLine Two';
+  const csv = csvOf({ finished: [finishedRow({ name })] });
+  const control = csvLines(csvOf({ finished: [finishedRow({ name: 'Plain' })] }));
+  assert.equal(csvLines(csv).length, control.length, 'an embedded newline must not open a new record');
+  assert.ok(
+    csvLines(csv).some((l) => l.includes('"Line One\r\nLine Two"')),
+    'the field is wrapped in quotes'
+  );
+  const row = rowFor(csv, name);
+  assert.equal(row.length, 8, 'the row still has eight fields');
+  assert.equal(row[1], name, 'the newline survives inside the one field');
+  assert.equal(row[RESULT_COLUMN], 'Pass', 'the result stays in the result column');
+});
+
+test('a leading = inside a quoted value is still forced to text', () => {
+  // The apostrophe belongs INSIDE the quotes. Outside, as in "'=1,2, a
+  // spreadsheet still reads the cell as the formula =1,2.
+  const csv = csvOf({ finished: [finishedRow({ name: '=1,2' })] });
+  assert.ok(csvLines(csv).some((l) => l.includes('"\'=1,2"')), 'apostrophe inside the quotes, not outside');
+  assert.equal(rowFor(csv, '=1,2')[1], '\'=1,2', 'the cell text is the apostrophe plus the whole name');
+
+  // Same again with a quote in the payload, so doubling and the guard compose.
+  const dde = csvOf({ finished: [finishedRow({ name: '="x"' })] });
+  assert.ok(csvLines(dde).some((l) => l.includes('"\'=""x"""')), 'both the guard and the doubling apply');
+  assert.equal(rowFor(dde, '="x"')[1], '\'="x"');
 });
 
