@@ -410,4 +410,106 @@ async function bulkResendResults(examId) {
   return report;
 }
 
-module.exports = { computeForSession, persistSessionTotals, sendResultMessage, sendResultAndCertificate, bulkResendResults, reportHTML };
+// ── Participant roster ──────────────────────────────────────────────────
+// One structure, three renderings (screen, CSV, print). Ranking is done in SQL
+// with a window function so the best attempt per student is chosen by the
+// database, not by JS sorting that could drift between the three views.
+const FINISHED_STATUSES = "('completed','ended','expired')";
+
+function buildParticipantRoster(examId) {
+  const exam = db.prepare('SELECT * FROM exams WHERE id = ?').get(examId);
+  if (!exam) return null;
+
+  // Every recipient is the backbone, so a student who never started is still
+  // listed. LEFT JOINs keep them, with NULL session columns.
+  const rows = db
+    .prepare(
+      `SELECT st.id AS student_id, st.name, st.phone, r.sent_at,
+              s.id AS session_id, s.status, s.started_at, s.ended_at,
+              s.final_score, s.final_percentage, s.passed, s.attempt_no,
+              s.current_q_order,
+              ROW_NUMBER() OVER (
+                PARTITION BY st.id
+                ORDER BY COALESCE(s.final_percentage, -1) DESC,
+                         COALESCE(s.final_score, -1) DESC,
+                         s.ended_at ASC
+              ) AS attempt_rank
+         FROM exam_recipients r
+         JOIN students st ON st.id = r.student_id
+         LEFT JOIN sessions s ON s.student_id = st.id AND s.exam_id = r.exam_id
+        WHERE r.exam_id = ?
+        ORDER BY COALESCE(s.final_percentage, -1) DESC,
+                 COALESCE(s.final_score, -1) DESC,
+                 s.ended_at ASC`
+    )
+    .all(examId);
+
+  const byId = new Map();
+  for (const row of rows) {
+    if (!byId.has(row.student_id)) byId.set(row.student_id, []);
+    byId.get(row.student_id).push(row);
+  }
+
+  const shape = (r) => ({
+    student_id: r.student_id,
+    name: r.name || '',
+    phone: r.phone,
+    sent_at: r.sent_at || '',
+    status: r.status || '',
+    started_at: r.started_at || '',
+    ended_at: r.ended_at || '',
+    final_score: r.final_score,
+    final_percentage: r.final_percentage,
+    passed: r.passed ? 1 : 0,
+    attempt_no: r.attempt_no,
+    questions_answered: r.current_q_order || 0,
+  });
+
+  const finished = [];
+  const inProgress = [];
+  const notStarted = [];
+  const notSent = [];
+
+  for (const sessions of byId.values()) {
+    // The best attempt is attempt_rank 1, whatever its status.
+    const best = sessions.find((r) => r.attempt_rank === 1) || sessions[0];
+    // Finished means SOME attempt finished, even if a later one is in progress:
+    // a student who already has a final score belongs in the leaderboard.
+    const bestFinished = sessions.find((r) => FINISHED_STATUSES.includes(`'${r.status}'`));
+
+    if (bestFinished) {
+      finished.push({ ...shape(bestFinished), rank: 0 });
+    } else if (best.status === 'in_progress') {
+      inProgress.push(shape(best));
+    } else if (best.sent_at) {
+      notStarted.push(shape(best));
+    } else {
+      notSent.push(shape(best));
+    }
+  }
+
+  finished.forEach((r, i) => { r.rank = i + 1; });
+
+  return {
+    exam: {
+      id: exam.id,
+      title: exam.title,
+      duration_minutes: exam.duration_minutes,
+      pass_percentage: exam.pass_percentage,
+      status: exam.status,
+    },
+    finished,
+    inProgress,
+    notStarted,
+    notSent,
+    summary: {
+      finished: finished.length,
+      inProgress: inProgress.length,
+      notStarted: notStarted.length,
+      notSent: notSent.length,
+      total: byId.size,
+    },
+  };
+}
+
+module.exports = { computeForSession, persistSessionTotals, sendResultMessage, sendResultAndCertificate, bulkResendResults, reportHTML, buildParticipantRoster, FINISHED_STATUSES };
