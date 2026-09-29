@@ -148,6 +148,23 @@ test('a never-started recipient reports no score and no answers', () => {
   assert.equal(row.questions_answered, 0);
 });
 
+test('a student mid-restart is in progress, not filed as not started', () => {
+  const eid = newExam('Restarted');
+  const sid = addStudent(eid, 'Restarter');
+  // restartSession() retires the old attempt as 'abandoned' WITHOUT setting
+  // ended_at, and the retired row keeps its partial answers. Both attempts
+  // therefore tie on the window's three sort keys.
+  addSession(eid, sid, { status: 'abandoned', attempt: 1, answers: 1 });
+  addSession(eid, sid, { status: 'in_progress', attempt: 2, answers: 2 });
+
+  const roster = results.buildParticipantRoster(eid);
+  assert.deepEqual(roster.inProgress.map((r) => r.name), ['Restarter'], 'actively sitting attempt 2');
+  assert.deepEqual(roster.notStarted, [], 'must not be reported as not started');
+  assert.deepEqual(roster.notSent, [], 'the recipient was sent, so not sent is impossible too');
+  assert.equal(roster.inProgress[0].questions_answered, 2, 'must count the live attempt, not the retired one');
+  assert.equal(roster.inProgress[0].attempt_no, 2);
+});
+
 test('questions_answered counts real answers, not the next question order', () => {
   const eid = newExam('Answered');
   addSession(eid, addStudent(eid, 'Answerer'), { status: 'completed', pct: 70, score: 7, ended: '2026-01-01 10:00:00', answers: 3 });

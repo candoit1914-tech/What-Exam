@@ -500,22 +500,37 @@ function buildParticipantRoster(examId) {
     // The best attempt is attempt_rank 1, whatever its status. ROW_NUMBER()
     // always yields 1 for a non-empty partition, so the fallback is unneeded.
     const best = attempts.find((r) => r.attempt_rank === 1);
-    // Finished means SOME attempt finished, even if a later one is in progress:
-    // a student who already has a final score belongs in the leaderboard.
+    // Each bucket asks whether ANY attempt qualifies, never whether the single
+    // best one does. restartSession() retires a superseded attempt as
+    // 'abandoned' WITHOUT setting ended_at, so a student part-way through
+    // attempt 2 owns two rows that tie on every sort key below; trusting
+    // attempt_rank there files a student who is working right now as not
+    // started.
     const bestFinished = attempts.find((r) => isFinished(r.status));
+    // The attempt actually in progress, which is the one worth reporting.
+    // restartSession() retires the previous row before creating the next, so
+    // there should only ever be one; if that invariant is ever broken, take the
+    // highest attempt_no rather than depending on iteration order.
+    const live = attempts
+      .filter((r) => r.status === 'in_progress')
+      .sort((a, b) => b.attempt_no - a.attempt_no)[0];
+    const abandoned = attempts.find((r) => r.status === 'abandoned');
 
     if (bestFinished) {
       finished.push(shape(bestFinished));
-    } else if (best.status === 'in_progress') {
-      inProgress.push(shape(best));
-    } else if (best.status === 'abandoned') {
-      // A session is only marked 'abandoned' once config.exam.sendRetries
-      // deliveries have all failed (services/exam.js), and recordAcceptance()
-      // stamps sent_at only when a send actually succeeds. So an abandoned
-      // session with a NULL sent_at genuinely was never delivered and "not
-      // sent" is the honest label; with a sent_at it did reach the student, so
-      // they were sent it and never began — "not started".
-      (best.sent_at ? notStarted : notSent).push(shape(best));
+    } else if (live) {
+      inProgress.push(shape(live));
+    } else if (abandoned) {
+      // 'abandoned' has two unrelated causes. (1) Delivery failure: a send
+      // gives up after config.exam.sendRetries attempts, and recordAcceptance()
+      // stamps sent_at only when a send actually succeeds — so a NULL sent_at
+      // here does mean the exam was never delivered, and "not sent" is the
+      // honest label. (2) restartSession() retired a superseded attempt, which
+      // says nothing at all about delivery. This branch is only reached when
+      // no attempt is live, and sent_at is what separates the two causes: a
+      // retired row with a sent_at did reach the student and was then
+      // abandoned, so it is "not started"; without one, "not sent".
+      (abandoned.sent_at ? notStarted : notSent).push(shape(abandoned));
     } else if (best.sent_at) {
       notStarted.push(shape(best));
     } else {
