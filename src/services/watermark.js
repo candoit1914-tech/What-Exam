@@ -12,6 +12,7 @@
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const path = require('node:path');
+const { randomUUID } = require('node:crypto');
 const sharp = require('sharp');
 const config = require('../config');
 
@@ -62,12 +63,15 @@ async function processWatermark(input) {
     .toBuffer();
 }
 
+// The custom logo when one is stored, otherwise the default. `custom` rides
+// along with the bytes so a later failure can be attributed: a broken upload
+// must degrade, a broken default is a real error.
 async function readSource() {
   try {
-    return await fsp.readFile(filePath());
+    return { custom: true, buffer: await fsp.readFile(filePath()) };
   } catch (err) {
     if (err.code !== 'ENOENT') throw err;
-    return await fsp.readFile(defaultSource());
+    return { custom: false, buffer: await fsp.readFile(defaultSource()) };
   }
 }
 
@@ -75,14 +79,33 @@ function filePath() {
   return path.join(config.uploadsDir, FILE);
 }
 
+async function renderWatermark() {
+  const source = await readSource();
+  try {
+    return await processWatermark(source.buffer);
+  } catch (err) {
+    if (!source.custom) throw err;
+    // save() only checks the header, so a logo whose IHDR is valid and whose
+    // pixels are not can still get stored. Throwing here broke the print page
+    // and every .docx on every call, while hasCustom() went on reporting the
+    // setting as on. Fall back to the default and name the file to delete.
+    console.warn(
+      `[watermark] ${filePath()} could not be processed (${err.message}); ` +
+      'falling back to the default logo. Delete that file to clear this.'
+    );
+    return processWatermark(await fsp.readFile(defaultSource()));
+  }
+}
+
 // A single cached promise, the pattern src/services/certificate.js:10 already
 // uses. Failures are NOT cached: a transient decode error must not poison the
-// process until restart.
+// process until restart. A successful fallback IS cached, so a broken upload
+// costs one wasted decode and one warning, not one per request.
 let cached = null;
 
 async function watermarkPng() {
   if (!cached) {
-    cached = (async () => processWatermark(await readSource()))().catch((err) => {
+    cached = renderWatermark().catch((err) => {
       cached = null;
       throw err;
     });
@@ -93,29 +116,61 @@ async function watermarkPng() {
 /**
  * Store an upload, untouched, as the app's watermark source.
  *
- * The bytes are validated by DECODING them and then written verbatim; the
- * pipeline runs once, in watermarkPng(), on read. Processing here as well is
- * what made the logo come out double-washed: `blur(2.5)` is not idempotent and
- * neither is `linear(1, 96)`, so the default icon.svg measured 46,648 bytes
- * through one pass and 23,455 bytes through two - visibly fainter than intended.
+ * The bytes are written verbatim; the pipeline runs once, in watermarkPng(), on
+ * read. Processing here as well is what made the logo come out double-washed:
+ * `blur(2.5)` is not idempotent and neither is `linear(1, 96)`, so the default
+ * icon.svg measured 46,648 bytes through one pass and 23,455 through two -
+ * visibly fainter than intended.
  *
- * The decode is also the security boundary. sharp refuses bytes that are not
- * really an image, so nothing undecodable is ever written, and because the
- * stored bytes are RAW this function deliberately returns nothing: handing the
- * raw buffer back to a caller would put un-rasterised, user-supplied markup one
- * careless `res.send()` away from a browser. The stored filename is
- * server-chosen, never the client's.
+ * pngSize() is the gate, and it is a header-level check rather than a decode: it
+ * rejects bytes sharp cannot recognise at all, but an image whose header lies
+ * about its contents still passes and still fails when read. That is the
+ * deliberate trade - a full decode here would double the cost of every upload
+ * and would be a memory-exhaustion vector on attacker-chosen bytes - and
+ * watermarkPng() degrades to the default when it meets one.
+ *
+ * Storing raw is also what keeps user-supplied markup away from a browser: the
+ * stored bytes are an internal input, never served, so this function
+ * deliberately returns nothing - handing the raw buffer back to a caller would
+ * put un-rasterised markup one careless `res.send()` away from the page. The
+ * stored filename is server-chosen, never the client's.
  *
  * @param {Buffer} buffer the uploaded image, in any format sharp can decode
  * @returns {Promise<void>}
  */
 async function save(buffer) {
   await pngSize(buffer);
+  const next = saving.then(() => swapIn(buffer));
+  saving = next.catch(() => {});      // one failed upload must not poison the chain
+  return next;
+}
+
+// Serialised. The target is a single fixed file, so concurrent uploads have
+// exactly one winner between them - but on Windows a second rename onto that
+// path fails with EPERM while the first is still in flight, and the loser reached
+// the admin as a failed upload. A short chain makes "last save wins" true rather
+// than merely likely. remove() is not queued: it is one unlink, and it only ever
+// runs on its own request.
+let saving = Promise.resolve();
+
+async function swapIn(buffer) {
   await fsp.mkdir(config.uploadsDir, { recursive: true });
-  // Write-then-rename so a reader never sees a half-written file.
-  const tmp = `${filePath()}.${process.pid}.tmp`;
-  await fsp.writeFile(tmp, buffer);
-  await fsp.rename(tmp, filePath());
+  // A temp name keyed only on the pid is shared by every concurrent upload in
+  // the process: two saves interleaved their writeFile calls on one path and
+  // then raced the renames, which tore the stored logo into a blend of both
+  // uploads and handed one caller an ENOENT for a save that had in fact landed.
+  // A per-call name removes the collision, and the .tmp suffix keeps the scratch
+  // file unmistakably not-a-watermark - only the exact basename is ever read.
+  const tmp = `${filePath()}.${randomUUID()}.tmp`;
+  try {
+    // Write-then-rename so a reader never sees a half-written file.
+    await fsp.writeFile(tmp, buffer);
+    await fsp.rename(tmp, filePath());
+  } finally {
+    // Either step can fail, and without this the scratch file outlives the
+    // request and piles up in uploadsDir.
+    await fsp.rm(tmp, { force: true });
+  }
   invalidate();
 }
 
@@ -144,9 +199,9 @@ function invalidate() {
  * Read the IHDR dimensions, which sharp does without decoding pixels.
  *
  * Doubles as save()'s validation step: it throws for bytes sharp cannot
- * recognise, and it is the only decode save() performs.
+ * recognise, and it is the only check save() performs.
  *
- * @param {Buffer} buffer a PNG
+ * @param {Buffer} buffer any image format sharp can inspect
  * @returns {Promise<{width: number|undefined, height: number|undefined}>}
  */
 async function pngSize(buffer) {
@@ -155,6 +210,6 @@ async function pngSize(buffer) {
 }
 
 module.exports = {
-  SIZE, FILE, filePath, defaultSource, processWatermark,
+  filePath, processWatermark,
   watermarkPng, save, remove, hasCustom, invalidate, pngSize,
 };
