@@ -164,6 +164,33 @@ test('the watermark preview is fetched with auth, not pointed at the route', () 
     'the reset button must still follow state.custom');
 });
 
+test('every roster-ui helper is called through the RosterUI namespace', () => {
+  // roster-ui.js is an IIFE, so its function declarations are scoped to that IIFE
+  // and only `globalThis.RosterUI` escapes to the browser. Calling one as a bare
+  // global is a ReferenceError there - and because the call sits inside the
+  // Participants tab's innerHTML template, the throw happens while EVALUATING the
+  // markup: the assignment to bodyEl.innerHTML never completes, the tab keeps the
+  // loading skeleton it set beforehand, and the tab silently never opens.
+  //
+  // Requiring the module cannot catch that, because under Node the IIFE takes the
+  // module.exports branch and the names are reachable either way. The invariant is
+  // therefore asserted on app.js's source: every exported name must appear there
+  // only in its namespaced form.
+  const exported = Object.keys(ui);
+  assert.ok(exported.length > 0, 'roster-ui.js exported nothing to check');
+  for (const name of exported) {
+    const bare = app.match(new RegExp(`(?<![.\\w])${name}\\s*\\(`, 'g')) || [];
+    assert.deepEqual(bare, [],
+      `app.js calls ${name}(...) as a bare global; roster-ui.js only exports it as RosterUI.${name}`);
+  }
+  // Positive control: the namespaced form must genuinely be used, so this test
+  // cannot be satisfied by deleting the call sites.
+  assert.ok(/RosterUI\.rosterSectionOptions\(/.test(app),
+    'the section dropdown must call RosterUI.rosterSectionOptions');
+  assert.ok(/RosterUI\.attachmentFilename\(/.test(app),
+    'the download action must call RosterUI.attachmentFilename');
+});
+
 test('the screen Not Sent table gains the two missing columns', () => {
   const m = app.match(/roster\.notSent,\s*\[([^\]]+)\]/);
   assert.ok(m, 'notSent rosterTable call not found');

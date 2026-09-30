@@ -797,7 +797,7 @@ async function renderTab() {
           </div>
           <div class="row">
             <select id="rosterSection" title="Applies to the print and Word exports">
-              ${rosterSectionOptions(roster.summary).map(([value, label]) => `<option value="${esc(value)}"${value === 'total' ? ' selected' : ''}>${esc(label)}</option>`).join('')}
+              ${RosterUI.rosterSectionOptions(roster.summary).map(([value, label]) => `<option value="${esc(value)}"${value === 'total' ? ' selected' : ''}>${esc(label)}</option>`).join('')}
             </select>
             <button class="btn btn-ghost" onclick="printRoster(${id})">${I.doc} Print / Save PDF</button>
             <button class="btn btn-ghost" onclick="downloadRosterDocx(${id})">${I.doc} Download Word</button>
