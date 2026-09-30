@@ -9,6 +9,7 @@ const pdf = require('../services/pdf');
 const pdfImport = require('../services/pdfImport');
 const examService = require('../services/exam');
 const results = require('../services/results');
+const watermarkService = require('../services/watermark');
 const config = require('../config');
 const { checkConfig } = require('../services/configCheck');
 const auth = require('../auth');
@@ -66,6 +67,23 @@ const imageUpload = multer({
     }
   },
 });
+
+// Accepts SVG as well as PNG/JPEG, because logos are frequently exported as
+// SVG. SVG bytes are rasterised by sharp before being stored, so no
+// user-supplied markup is ever served.
+const watermarkUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    if (['image/png', 'image/jpeg', 'image/svg+xml'].includes(file.mimetype)) return cb(null, true);
+    cb(new Error('Only PNG, JPG and SVG images are accepted'));
+  },
+});
+
+// multer reports a rejected upload as a bare Error with no status, which
+// Express would turn into a 500. This is the 400 the caller actually deserves.
+const uploadSingle = (mw) => (req, res, next) =>
+  mw(req, res, (err) => (err ? res.status(400).json({ error: err.message }) : next()));
 
 // ── Admin auth ─────────────────────────────────────────────────────────
 router.post('/auth/login', loginRateLimiter, (req, res) => {
@@ -248,15 +266,88 @@ router.get('/exams/:id/participants', (req, res) => {
   res.json(roster);
 });
 
-router.get('/exams/:id/participants/print', (req, res) => {
+// The stored bytes, or null while the default logo is in force. Read through
+// the service rather than a hard-coded path so "unchanged" is judged against
+// what is actually stored: a UI still showing the default must not be able to
+// turn a no-op save into a new version.
+async function storedWatermark() {
+  try {
+    return await fs.promises.readFile(watermarkService.filePath());
+  } catch (err) {
+    if (err.code !== 'ENOENT') throw err;
+    return null;
+  }
+}
+
+// Unfiltered exports keep today's exact filename; a section adds its slug so a
+// filed-away "Not sent" register cannot be mistaken for the whole cohort.
+function rosterFilename(examId, section, ext) {
+  const slug = results.sectionSlug(section);
+  return `participants-${examId}${slug === 'Total' ? '' : `-${slug}`}.${ext}`;
+}
+
+router.get('/exams/:id/participants/print', asyncWrap(async (req, res) => {
   const roster = results.buildParticipantRoster(req.params.id);
   if (!roster) return res.status(404).json({ error: 'Exam not found' });
-  // Render before setting headers: a throw inside the renderer would otherwise
-  // ship Express's JSON error body under a text/html content type.
-  const html = results.rosterPrintHTML(roster);
-  res.setHeader('Content-Type', 'text/html; charset=utf-8');
-  res.send(html);
+  const section = results.normalizeSection(req.query.section);
+  const png = await watermarkService.watermarkPng();
+  // Render before the headers go out: the renderer is evaluated as the argument,
+  // so a throw inside it cannot ship Express's JSON error body under text/html.
+  res.type('html').send(results.rosterPrintHTML(
+    roster, section, `data:image/png;base64,${png.toString('base64')}`));
+}));
+
+router.get('/exams/:id/participants.docx', asyncWrap(async (req, res) => {
+  const roster = results.buildParticipantRoster(req.params.id);
+  if (!roster) return res.status(404).json({ error: 'Exam not found' });
+  const section = results.normalizeSection(req.query.section);
+  const png = await watermarkService.watermarkPng();
+  res.set('Content-Disposition', `attachment; filename="${rosterFilename(req.params.id, section, 'docx')}"`);
+  res.type('application/vnd.openxmlformats-officedocument.wordprocessingml.document')
+     .send(results.rosterDocx(roster, section, png));
+}));
+
+// ── Watermark logo ────────────────────────────────────────────────────────────
+// The URL is a constant rather than a per-request string: the UI swaps the
+// <img> src on both a successful upload and a delete, so it needs one spelling.
+const WATERMARK_URL = '/api/watermark-logo.png';
+
+router.get('/watermark-logo', (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.json({ custom: watermarkService.hasCustom(), url: WATERMARK_URL });
 });
+
+router.get('/watermark-logo.png', asyncWrap(async (req, res) => {
+  const png = await watermarkService.watermarkPng();
+  // A cached preview would outlive the logo it was rendered from.
+  res.set('Cache-Control', 'no-store');
+  res.type('image/png').send(png);
+}));
+
+router.post('/watermark-logo', uploadSingle(watermarkUpload.single('file')), asyncWrap(async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No image supplied' });
+  const incoming = req.file.buffer;
+  const stored = await storedWatermark();
+  try {
+    // sharp's decode failure is the security boundary: bytes that are not really
+    // an image cannot survive the round trip. pngSize is save()'s own check,
+    // run first so the identical-upload shortcut below can only ever be a
+    // decision about bytes that were readable as an image.
+    await watermarkService.pngSize(incoming);
+    if (stored && stored.equals(incoming)) {
+      return res.json({ custom: true, url: WATERMARK_URL });
+    }
+    await watermarkService.save(incoming);
+  } catch {
+    return res.status(400).json({ error: 'That file could not be read as an image' });
+  }
+  res.status(201).json({ custom: true, url: WATERMARK_URL });
+}));
+
+router.delete('/watermark-logo', asyncWrap(async (req, res) => {
+  await watermarkService.remove();
+  res.json({ custom: false, url: WATERMARK_URL });
+}));
 
 router.patch('/exams/:id', (req, res) => {
   const exam = db.prepare('SELECT * FROM exams WHERE id = ?').get(req.params.id);
