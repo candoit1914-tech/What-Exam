@@ -52,10 +52,16 @@ test('the green page frame runs edge to edge with every value inside it', () => 
 
   // Edge-to-edge is only half the requirement: the values still have to be INSIDE
   // the rule, so the old @page margin becomes body padding instead of vanishing.
-  const pad = /body\s*\{[^}]*padding:\s*([\d.]+)mm\s+([\d.]+)mm/.exec(html);
-  assert.ok(pad, 'body must carry the printable inset as padding');
-  assert.ok(Number(pad[1]) > 0 && Number(pad[2]) > 0,
-    `body padding ${pad[1]}mm/${pad[2]}mm must be non-zero or content sits on the border`);
+  //
+  // The inset is a single value, not the two-value `14mm 12mm` shorthand it used
+  // to be. That is deliberate: one number sets all four sides, so the printable
+  // inset cannot go lopsided again with the top and bottom quietly outgrowing
+  // the left and right. The regex requires the value to be followed by `;` or `}`,
+  // so reintroducing a two-value shorthand fails here rather than passing quietly.
+  const pad = /body\s*\{[^}]*padding:\s*([\d.]+)mm\s*(?:;|\})/.exec(html);
+  assert.ok(pad, 'body must carry the printable inset as a single uniform value');
+  assert.equal(Number(pad[1]), 12,
+    'the printable inset must be 12mm on all four sides, matching the left/right margin');
 
   assert.ok(/border:\s*[\d.]+pt solid #25D366/.test(html), 'outer rule missing');
   // Square corners now that the rule is the sheet edge: a radius would round the

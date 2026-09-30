@@ -627,7 +627,7 @@ const PRINT_CSS = `
   @page { size: A4 portrait; margin: 0; }
   * { box-sizing: border-box; }
   body { font-family: -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
-         color: #1a1a1a; margin: 0; padding: 14mm 12mm; font-size: 12px; line-height: 1.4; }
+         color: #1a1a1a; margin: 0; padding: 12mm; font-size: 12px; line-height: 1.4; }
   h1 { font-size: 19px; margin: 0 0 2px; }
   .sub { color: #555; font-size: 11px; margin-bottom: 4px; }
   .summary { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 16px; }
