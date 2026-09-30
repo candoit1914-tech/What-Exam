@@ -293,6 +293,15 @@ router.get('/exams/:id/participants/print', asyncWrap(async (req, res) => {
   const png = await watermarkService.watermarkPng();
   // Render before the headers go out: the renderer is evaluated as the argument,
   // so a throw inside it cannot ship Express's JSON error body under text/html.
+  //
+  // A roster is live data behind a stable URL - names, marks and the current
+  // watermark all change without the path changing - and the dashboard fetches
+  // this with a plain fetch() that sends no cache option. Left uncached the
+  // response is eligible for the browser's heuristic cache, which is how a
+  // print dialog ends up rendering a previous build's column widths, or a
+  // previous term's marks. `no-store` plus `Pragma` covers HTTP/1.0 caches too.
+  res.set('Cache-Control', 'no-store');
+  res.set('Pragma', 'no-cache');
   res.type('html').send(results.rosterPrintHTML(
     roster, section, `data:image/png;base64,${png.toString('base64')}`));
 }));
@@ -302,6 +311,8 @@ router.get('/exams/:id/participants.docx', asyncWrap(async (req, res) => {
   if (!roster) return res.status(404).json({ error: 'Exam not found' });
   const section = results.normalizeSection(req.query.section);
   const png = await watermarkService.watermarkPng();
+  res.set('Cache-Control', 'no-store');
+  res.set('Pragma', 'no-cache');
   res.set('Content-Disposition', `attachment; filename="${rosterFilename(req.params.id, section, 'docx')}"`);
   res.type('application/vnd.openxmlformats-officedocument.wordprocessingml.document')
      .send(results.rosterDocx(roster, section, png));

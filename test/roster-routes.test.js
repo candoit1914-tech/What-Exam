@@ -141,6 +141,24 @@ test('the print page renders server-side with the watermark inlined', async () =
   assert.ok(res.text.includes('Section: Not sent'));
 });
 
+test('roster exports are never cacheable, or a stale register can be printed', async () => {
+  // A roster is live data: names, scores and the current watermark all change
+  // without the URL changing. These responses carry no cache directives at all,
+  // so they land in the browser's heuristic cache and the print dialog can
+  // render a previous build's layout or a previous term's marks. The watermark
+  // routes already set no-store for the same reason; these two are the ones
+  // that were missed.
+  for (const url of [
+    `/api/exams/${examId}/participants/print?section=total`,
+    `/api/exams/${examId}/participants.docx?section=total`,
+  ]) {
+    const res = await request('GET', url);
+    assert.equal(res.status, 200, url);
+    assert.equal(res.headers['cache-control'], 'no-store', `${url} must not be cacheable`);
+    assert.equal(res.headers['pragma'], 'no-cache', `${url} must defeat HTTP/1.0 caches`);
+  }
+});
+
 test('watermark status reports custom=false and a preview url', async () => {
   const res = await request('GET', '/api/watermark-logo');
   assert.equal(res.status, 200);
