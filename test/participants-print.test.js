@@ -84,6 +84,12 @@ test('Name gets the widest column and Questions Answered the narrowest', () => {
   assert.ok(widths[0] > widths[2], `Name ${widths[0]}% must exceed Questions answered ${widths[2]}%`);
   assert.equal(Math.min(...widths), widths[2],
     `Questions answered must be the narrowest column, widths were ${widths.join('/')}`);
+
+  // "Started" (3) held 30% - a fifth of the sheet for a time that is nearly
+  // always the same few hours. It must now be no wider than Phone (1).
+  assert.ok(widths[3] <= widths[1],
+    `Started ${widths[3]}% must not exceed Phone ${widths[1]}%`);
+  assert.ok(widths[0] > widths[3], `Name ${widths[0]}% must exceed Started ${widths[3]}%`);
 });
 
 test('the finished table gives Name more room than its numeric columns', () => {

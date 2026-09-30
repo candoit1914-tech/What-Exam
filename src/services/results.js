@@ -806,10 +806,12 @@ function rosterPrintHTML(roster, section, watermarkDataUri) {
   // Column widths are declared, not left to the auto table algorithm. With only
   // `width: 100%` the browser hands space to the widest cell, and the long
   // "Questions answered" header outgrew every name on the page, so the register
-  // read as a questions column with names squeezed beside it. Name now gets the
-  // most room and the answer count the least; each set sums to 100%.
+  // read as a questions column with names squeezed beside it. Name gets the most
+  // room, Questions Answered the least, and "Started" no longer claims a fifth of
+  // the sheet for a time that is almost always the same handful of hours. Each
+  // set sums to 100%.
   const PRINT_FINISHED_WIDTHS = [5, 24, 19, 9, 11, 10, 9, 13];
-  const PRINT_SIMPLE_WIDTHS = [36, 22, 12, 30];
+  const PRINT_SIMPLE_WIDTHS = [40, 24, 12, 24];
 
   const finishedRowsOf = (rows) => table(finishedHead, rows, (r) =>
     '<tr>' +
