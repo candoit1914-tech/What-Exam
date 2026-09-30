@@ -3,6 +3,7 @@ const config = require('../config');
 const wa = require('./whatsapp');
 const auth = require('../auth');
 const certificate = require('./certificate');
+const { buildZip } = require('./zip');
 
 function computeForSession(sessionId) {
   const session = db.prepare('SELECT * FROM sessions WHERE id = ?').get(sessionId);
@@ -352,6 +353,19 @@ function esc(s) {
     .replace(/>/g, '&gt;');
 }
 
+// esc() handles HTML text nodes. OOXML is a different grammar: an unescaped
+// quote or apostrophe inside an attribute, or a bare ampersand anywhere, makes
+// Word refuse to open the file, so the document renderer needs its own
+// escaper. That makes this a correctness property, not a cosmetic one.
+function escXml(value) {
+  return String(value == null ? '' : value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
 /**
  * Resend result message and certificate to a single student.
  * Used by both individual resend and bulk resend.
@@ -538,6 +552,14 @@ function buildParticipantRoster(examId) {
     }
   }
 
+  // Deterministic tie-break for every group sort below. `numeric` so 'Exam 2'
+  // sorts before 'Exam 10', and `sensitivity: 'base'` so 'ann' and 'Ann' do not
+  // produce two differently-ordered runs of the same register. student_id is
+  // the final fallback so two students sharing a name still have one order.
+  const byName = (a, b) =>
+    String(a.name || '').localeCompare(String(b.name || ''), 'en', { numeric: true, sensitivity: 'base' })
+    || String(a.student_id ?? '').localeCompare(String(b.student_id ?? ''));
+
   // Rank by percentage descending, then score descending, then earlier ended_at.
   // Done here, not in SQL: the array reaches this point in recipient order, and
   // a student with a live retry contributes an ended_at of NULL, which SQLite
@@ -554,6 +576,21 @@ function buildParticipantRoster(examId) {
     return aEnd < bEnd ? -1 : aEnd > bEnd ? 1 : 0;
   });
   finished.forEach((r, i) => { r.rank = i + 1; });
+
+  // The in-progress group cannot be ranked by percentage: shape() nulls the
+  // score for anyone who has not finished, precisely so a printed register
+  // never shows a score for a student still sitting the exam. Questions
+  // answered is the honest progress measure, and it is compared as a number so
+  // '9' never sorts below '10'.
+  inProgress.sort((a, b) => (b.questions_answered ?? 0) - (a.questions_answered ?? 0)
+    || byName(a, b));
+
+  // The two unscored groups have no measure to rank by at all. Sorting by name
+  // is not a ranking, it is determinism: the buckets above are filled in SQL
+  // recipient order, and a printed register that reshuffles between two prints
+  // of the same exam is a register nobody can check against.
+  notStarted.sort(byName);
+  notSent.sort(byName);
 
   return {
     exam: {
@@ -591,8 +628,9 @@ const PRINT_CSS = `
   .summary { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 16px; }
   .chip { border: 1px solid #ccc; border-radius: 4px; padding: 4px 9px; }
   .chip b { font-size: 14px; }
-  h2 { font-size: 13px; margin: 18px 0 6px; text-transform: uppercase;
-       letter-spacing: .5px; border-bottom: 2px solid #333; padding-bottom: 3px; }
+  /* The group headings are gone by request, so consecutive tables need their
+     own separation or they read as one long register with no group break. */
+  .block + .block { margin-top: 16px; }
   table { width: 100%; border-collapse: collapse; }
   th, td { border: 1px solid #bbb; padding: 5px 7px; text-align: left; }
   th { background: #ececec; font-size: 11px; text-transform: uppercase; }
@@ -607,14 +645,119 @@ const PRINT_CSS = `
   .fail { color: #a4262c; font-weight: 600; }
   .none { color: #777; font-style: italic; padding: 7px; }
   .foot { margin-top: 18px; color: #666; font-size: 10px; }
+  /* Chrome ignores \`@page { border }\` entirely, so the page frame is a fixed
+     element instead: it repeats on every page in Chrome, Edge and Firefox.
+
+     The inset is deliberately smaller than the \`@page\` margin (14mm/12mm) so the
+     frame sits close to the sheet edge without touching the table. It is not 0:
+     printers have a non-printable margin and a zero-inset border is clipped off
+     the paper, which is worse than the floating look it was meant to fix. A
+     1.5pt rule paired with an inset hairline reads as a deliberate double
+     border rather than a stray box, and the radius keeps the corners soft. */
+  .frame { position: fixed; inset: 8mm; border: 1.5pt solid #25D366;
+           border-radius: 2mm; box-shadow: inset 0 0 0 1pt #25D366;
+           pointer-events: none; z-index: 0; }
+  /* Centred on the page, behind everything. \`width\` rather than \`height\` so a
+     wide mark scales to the paper instead of overflowing it. */
+  .wm { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+        width: 66%; pointer-events: none; z-index: 0; }
+  body > *:not(.frame):not(.wm) { position: relative; z-index: 1; }
+  /* Without this the green frame and the shaded table headers are dropped by
+     the print dialog - the same trick reportHTML already uses. */
+  body, .frame, th { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  /* This URL is a print artefact rather than a preview, so the frame and the
+     watermark stay off the screen and appear only in the printed output. */
+  .frame, .wm { display: none; }
   @media print {
+    .frame, .wm { display: block; }
     .none { color: #000; }
-    h2 { break-after: avoid; page-break-after: avoid; }
   }
 `;
 
-function rosterPrintHTML(roster) {
+// One definition of the five exportable sections. The keys are the URL
+// vocabulary; the labels are what the dropdown, the document stamp and the
+// filename use. The stored group names are camelCase, so `in_progress` and
+// `inProgress` are deliberately different strings.
+const ROSTER_SECTIONS = {
+  total:       { label: 'Total',       groups: ['finished', 'inProgress', 'notStarted', 'notSent'] },
+  finished:    { label: 'Finished',    groups: ['finished'] },
+  in_progress: { label: 'In progress', groups: ['inProgress'] },
+  not_started: { label: 'Not started', groups: ['notStarted'] },
+  not_sent:    { label: 'Not sent',    groups: ['notSent'] },
+};
+
+// Unknown, missing or malformed input resolves to 'total' rather than
+// throwing: these URLs are also built by bookmark and by a bare button
+// click, and a section typo must not turn a register into a 404.
+// The hasOwnProperty guard is deliberate - a plain truthy lookup on
+// ROSTER_SECTIONS[key] would resolve 'constructor' and 'toString' to
+// something truthy and then fail confusingly further down. The typeof guard
+// is the other half of the same idea: a query string like ?section[]=finished
+// arrives as ['finished'], and String() of that is a valid key, so without
+// it an array would smuggle a section past the vocabulary entirely.
+function normalizeSection(value) {
+  if (typeof value !== 'string') return 'total';
+  const key = value.trim().toLowerCase();
+  return Object.prototype.hasOwnProperty.call(ROSTER_SECTIONS, key) ? key : 'total';
+}
+
+function sectionGroups(section) {
+  return ROSTER_SECTIONS[normalizeSection(section)].groups;
+}
+
+// 'Not sent' for the document stamp, '' for total so an unfiltered export
+// keeps exactly today's appearance and filename.
+function sectionStamp(section) {
+  const key = normalizeSection(section);
+  return key === 'total' ? '' : ROSTER_SECTIONS[key].label;
+}
+
+// 'Not-sent' for a filename: no spaces, no case-destroying surprises.
+function sectionSlug(section) {
+  const key = normalizeSection(section);
+  return key === 'total' ? 'Total' : ROSTER_SECTIONS[key].label.replace(/\s+/g, '-');
+}
+
+// Declared once, consumed by the print page and the Word document. The three
+// simple groups genuinely share one shape; declaring it three times is how
+// they came to disagree.
+const ROSTER_FINISHED_COLS = ['Position', 'Name', 'Phone', 'Score', 'Percentage', 'Result', 'Attempt', 'Finished At'];
+const ROSTER_SIMPLE_COLS = ['Name', 'Phone', 'Questions answered', 'Started'];
+
+function rosterColumns(group) {
+  return group === 'finished' ? ROSTER_FINISHED_COLS : ROSTER_SIMPLE_COLS;
+}
+
+// section key -> the blocks to render, in roster order, each with its own
+// title, column names and rows. `ranked` says whether the group carries a
+// rank column, which the finished block uses and no other group does.
+const ROSTER_BLOCK_META = {
+  finished:   { title: 'Finished (ranked by percentage)', ranked: true,  field: 'finished' },
+  inProgress: { title: 'In Progress',                     ranked: false, field: 'inProgress' },
+  notStarted: { title: 'Not Started',                     ranked: false, field: 'notStarted' },
+  notSent:    { title: 'Not Sent',                        ranked: false, field: 'notSent' },
+};
+
+function rosterBlocks(roster, section) {
+  return sectionGroups(section).map((key) => {
+    const meta = ROSTER_BLOCK_META[key];
+    return { key, title: meta.title, ranked: meta.ranked, columns: rosterColumns(key), rows: roster[meta.field] };
+  });
+}
+
+/**
+ * The printable register, scoped to one section.
+ *
+ * @param {object} roster buildParticipantRoster()'s result
+ * @param {string} [section] a ROSTER_SECTIONS key; anything unknown falls back
+ *   to 'total', so a hand-typed URL prints the whole roster rather than 404ing
+ * @param {string} [watermarkDataUri] the mark already inlined as a data: URI,
+ *   which is what keeps the page self-contained and offline-printable
+ * @returns {string} a standalone HTML document
+ */
+function rosterPrintHTML(roster, section, watermarkDataUri) {
   const exam = roster.exam;
+  const stamp = sectionStamp(section);
   const dash = '<span class="none">&mdash;</span>';
   const txt = (v) => (v === null || v === undefined || v === '' ? dash : esc(v));
   const num = (v) => (v === null || v === undefined ? dash : esc(v));
@@ -642,9 +785,12 @@ function rosterPrintHTML(roster) {
   };
 
   const finishedHead = ['#', 'Name', 'Phone', 'Score', 'Percentage', 'Result', 'Attempt', 'Finished'];
-  const otherHead = ['Name', 'Phone', 'Questions answered', 'Started'];
+  // The simple groups' four names are identical in both renderers, so they are
+  // shared. The finished header stays compact ('#', 'Finished') to fit A4 and
+  // is deliberately NOT the Word document's longer header.
+  const otherHead = ROSTER_SIMPLE_COLS;
 
-  const finishedRows = table(finishedHead, roster.finished, (r) =>
+  const finishedRowsOf = (rows) => table(finishedHead, rows, (r) =>
     '<tr>' +
     `<td class="num">${esc(r.rank)}</td><td>${esc(r.name)}</td><td>${esc(r.phone)}</td>` +
     `<td class="num">${num(r.final_score)}</td><td class="num">${num(r.final_percentage)}%</td>` +
@@ -652,7 +798,7 @@ function rosterPrintHTML(roster) {
     `<td>${r.ended_at ? esc(r.ended_at) : dash}</td>` +
     '</tr>');
 
-  const otherRows = (rows) => table(otherHead, rows, (r) =>
+  const otherRowsOf = (rows) => table(otherHead, rows, (r) =>
     '<tr>' +
     `<td>${esc(r.name)}</td><td>${esc(r.phone)}</td>` +
     `<td class="num">${txt(r.questions_answered)}</td>` +
@@ -662,6 +808,16 @@ function rosterPrintHTML(roster) {
   const chip = (label, n) => `<span class="chip">${esc(label)} <b>${n}</b></span>`;
   const s = roster.summary;
 
+  // The blocks come from the shared section vocabulary rather than from four
+  // hard-coded tables, so a print of one section cannot leak another's rows.
+  // The group's title is deliberately NOT rendered: the group labels read as
+  // section headers the register does not have, and the sub-line already stamps
+  // which section is on the page.
+  const sections = rosterBlocks(roster, section)
+    .map(({ ranked, rows }) =>
+      `<div class="block">\n${ranked ? finishedRowsOf(rows) : otherRowsOf(rows)}</div>`)
+    .join('\n');
+
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -670,28 +826,276 @@ function rosterPrintHTML(roster) {
 <style>${PRINT_CSS}</style>
 </head>
 <body>
+${watermarkDataUri ? `<img class="wm" src="${esc(watermarkDataUri)}" alt="">` : ''}<div class="frame"></div>
 <h1>${esc(exam.title)}</h1>
-<p class="sub">Duration ${esc(exam.duration_minutes)} min &middot; Pass mark ${esc(exam.pass_percentage)}% &middot; Status ${esc(exam.status || 'unknown')}</p>
+<p class="sub">Duration ${esc(exam.duration_minutes)} min &middot; Pass mark ${esc(exam.pass_percentage)}% &middot; Status ${esc(exam.status || 'unknown')}${stamp ? ` &middot; <b>Section: ${esc(stamp)}</b>` : ''}</p>
 <div class="summary">
 ${chip('Total', s.total)}${chip('Finished', s.finished)}${chip('In progress', s.inProgress)}
 ${chip('Not started', s.notStarted)}${chip('Not sent', s.notSent)}
 </div>
 
-<h2>Finished (ranked by percentage)</h2>
-${finishedRows}
-
-<h2>In Progress</h2>
-${otherRows(roster.inProgress)}
-
-<h2>Not Started</h2>
-${otherRows(roster.notStarted)}
-
-<h2>Not Sent</h2>
-${otherRows(roster.notSent)}
+${sections}
 
 <p class="foot">Printed ${esc(new Date().toLocaleString())}</p>
 </body>
 </html>`;
 }
 
-module.exports = { computeForSession, persistSessionTotals, sendResultMessage, sendResultAndCertificate, bulkResendResults, reportHTML, buildParticipantRoster, rosterPrintHTML, FINISHED_STATUSES };
+// The Word document carries its own header labels and column widths: the print
+// page's compact '#' / 'Finished' pair exists to fit A4 in a browser, whereas
+// the document has room for the longer shared names. Declared here rather than
+// mutated onto the shared arrays, so the print page cannot be changed by
+// accident from the document side.
+const DOCX_FINISHED_HEAD = ['#', 'Name', 'Phone', 'Score', 'Percentage', 'Result', 'Attempt', 'Finished'];
+// Byte-identical to the shared simple-group names, so they are shared rather
+// than restated: a third copy is how the renderers came to disagree.
+const DOCX_SIMPLE_HEAD = ROSTER_SIMPLE_COLS;
+// Twips, each set summing to the 9680twip A4 text column (11906 - 2x794 - border
+// allowance), so Word scales the table to the printable width instead of
+// guessing from the header row alone.
+const DOCX_FINISHED_WIDTHS = [520, 2100, 1900, 900, 1100, 1000, 800, 1360];
+const DOCX_SIMPLE_WIDTHS = [3000, 2100, 2100, 2480];
+const DOCX_CHIP_HEAD = ['Total', 'Finished', 'In progress', 'Not started', 'Not sent'];
+const DOCX_CHIP_WIDTHS = [1936, 1936, 1936, 1936, 1936];
+const DOCX_FULL_WIDTH = 9680;
+const DOCX_GREEN = '25D366';
+
+// A .docx is a ZIP of XML parts. Hand-rolled rather than pulled from npm: Node
+// 24 ships deflateRawSync and crc32, so the container is ~40 lines, and a
+// washed-out picture watermark needs hand-written VML regardless of which
+// library assembles the file.
+//
+// Synchronous on purpose. The watermark Buffer is produced and cached by
+// src/services/watermark.js; awaiting inside this function would only add a
+// promise the caller does not need.
+function rosterDocx(roster, section, watermarkPngBuffer) {
+  const stamp = sectionStamp(section);
+  const dash = '—';               // em dash: "no value", matching the report
+  // The print page needs two shapes (missing entirely vs. zero) to keep
+  // `&mdash;` out of a numeric column. A Word cell has no such distinction to
+  // make, so one helper covers both.
+  const val = (v) => (v === null || v === undefined || v === '' ? dash : String(v));
+  const pct = (v) => (v === null || v === undefined ? dash : `${v}%`);
+
+  // `passed` is null for anyone who has not finished, which is a THIRD state
+  // rather than a fail. Printing a verdict for a student still sitting the exam
+  // would be a false statement on a signed-off register, so the cell is left
+  // empty instead of showing Fail.
+  const outcome = (p) => (p === null || p === undefined ? dash : p ? 'Pass' : 'Fail');
+
+  // Every emitter below escapes exactly once, at the point the text enters the
+  // part. Escaping in the cell formatters as well would double-encode, turning
+  // '&amp;' into '&amp;amp;' and corrupting every roster name on the page.
+  const W = (s) => `<w:p>${s}</w:p>`;
+  const run = (s, extra = '') =>
+    `<w:r>${extra}<w:t xml:space="preserve">${escXml(s)}</w:t></w:r>`;
+  const para = (s, extra = '') => W(run(s, extra));
+  const cell = (v, width, header) =>
+    `<w:tc><w:tcPr><w:tcW w:w="${width}" w:type="dxa"/>` +
+    (header ? `<w:shd w:val="clear" w:fill="${DOCX_GREEN}"/>` : '') +
+    '</w:tcPr>' +
+    W(run(v, header ? '<w:rPr><w:b/><w:color w:val="FFFFFF"/></w:rPr>' : '')) +
+    '</w:tc>';
+
+  const tblPr =
+    '<w:tblPr><w:tblW w:w="0" w:type="auto"/><w:tblBorders>' +
+    ['top', 'left', 'bottom', 'right', 'insideH', 'insideV']
+      .map((s) => `<w:${s} w:val="single" w:sz="4" w:space="0" w:color="BFBFBF"/>`)
+      .join('') +
+    '</w:tblBorders></w:tblPr>';
+  // tblGrid is schema-required before the first row, and it is also what tells
+  // Word how wide each column is on the first page rather than after it has
+  // reflowed the header.
+  const grid = (widths) =>
+    '<w:tblGrid>' + widths.map((w) => `<w:gridCol w:w="${w}"/>`).join('') + '</w:tblGrid>';
+
+  const table = (head, rows, widths) =>
+    '<w:tbl>' + tblPr + grid(widths) +
+    '<w:tr><w:trPr><w:tblHeader/></w:trPr>' +
+    head.map((h, i) => cell(h, widths[i], true)).join('') +
+    '</w:tr>' +
+    rows.map((r) => '<w:tr><w:trPr><w:cantSplit/></w:trPr>' +
+      r.map((v, i) => cell(v, widths[i], false)).join('') + '</w:tr>').join('') +
+    '</w:tbl>';
+
+  // A group with no members still gets a table: an empty w:tbl is invalid, and
+  // a bare paragraph would not line up with the blocks around it.
+  const emptyTable = (width) =>
+    '<w:tbl>' + tblPr + grid([width]) +
+    '<w:tr><w:trPr><w:cantSplit/></w:trPr>' + cell('None', width, false) + '</w:tr>' +
+    '</w:tbl>';
+
+  const finishedCells = (r) => [val(r.rank), val(r.name), val(r.phone), val(r.final_score),
+    pct(r.final_percentage), outcome(r.passed), val(r.attempt_no), val(r.ended_at)];
+  const simpleCells = (r) => [val(r.name), val(r.phone), val(r.questions_answered), val(r.started_at)];
+
+  // rosterBlocks from Task 2 decides which groups appear and in what order.
+  // The group title is deliberately not emitted here either, matching the print
+  // page: the labels read as section headers the document does not have, and
+  // the 'Section: <stamp>' line already says which one is on the page. An
+  // empty spacer keeps consecutive tables from reading as one long table.
+  const block = ({ ranked, rows }) => {
+    const head = ranked ? DOCX_FINISHED_HEAD : DOCX_SIMPLE_HEAD;
+    const widths = ranked ? DOCX_FINISHED_WIDTHS : DOCX_SIMPLE_WIDTHS;
+    const cells = ranked ? finishedCells : simpleCells;
+    return para('') +
+      (rows.length
+        ? table(head, rows.map(cells), widths)
+        : emptyTable(DOCX_FULL_WIDTH));
+  };
+
+  const s = roster.summary;
+  const chipRow = table(
+    DOCX_CHIP_HEAD,
+    [[String(s.total), String(s.finished), String(s.inProgress), String(s.notStarted), String(s.notSent)]],
+    DOCX_CHIP_WIDTHS);
+
+  const exam = roster.exam;
+  // Only w and r are declared: this part references no VML, and an unused
+  // namespace declaration is noise a reviewer has to rule out as a bug.
+  const documentXml =
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"' +
+    ' xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">' +
+    '<w:body>' +
+    para(exam.title, '<w:rPr><w:b/><w:sz w:val="38"/></w:rPr>') +
+    para(`Duration ${exam.duration_minutes} min · Pass mark ${exam.pass_percentage}% · Status ${exam.status || 'unknown'}`,
+         '<w:rPr><w:color w:val="555555"/><w:sz w:val="22"/></w:rPr>') +
+    (stamp ? para(`Section: ${stamp}`,
+      '<w:rPr><w:b/><w:color w:val="25D366"/><w:sz w:val="22"/></w:rPr>') : '') +
+    chipRow + para('') +
+    rosterBlocks(roster, section).map(block).join('') +
+    para(`Printed ${new Date().toLocaleString()}`,
+         '<w:rPr><w:color w:val="666666"/><w:sz w:val="20"/></w:rPr>') +
+    // A4 portrait 11906x16838 twips, margins matched to the print page.
+    '<w:sectPr>' +
+    '<w:headerReference w:type="default" r:id="rId4"/>' +
+    '<w:pgSz w:w="11906" w:h="16838"/>' +
+    '<w:pgMar w:top="907" w:right="794" w:bottom="907" w:left="794" w:header="0" w:footer="0" w:gutter="0"/>' +
+    '<w:pgBorders w:offsetFrom="page">' +
+    ['top', 'left', 'bottom', 'right']
+      .map((side) => `<w:${side} w:val="single" w:sz="18" w:space="24" w:color="${DOCX_GREEN}"/>`)
+      .join('') +
+    '</w:pgBorders>' +
+    '</w:sectPr>' +
+    '</w:body></w:document>';
+
+  // The exact VML shape Word itself writes for a picture watermark. The
+  // negative z-index is what puts it behind the body text, and
+  // mso-position-*-relative:margin is what centres it on the text column
+  // rather than the paper. gain/blacklevel are Word's native washout; the blur
+  // is baked into the PNG by src/services/watermark.js because the watermark
+  // feature exposes no blur control. w and r are needed for the run and the
+  // relationship, v and o for VML itself.
+  const headerXml =
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"' +
+    ' xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"' +
+    ' xmlns:v="urn:schemas-microsoft-com:vml"' +
+    ' xmlns:o="urn:schemas-microsoft-com:office:office">' +
+    '<w:p><w:r><w:pict>' +
+    '<v:shapetype id="_x0000_t75" coordsize="21600,21600" o:spt="75" o:preferrelative="t"' +
+    ' path="m@4@5l@4@11@9@11@9@5xe" filled="f" stroked="f">' +
+    '<v:stroke joinstyle="miter"/>' +
+    '<v:formulas>' +
+    '<v:f eqn="if lineDrawn pixelLineWidth 0"/><v:f eqn="sum @0 1 0"/>' +
+    '<v:f eqn="sum 0 0 @1"/><v:f eqn="prod @2 1 2"/><v:f eqn="prod @3 21600 pixelWidth"/>' +
+    '<v:f eqn="prod @3 21600 pixelHeight"/><v:f eqn="sum @0 0 1"/><v:f eqn="prod @6 1 2"/>' +
+    '<v:f eqn="prod @7 21600 pixelWidth"/><v:f eqn="sum @8 21600 0"/>' +
+    '<v:f eqn="prod @7 21600 pixelHeight"/><v:f eqn="sum @10 21600 0"/>' +
+    '</v:formulas>' +
+    '<v:path o:extrusionok="f" gradientshapeok="t" o:connecttype="rect"/>' +
+    '<o:lock v:ext="edit" aspectratio="t"/>' +
+    '</v:shapetype>' +
+    '<v:shape type="#_x0000_t75"' +
+    // The VML style attribute sizes itself in points, so no EMU conversion is
+    // needed anywhere in this part.
+    ' style="position:absolute;margin-left:0;margin-top:0;width:360pt;height:360pt;' +
+    'z-index:-251657216;' +
+    'mso-position-horizontal:center;mso-position-horizontal-relative:margin;' +
+    'mso-position-vertical:center;mso-position-vertical-relative:margin"' +
+    ' o:allowincell="f">' +
+    '<v:imagedata r:id="rId1" o:title="watermark" gain="19661f" blacklevel="22938f"/>' +
+    '</v:shape>' +
+    '</w:pict></w:r></w:p>' +
+    '</w:hdr>';
+
+  const contentTypes =
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+    '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
+    '<Default Extension="xml" ContentType="application/xml"/>' +
+    '<Default Extension="png" ContentType="image/png"/>' +
+    '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>' +
+    '<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>' +
+    '<Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/>' +
+    '<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>' +
+    '</Types>';
+
+  const rootRels =
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+    '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>' +
+    '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/>' +
+    '</Relationships>';
+
+  // rId2 is declared but not referenced from the body, which is normal: the
+  // numbers need not be contiguous, only resolvable. Its target is relative to
+  // word/, so reaching docProps needs the leading '..' - a bare
+  // "docProps/core.xml" would resolve to word/docProps/core.xml and leave a
+  // dangling relationship in the package.
+  const documentRels =
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+    '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>' +
+    '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="../docProps/core.xml"/>' +
+    '<Relationship Id="rId4" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/>' +
+    '</Relationships>';
+
+  const headerRels =
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+    '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/watermark.png"/>' +
+    '</Relationships>';
+
+  const stylesXml =
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">' +
+    '<w:docDefaults><w:rPrDefault><w:rPr>' +
+    '<w:rFonts w:ascii="Calibri" w:hAnsi="Calibri" w:cs="Calibri"/>' +
+    '<w:sz w:val="20"/><w:szCs w:val="20"/>' +
+    '</w:rPr></w:rPrDefault>' +
+    '<w:pPrDefault><w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr></w:pPrDefault>' +
+    '</w:docDefaults>' +
+    '<w:style w:type="paragraph" w:default="1" w:styleId="Normal">' +
+    '<w:name w:val="Normal"/><w:qFormat/>' +
+    '</w:style>' +
+    '</w:styles>';
+
+  const stampUtc = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+  const coreXml =
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties"' +
+    ' xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/"' +
+    ' xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">' +
+    `<dc:title>${escXml(exam.title)} - participants</dc:title>` +
+    '<dc:creator>Exam Admin</dc:creator><cp:lastModifiedBy>Exam Admin</cp:lastModifiedBy>' +
+    `<dcterms:created xsi:type="dcterms:W3CDTF">${stampUtc}</dcterms:created>` +
+    `<dcterms:modified xsi:type="dcterms:W3CDTF">${stampUtc}</dcterms:modified>` +
+    '</cp:coreProperties>';
+
+  const xml = (s) => Buffer.from(s, 'utf8');
+  return buildZip([
+    { name: '[Content_Types].xml', data: xml(contentTypes) },
+    { name: '_rels/.rels', data: xml(rootRels) },
+    { name: 'docProps/core.xml', data: xml(coreXml) },
+    { name: 'word/document.xml', data: xml(documentXml) },
+    { name: 'word/_rels/document.xml.rels', data: xml(documentRels) },
+    { name: 'word/styles.xml', data: xml(stylesXml) },
+    { name: 'word/header1.xml', data: xml(headerXml) },
+    { name: 'word/_rels/header1.xml.rels', data: xml(headerRels) },
+    { name: 'word/media/watermark.png', data: watermarkPngBuffer },
+  ]);
+}
+
+module.exports = { computeForSession, persistSessionTotals, sendResultMessage, sendResultAndCertificate, bulkResendResults, reportHTML, buildParticipantRoster, rosterPrintHTML, rosterDocx, FINISHED_STATUSES, ROSTER_SECTIONS, normalizeSection, sectionGroups, sectionStamp, sectionSlug, ROSTER_FINISHED_COLS, ROSTER_SIMPLE_COLS, rosterColumns, rosterBlocks };

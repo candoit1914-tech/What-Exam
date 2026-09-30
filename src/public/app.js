@@ -796,7 +796,12 @@ async function renderTab() {
             <p class="muted qmeta">The official participation record for this exam.</p>
           </div>
           <div class="row">
+            <select id="rosterSection" title="Applies to the print and Word exports">
+              ${rosterSectionOptions(roster.summary).map(([value, label]) => `<option value="${esc(value)}"${value === 'total' ? ' selected' : ''}>${esc(label)}</option>`).join('')}
+            </select>
             <button class="btn btn-ghost" onclick="printRoster(${id})">${I.doc} Print / Save PDF</button>
+            <button class="btn btn-ghost" onclick="downloadRosterDocx(${id})">${I.doc} Download Word</button>
+            ${watermarkControls()}
           </div>
         </div>
         <div class="row" style="margin-top:12px;gap:16px;flex-wrap:wrap">
@@ -837,10 +842,17 @@ async function renderTab() {
       </tr>`)}
 
       <h3 style="margin:18px 0 8px">Not Sent</h3>
-      ${rosterTable(roster.notSent, ['Name', 'Phone'], (r) => `<tr>
+      ${rosterTable(roster.notSent, ['Name', 'Phone', 'Questions answered', 'Started'], (r) => `<tr>
         <td>${esc(r.name || '—')}</td>
         <td>${esc(r.phone)}</td>
+        <td>${r.questions_answered != null ? r.questions_answered : dash}</td>
+        <td class="muted">${esc(r.started_at || '—')}</td>
       </tr>`)}`;
+    // Optional chrome: the roster above is already on screen, so a watermark
+    // that cannot be read must not blank the tab. The upload and reset handlers
+    // still surface the same failure to the admin, because there it is the whole
+    // point of the click.
+    loadWatermark().catch(() => {});
   }
 }
 
@@ -850,18 +862,133 @@ async function renderTab() {
 // destroyed before we could display it. The admin token is in localStorage,
 // never a cookie, so a plain <a href> would arrive unauthenticated and be
 // rejected with a 401 - the fetch is what carries auth.
-async function rosterFetch(path) {
+async function rosterFetch(path, opts = {}) {
   const token = getToken();
+  const isForm = opts.body != null
+    && typeof FormData !== 'undefined' && opts.body instanceof FormData;
   const res = await fetch(API_BASE + path, {
-    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    ...opts,
+    headers: Object.assign(
+      token ? { Authorization: `Bearer ${token}` } : {},
+      isForm ? {} : { 'Content-Type': 'application/json' },
+      opts.headers || {},
+    ),
   });
   if (res.status === 401) {
     clearToken();
     showLanding();
     throw new Error('Session expired — please sign in.');
   }
-  if (!res.ok) throw new Error(`Request failed (${res.status})`);
+  if (!res.ok) {
+    // The server's own wording reaches the admin: a rejected upload says WHY
+    // ("could not be read as an image"), which a bare status code would not.
+    const data = await res.json().catch(() => ({}));
+    const err = new Error(data.error || `Request failed (${res.status})`);
+    err.status = res.status;
+    throw err;
+  }
   return res;
+}
+
+// The chosen section is read inside each click handler, not captured when the
+// tab was rendered, so one dropdown choice applies to whichever export button is
+// pressed next - including after the roster has been re-fetched and re-rendered.
+function rosterSectionValue() {
+  const el = document.getElementById('rosterSection');
+  return el ? el.value : 'total';
+}
+
+// Hand a fetched blob to the browser as a download. The URL is revoked on the
+// next tick, not immediately: revoking synchronously can cancel the download in
+// some browsers before it has read the blob.
+function saveBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
+async function downloadRosterDocx(id) {
+  try {
+    const section = rosterSectionValue();
+    const res = await rosterFetch(
+      `/api/exams/${id}/participants.docx?section=${encodeURIComponent(section)}`,
+    );
+    saveBlob(await res.blob(), RosterUI.attachmentFilename(res.headers.get('content-disposition'),
+      `participants-${id}.docx`));
+  } catch (e) {
+    alert(`Could not download the Word file: ${e.message}`);
+  }
+}
+
+// ── Watermark logo controls ─────────────────────────────────────────
+// Optional chrome for the Participants tab: they read and write the one mark
+// that both the print page and the Word document carry, without a page reload.
+function watermarkControls() {
+  return `
+  <span class="wm-controls">
+    <label class="btn btn-ghost" title="PNG, JPG or SVG up to 5 MB">
+      ${I.doc} Watermark logo
+      <input type="file" id="wmFile" accept="image/png,image/jpeg,image/svg+xml" hidden onchange="uploadWatermark(this)">
+    </label>
+    <img id="wmPreview" alt="" style="width:28px;height:28px;object-fit:contain;vertical-align:middle">
+    <button class="btn btn-ghost" id="wmReset" onclick="resetWatermark()">Use default</button>
+  </span>`;
+}
+
+// The live object URL for the preview thumbnail, so an upload/reset swap can
+// release the one it replaces.
+let watermarkPreviewUrl = '';
+
+async function loadWatermark() {
+  const state = await api('/api/watermark-logo');
+  const el = document.getElementById('wmPreview');
+  if (el) {
+    // Fetched through rosterFetch and shown as a Blob URL, NOT assigned as a
+    // bare `/api/watermark-logo.png` path: that route sits behind the admin auth
+    // middleware, and an <img src> cannot carry the Bearer token - a plain URL
+    // arrives unauthenticated, 401s, and leaves a broken thumbnail. The fetch is
+    // what makes the token travel with the request.
+    const next = URL.createObjectURL(await (await rosterFetch('/api/watermark-logo.png')).blob());
+    el.src = next;
+    // Released only AFTER the new image is in place: revoking the URL still on
+    // screen can blank the thumbnail mid-swap.
+    if (watermarkPreviewUrl) URL.revokeObjectURL(watermarkPreviewUrl);
+    watermarkPreviewUrl = next;
+  }
+  const btn = document.getElementById('wmReset');
+  if (btn) btn.disabled = !state.custom;
+}
+
+async function uploadWatermark(input) {
+  const file = input.files && input.files[0];
+  if (!file) return;
+  try {
+    const form = new FormData();
+    form.append('file', file);
+    const res = await rosterFetch('/api/watermark-logo', { method: 'POST', body: form });
+    await loadWatermark();
+    // 201 is a freshly stored logo, 200 means the server already held these exact
+    // bytes. Both succeeded; saying which one it was saves a confused re-upload.
+    alert(res.status === 201 ? 'Watermark updated.' : 'That image is already the watermark.');
+  } catch (e) {
+    alert(`Could not set the watermark: ${e.message}`);
+  } finally {
+    input.value = '';
+  }
+}
+
+async function resetWatermark() {
+  try {
+    await rosterFetch('/api/watermark-logo', { method: 'DELETE' });
+    await loadWatermark();
+  } catch (e) {
+    alert(`Could not reset the watermark: ${e.message}`);
+  }
 }
 
 async function printRoster(id) {
@@ -872,7 +999,10 @@ async function printRoster(id) {
   if (!win) { alert('Please allow pop-ups for this site to print the roster.'); return; }
   win.document.write('<p style="font-family:sans-serif;padding:24px">Preparing the roster…</p>');
   try {
-    const res = await rosterFetch(`/api/exams/${id}/participants/print`);
+    const section = rosterSectionValue();
+    const res = await rosterFetch(
+      `/api/exams/${id}/participants/print?section=${encodeURIComponent(section)}`,
+    );
     const html = await res.text();
     win.document.open();
     win.document.write(html);

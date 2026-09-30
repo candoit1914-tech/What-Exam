@@ -63,6 +63,50 @@ test('finished students are ranked by percentage, highest first', () => {
   assert.deepEqual(roster.finished.map((r) => r.rank), [1, 2, 3]);
 });
 
+test('percentage ranking compares numerically, so 100% outranks 9%', () => {
+  const eid = newExam('Numeric Ranking');
+  // Inserted worst-first, and 100 > 9 only as a number: a string comparison
+  // would sort '9' after '100' and file a perfect scorer third.
+  addSession(eid, addStudent(eid, 'Nine Percent'), { status: 'completed', pct: 9, score: 9, ended: '2026-01-01 10:00:00' });
+  addSession(eid, addStudent(eid, 'Perfect Score'), { status: 'completed', pct: 100, score: 10, ended: '2026-01-01 10:05:00' });
+  addSession(eid, addStudent(eid, 'Eighty Percent'), { status: 'completed', pct: 80, score: 8, ended: '2026-01-01 10:10:00' });
+  const roster = results.buildParticipantRoster(eid);
+  assert.deepEqual(
+    roster.finished.map((r) => r.name),
+    ['Perfect Score', 'Eighty Percent', 'Nine Percent'],
+    'percentages must sort as numbers, not as strings'
+  );
+});
+
+test('in-progress students are ordered by questions answered, then by name', () => {
+  const eid = newExam('In Progress Order');
+  // The score columns are null for an unfinished student by design, so progress
+  // is ranked on answered questions - compared numerically, then by name.
+  addSession(eid, addStudent(eid, 'Two Answered'), { answers: 2 });
+  addSession(eid, addStudent(eid, 'Ten Answered'), { answers: 10 });
+  addSession(eid, addStudent(eid, 'Two Also Answered'), { answers: 2 });
+  const roster = results.buildParticipantRoster(eid);
+  assert.deepEqual(
+    roster.inProgress.map((r) => r.name),
+    ['Ten Answered', 'Two Also Answered', 'Two Answered'],
+    'most answered first, ties broken alphabetically'
+  );
+});
+
+test('the unscored groups come out in name order, whatever the recipient order', () => {
+  const eid = newExam('Unscored Order');
+  // addStudent inserts the recipient as delivered with no session, which is the
+  // 'not started' bucket. Inserted Z-A-M to prove order comes from the sort.
+  for (const name of ['Zoe', 'Adam', 'Mary']) addStudent(eid, name);
+  const first = results.buildParticipantRoster(eid);
+  assert.deepEqual(first.notStarted.map((r) => r.name), ['Adam', 'Mary', 'Zoe']);
+  assert.deepEqual(first.notSent.map((r) => r.name), [],
+    'every recipient was delivered, so nothing is not-sent');
+  // Same input, same output: the register cannot reshuffle between two prints.
+  const second = results.buildParticipantRoster(eid);
+  assert.deepEqual(second.notStarted.map((r) => r.name), first.notStarted.map((r) => r.name));
+});
+
 test('only a student\'s best finished attempt is ranked', () => {
   const eid = db.prepare("INSERT INTO exams(title,duration_minutes,status) VALUES ('Retry',30,'live')").run().lastInsertRowid;
   const sid = db.prepare("INSERT INTO students(phone,name) VALUES ('233retry','Retrier')").run().lastInsertRowid;
