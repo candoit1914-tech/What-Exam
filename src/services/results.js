@@ -619,10 +619,15 @@ function buildParticipantRoster(examId) {
 // paper or a PDF in one click, which is why this feature needs no PDF
 // library and no headless renderer on the server.
 const PRINT_CSS = `
-  @page { size: A4 portrait; margin: 14mm 12mm; }
+  /* The page margin is ZERO so the page area IS the sheet, which is the only way
+     a \`position: fixed\` frame can reach the edge: fixed boxes resolve against
+     the page area, so a margin here would silently inset the rule further in.
+     The printable inset therefore lives on \`body\` as padding, which keeps every
+     value inside the rule instead of letting a wide table run out past it. */
+  @page { size: A4 portrait; margin: 0; }
   * { box-sizing: border-box; }
   body { font-family: -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
-         color: #1a1a1a; margin: 0; font-size: 12px; line-height: 1.4; }
+         color: #1a1a1a; margin: 0; padding: 14mm 12mm; font-size: 12px; line-height: 1.4; }
   h1 { font-size: 19px; margin: 0 0 2px; }
   .sub { color: #555; font-size: 11px; margin-bottom: 4px; }
   .summary { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 16px; }
@@ -648,19 +653,25 @@ const PRINT_CSS = `
   /* Chrome ignores \`@page { border }\` entirely, so the page frame is a fixed
      element instead: it repeats on every page in Chrome, Edge and Firefox.
 
-     The inset is deliberately smaller than the \`@page\` margin (14mm/12mm) so the
-     frame sits close to the sheet edge without touching the table. It is not 0:
-     printers have a non-printable margin and a zero-inset border is clipped off
-     the paper, which is worse than the floating look it was meant to fix. A
-     1.5pt rule paired with an inset hairline reads as a deliberate double
-     border rather than a stray box, and the radius keeps the corners soft. */
-  .frame { position: fixed; inset: 8mm; border: 1.5pt solid #25D366;
-           border-radius: 2mm; box-shadow: inset 0 0 0 1pt #25D366;
+     \`inset: 0\` is the sheet edge, which only works because \`@page\` above sets
+     margin 0 - a fixed box is measured from the page area, so the old 8mm inset
+     actually drew the rule 8mm INSIDE the text block and a wide table spilled
+     out past it. Square corners, because a radius here would round the paper.
+
+     The trade: a physical printer still cannot reach its own non-printable edge,
+     so on paper this rule may be trimmed. As a PDF - what this page is for - it
+     prints edge to edge. */
+  .frame { position: fixed; inset: 0; border: 1.5pt solid #25D366;
            pointer-events: none; z-index: 0; }
   /* Centred on the page, behind everything. \`width\` rather than \`height\` so a
-     wide mark scales to the paper instead of overflowing it. */
+     wide mark scales to the paper instead of overflowing it. The opacity and
+     blur are what make it read as a watermark rather than as a second copy of
+     the content: the .docx washout is baked into the PNG by
+     src/services/watermark.js, but the print page has no such pass, so the
+     fade happens here. */
   .wm { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
-        width: 66%; pointer-events: none; z-index: 0; }
+        width: 66%; opacity: 0.13; filter: blur(1.5px);
+        pointer-events: none; z-index: 0; }
   body > *:not(.frame):not(.wm) { position: relative; z-index: 1; }
   /* Without this the green frame and the shaded table headers are dropped by
      the print dialog - the same trick reportHTML already uses. */
@@ -773,10 +784,12 @@ function rosterPrintHTML(roster, section, watermarkDataUri) {
         ? '<span class="pass">Pass</span>'
         : '<span class="fail">Fail</span>';
 
-  const table = (head, rows, render) => {
+  const table = (head, rows, render, widths) => {
     if (!rows.length) return '<p class="none">None</p>';
     return (
-      '<table><thead><tr>' +
+      '<table>' +
+      (widths ? `<colgroup>${widths.map((w) => `<col style="width:${w}%">`).join('')}</colgroup>` : '') +
+      '<thead><tr>' +
       head.map((h, i) => `<th${i > 1 ? ' class="num"' : ''}>${esc(h)}</th>`).join('') +
       '</tr></thead><tbody>' +
       rows.map(render).join('') +
@@ -790,20 +803,28 @@ function rosterPrintHTML(roster, section, watermarkDataUri) {
   // is deliberately NOT the Word document's longer header.
   const otherHead = ROSTER_SIMPLE_COLS;
 
+  // Column widths are declared, not left to the auto table algorithm. With only
+  // `width: 100%` the browser hands space to the widest cell, and the long
+  // "Questions answered" header outgrew every name on the page, so the register
+  // read as a questions column with names squeezed beside it. Name now gets the
+  // most room and the answer count the least; each set sums to 100%.
+  const PRINT_FINISHED_WIDTHS = [5, 24, 19, 9, 11, 10, 9, 13];
+  const PRINT_SIMPLE_WIDTHS = [36, 22, 12, 30];
+
   const finishedRowsOf = (rows) => table(finishedHead, rows, (r) =>
     '<tr>' +
     `<td class="num">${esc(r.rank)}</td><td>${esc(r.name)}</td><td>${esc(r.phone)}</td>` +
     `<td class="num">${num(r.final_score)}</td><td class="num">${num(r.final_percentage)}%</td>` +
     `<td>${outcome(r.passed)}</td><td class="num">${r.attempt_no ? esc(r.attempt_no) : dash}</td>` +
     `<td>${r.ended_at ? esc(r.ended_at) : dash}</td>` +
-    '</tr>');
+    '</tr>', PRINT_FINISHED_WIDTHS);
 
   const otherRowsOf = (rows) => table(otherHead, rows, (r) =>
     '<tr>' +
     `<td>${esc(r.name)}</td><td>${esc(r.phone)}</td>` +
     `<td class="num">${txt(r.questions_answered)}</td>` +
     `<td>${r.started_at ? esc(r.started_at) : dash}</td>` +
-    '</tr>');
+    '</tr>', PRINT_SIMPLE_WIDTHS);
 
   const chip = (label, n) => `<span class="chip">${esc(label)} <b>${n}</b></span>`;
   const s = roster.summary;

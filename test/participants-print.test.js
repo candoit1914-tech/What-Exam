@@ -33,18 +33,85 @@ test('the print page embeds the watermark as a fixed, centred, self-contained da
   assert.ok(/print-color-adjust:\s*exact/.test(html), 'green border must survive the print dialog');
 });
 
-test('the green page frame sits near the sheet edge as a double rule', () => {
+test('the green page frame runs edge to edge with every value inside it', () => {
   const html = rosterPrintHTML(roster, 'total', DATA_URI);
   assert.ok(/class="frame"/.test(html));
   assert.ok(html.includes('#25D366'), 'frame must use the app green');
-  // Inside the @page margin (14mm/12mm) so it never touches the table, but not
-  // at 0: a zero-inset border is clipped by every printer's non-printable edge.
-  const inset = Number(/inset:\s*([\d.]+)mm/.exec(html)[1]);
-  assert.ok(inset > 0 && inset < 12, `frame inset ${inset}mm must sit inside the page margin`);
-  // The double rule: a real border plus an inset hairline offset.
+
+  // A `position: fixed` box is resolved against the PAGE AREA, not the sheet, so
+  // the old `inset: 8mm` against a 14mm/12mm @page margin put the rule 8mm INSIDE
+  // the text block: a wide table ran out past the border instead of inside it.
+  // The margin therefore has to leave the page entirely - `@page` margin 0 makes
+  // the page area the sheet, so `inset: 0` really is the sheet edge.
+  const pageMargin = /@page\s*\{[^}]*margin:\s*0/.test(html);
+  assert.ok(pageMargin, '@page margin must be 0 or the frame cannot reach the sheet edge');
+
+  const inset = /\.frame\s*\{[^}]*inset:\s*([\d.]+)m?/.exec(html);
+  assert.ok(inset, 'frame inset must be declared');
+  assert.equal(Number(inset[1]), 0, 'frame must sit on the sheet edge (inset 0)');
+
+  // Edge-to-edge is only half the requirement: the values still have to be INSIDE
+  // the rule, so the old @page margin becomes body padding instead of vanishing.
+  const pad = /body\s*\{[^}]*padding:\s*([\d.]+)mm\s+([\d.]+)mm/.exec(html);
+  assert.ok(pad, 'body must carry the printable inset as padding');
+  assert.ok(Number(pad[1]) > 0 && Number(pad[2]) > 0,
+    `body padding ${pad[1]}mm/${pad[2]}mm must be non-zero or content sits on the border`);
+
   assert.ok(/border:\s*[\d.]+pt solid #25D366/.test(html), 'outer rule missing');
-  assert.ok(/box-shadow:\s*inset 0 0 0/.test(html), 'inner hairline rule missing');
-  assert.ok(/border-radius/.test(html), 'corners should be softened, not sharp');
+  // Square corners now that the rule is the sheet edge: a radius would round the
+  // paper itself off.
+  assert.ok(!/\.frame\s*\{[^}]*border-radius/.test(html),
+    'an edge-to-edge frame must not round the paper');
+});
+
+test('Name gets the widest column and Questions Answered the narrowest', () => {
+  // Column widths are set with an explicit <colgroup>: with only `width: 100%`
+  // the browser hands the column to whichever cell has the longest text, so a
+  // long name and a short "3" both lost to the wide "Questions answered"
+  // header, and the register read wrong.
+  const html = rosterPrintHTML(roster, 'total', DATA_URI);
+  // 'total' renders the finished table FIRST, so the four-column group is found
+  // by shape rather than by position.
+  const all = [...html.matchAll(/<colgroup>(.*?)<\/colgroup>/g)]
+    .map((m) => [...m[1].matchAll(/width:\s*([\d.]+)%/g)].map((w) => Number(w[1])));
+  const widths = all.find((w) => w.length === 4);
+  assert.ok(widths, `no four-column colgroup found, saw ${JSON.stringify(all)}`);
+  const sum = widths.reduce((a, b) => a + b, 0);
+  assert.ok(Math.abs(sum - 100) < 0.5, `colgroup widths must total 100%, got ${sum}`);
+
+  // Name (0) wider than Questions answered (2), and Questions answered the
+  // narrowest of the four.
+  assert.ok(widths[0] > widths[2], `Name ${widths[0]}% must exceed Questions answered ${widths[2]}%`);
+  assert.equal(Math.min(...widths), widths[2],
+    `Questions answered must be the narrowest column, widths were ${widths.join('/')}`);
+});
+
+test('the finished table gives Name more room than its numeric columns', () => {
+  const html = rosterPrintHTML(roster, 'finished', DATA_URI);
+  const groups = [...html.matchAll(/<colgroup>(.*?)<\/colgroup>/g)].map((m) => m[1]);
+  const widths = [...groups[0].matchAll(/width:\s*([\d.]+)%/g)].map((m) => Number(m[1]));
+  assert.equal(widths.length, 8, 'the finished table has eight columns');
+  assert.ok(widths[1] > widths[3] && widths[1] > widths[4],
+    `Name ${widths[1]}% must beat Score ${widths[3]}% and Percentage ${widths[4]}%`);
+});
+
+test('the print watermark is faded and blurred well past legibility', () => {
+  const html = rosterPrintHTML(roster, 'total', DATA_URI);
+  const wm = /\.wm\s*\{([^}]*)\}/.exec(html);
+  assert.ok(wm, 'the .wm rule is missing');
+  const rule = wm[1];
+
+  const opacity = /opacity:\s*([\d.]+)/.exec(rule);
+  assert.ok(opacity, 'the watermark needs an explicit opacity');
+  assert.ok(Number(opacity[1]) <= 0.18,
+    `watermark opacity ${opacity[1]} is too strong to sit behind text`);
+
+  const blur = /blur\(([\d.]+)px\)/.exec(rule);
+  assert.ok(blur, 'the watermark needs a blur so it reads as a mark, not text');
+  assert.ok(Number(blur[1]) >= 1, `blur ${blur[1]}px is too slight`);
+  // blur() on a fixed full-sheet element can be clipped by the page box, so the
+  // mark must not also be scaled past the sheet.
+  assert.ok(!/filter:[^;]*hue-rotate/.test(rule), 'no hue shift: it must stay grey');
 });
 
 test('the document is still standalone: no app stylesheet, no scripts, no buttons', () => {
