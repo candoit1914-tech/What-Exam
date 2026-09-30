@@ -1248,6 +1248,12 @@ textarea { min-height: 90px; resize: vertical; line-height: 1.55; }
 input::placeholder, textarea::placeholder { color: var(--text-muted); }
 select { appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%236EE7B7' stroke-width='2' fill='none'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 14px center; }
 select option { background: #0A1F14; color: var(--text-primary); }
+/* Watermark controls for the Participants tab. The thumbnail sits on a white
+   chip because a logo is normally light artwork on a transparent background,
+   and is edged in the app's own surface green so it reads against both that
+   white chip and the dark dashboard behind it. */
+.wm-controls { display: inline-flex; align-items: center; gap: 6px; }
+#wmPreview { border: 1px solid var(--bg-surface); border-radius: 4px; background: #fff; }
 label { color: var(--text-secondary); font-size: 13.5px; }
 input[type="radio"], input[type="checkbox"] { accent-color: var(--green); width: 18px; height: 18px; }
 
