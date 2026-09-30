@@ -940,12 +940,26 @@ function watermarkControls() {
   </span>`;
 }
 
+// The live object URL for the preview thumbnail, so an upload/reset swap can
+// release the one it replaces.
+let watermarkPreviewUrl = '';
+
 async function loadWatermark() {
   const state = await api('/api/watermark-logo');
   const el = document.getElementById('wmPreview');
-  // The preview URL is a constant, so the cache-buster is what makes an upload
-  // or a reset actually change the thumbnail instead of replaying the old bytes.
-  if (el) el.src = `/api/watermark-logo.png?t=${Date.now()}${state.custom ? '&custom=1' : ''}`;
+  if (el) {
+    // Fetched through rosterFetch and shown as a Blob URL, NOT assigned as a
+    // bare `/api/watermark-logo.png` path: that route sits behind the admin auth
+    // middleware, and an <img src> cannot carry the Bearer token - a plain URL
+    // arrives unauthenticated, 401s, and leaves a broken thumbnail. The fetch is
+    // what makes the token travel with the request.
+    const next = URL.createObjectURL(await (await rosterFetch('/api/watermark-logo.png')).blob());
+    el.src = next;
+    // Released only AFTER the new image is in place: revoking the URL still on
+    // screen can blank the thumbnail mid-swap.
+    if (watermarkPreviewUrl) URL.revokeObjectURL(watermarkPreviewUrl);
+    watermarkPreviewUrl = next;
+  }
   const btn = document.getElementById('wmReset');
   if (btn) btn.disabled = !state.custom;
 }

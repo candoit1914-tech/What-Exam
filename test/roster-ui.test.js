@@ -145,6 +145,25 @@ test('the watermark controls are present and refresh without a page reload', () 
   assert.ok(/loadWatermark\(\)/.test(app), 'the controls never load their own state');
 });
 
+test('the watermark preview is fetched with auth, not pointed at the route', () => {
+  // /api/watermark-logo.png sits behind the admin auth middleware, and an
+  // <img src> cannot carry the Bearer token - assigning that path directly 401s
+  // and leaves a broken thumbnail. The image must arrive as a Blob via
+  // rosterFetch, which is the only thing that attaches the token.
+  assert.ok(/el\.src\s*=\s*`?\/api\/watermark-logo\.png/.test(app) === false,
+    'the preview src is assigned the protected route directly; an <img> cannot authenticate');
+  const fn = app.match(/async function loadWatermark\(\)\s*\{[\s\S]*?\n\}/);
+  assert.ok(fn, 'loadWatermark not found');
+  assert.ok(/rosterFetch\('\/api\/watermark-logo\.png'\)/.test(fn[0]),
+    'the preview PNG must be fetched through rosterFetch');
+  assert.ok(/createObjectURL/.test(fn[0]), 'the fetched bytes must become a Blob URL');
+  // The replaced URL has to be released or every upload/reset leaks one blob.
+  assert.ok(/revokeObjectURL/.test(fn[0]), 'the superseded preview URL is never revoked');
+  // state.custom still drives the reset button, so the state fetch is not dead.
+  assert.ok(/btn\.disabled\s*=\s*!state\.custom/.test(fn[0]),
+    'the reset button must still follow state.custom');
+});
+
 test('the screen Not Sent table gains the two missing columns', () => {
   const m = app.match(/roster\.notSent,\s*\[([^\]]+)\]/);
   assert.ok(m, 'notSent rosterTable call not found');
