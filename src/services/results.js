@@ -621,7 +621,23 @@ const PRINT_CSS = `
   .fail { color: #a4262c; font-weight: 600; }
   .none { color: #777; font-style: italic; padding: 7px; }
   .foot { margin-top: 18px; color: #666; font-size: 10px; }
+  /* Chrome ignores \`@page { border }\` entirely, so the page frame is a fixed
+     element instead: it repeats on every page in Chrome, Edge and Firefox. */
+  .frame { position: fixed; inset: 6mm; border: 2.5pt solid #25D366;
+           pointer-events: none; z-index: 0; }
+  /* Centred on the page, behind everything. \`width\` rather than \`height\` so a
+     wide mark scales to the paper instead of overflowing it. */
+  .wm { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+        width: 66%; pointer-events: none; z-index: 0; }
+  body > *:not(.frame):not(.wm) { position: relative; z-index: 1; }
+  /* Without this the green frame and the shaded table headers are dropped by
+     the print dialog - the same trick reportHTML already uses. */
+  body, .frame, th { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  /* This URL is a print artefact rather than a preview, so the frame and the
+     watermark stay off the screen and appear only in the printed output. */
+  .frame, .wm { display: none; }
   @media print {
+    .frame, .wm { display: block; }
     .none { color: #000; }
     h2 { break-after: avoid; page-break-after: avoid; }
   }
@@ -698,8 +714,19 @@ function rosterBlocks(roster, section) {
   });
 }
 
-function rosterPrintHTML(roster) {
+/**
+ * The printable register, scoped to one section.
+ *
+ * @param {object} roster buildParticipantRoster()'s result
+ * @param {string} [section] a ROSTER_SECTIONS key; anything unknown falls back
+ *   to 'total', so a hand-typed URL prints the whole roster rather than 404ing
+ * @param {string} [watermarkDataUri] the mark already inlined as a data: URI,
+ *   which is what keeps the page self-contained and offline-printable
+ * @returns {string} a standalone HTML document
+ */
+function rosterPrintHTML(roster, section, watermarkDataUri) {
   const exam = roster.exam;
+  const stamp = sectionStamp(section);
   const dash = '<span class="none">&mdash;</span>';
   const txt = (v) => (v === null || v === undefined || v === '' ? dash : esc(v));
   const num = (v) => (v === null || v === undefined ? dash : esc(v));
@@ -732,7 +759,7 @@ function rosterPrintHTML(roster) {
   // is deliberately NOT the Word document's longer header.
   const otherHead = ROSTER_SIMPLE_COLS;
 
-  const finishedRows = table(finishedHead, roster.finished, (r) =>
+  const finishedRowsOf = (rows) => table(finishedHead, rows, (r) =>
     '<tr>' +
     `<td class="num">${esc(r.rank)}</td><td>${esc(r.name)}</td><td>${esc(r.phone)}</td>` +
     `<td class="num">${num(r.final_score)}</td><td class="num">${num(r.final_percentage)}%</td>` +
@@ -740,7 +767,7 @@ function rosterPrintHTML(roster) {
     `<td>${r.ended_at ? esc(r.ended_at) : dash}</td>` +
     '</tr>');
 
-  const otherRows = (rows) => table(otherHead, rows, (r) =>
+  const otherRowsOf = (rows) => table(otherHead, rows, (r) =>
     '<tr>' +
     `<td>${esc(r.name)}</td><td>${esc(r.phone)}</td>` +
     `<td class="num">${txt(r.questions_answered)}</td>` +
@@ -750,6 +777,13 @@ function rosterPrintHTML(roster) {
   const chip = (label, n) => `<span class="chip">${esc(label)} <b>${n}</b></span>`;
   const s = roster.summary;
 
+  // The blocks come from the shared section vocabulary rather than from four
+  // hard-coded headings, so a print of one section cannot leak another's rows.
+  const sections = rosterBlocks(roster, section)
+    .map(({ title, ranked, rows }) =>
+      `<h2>${esc(title)}</h2>\n${ranked ? finishedRowsOf(rows) : otherRowsOf(rows)}`)
+    .join('\n');
+
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -758,24 +792,15 @@ function rosterPrintHTML(roster) {
 <style>${PRINT_CSS}</style>
 </head>
 <body>
+${watermarkDataUri ? `<img class="wm" src="${esc(watermarkDataUri)}" alt="">` : ''}<div class="frame"></div>
 <h1>${esc(exam.title)}</h1>
-<p class="sub">Duration ${esc(exam.duration_minutes)} min &middot; Pass mark ${esc(exam.pass_percentage)}% &middot; Status ${esc(exam.status || 'unknown')}</p>
+<p class="sub">Duration ${esc(exam.duration_minutes)} min &middot; Pass mark ${esc(exam.pass_percentage)}% &middot; Status ${esc(exam.status || 'unknown')}${stamp ? ` &middot; <b>Section: ${esc(stamp)}</b>` : ''}</p>
 <div class="summary">
 ${chip('Total', s.total)}${chip('Finished', s.finished)}${chip('In progress', s.inProgress)}
 ${chip('Not started', s.notStarted)}${chip('Not sent', s.notSent)}
 </div>
 
-<h2>Finished (ranked by percentage)</h2>
-${finishedRows}
-
-<h2>In Progress</h2>
-${otherRows(roster.inProgress)}
-
-<h2>Not Started</h2>
-${otherRows(roster.notStarted)}
-
-<h2>Not Sent</h2>
-${otherRows(roster.notSent)}
+${sections}
 
 <p class="foot">Printed ${esc(new Date().toLocaleString())}</p>
 </body>
