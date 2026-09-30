@@ -100,7 +100,11 @@ test('the section param is honoured and junk falls back to total', async () => {
   assert.ok(!junk.text.includes('Section:'), 'an inherited-property key must fall back to total');
   const filtered = await request('GET', `/api/exams/${examId}/participants/print?section=not_sent`);
   assert.ok(filtered.text.includes('Section: Not sent'), 'the stamp must name the selected section');
-  assert.ok(!filtered.text.includes('<h2>Finished'), 'other sections must not leak in');
+  assert.ok(!filtered.text.includes('<h2'), 'group headings were removed; none may leak back');
+  // This exam has no recipients, so the one selected group renders its
+  // empty-state row rather than a table. That is exactly one group's worth of
+  // output and nothing from the other three.
+  assert.ok(filtered.text.includes('class="none"'), 'the empty group must say so');
 });
 
 test('the removed csv route 404s rather than lingering half-deleted', async () => {

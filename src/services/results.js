@@ -552,6 +552,14 @@ function buildParticipantRoster(examId) {
     }
   }
 
+  // Deterministic tie-break for every group sort below. `numeric` so 'Exam 2'
+  // sorts before 'Exam 10', and `sensitivity: 'base'` so 'ann' and 'Ann' do not
+  // produce two differently-ordered runs of the same register. student_id is
+  // the final fallback so two students sharing a name still have one order.
+  const byName = (a, b) =>
+    String(a.name || '').localeCompare(String(b.name || ''), 'en', { numeric: true, sensitivity: 'base' })
+    || String(a.student_id ?? '').localeCompare(String(b.student_id ?? ''));
+
   // Rank by percentage descending, then score descending, then earlier ended_at.
   // Done here, not in SQL: the array reaches this point in recipient order, and
   // a student with a live retry contributes an ended_at of NULL, which SQLite
@@ -568,6 +576,21 @@ function buildParticipantRoster(examId) {
     return aEnd < bEnd ? -1 : aEnd > bEnd ? 1 : 0;
   });
   finished.forEach((r, i) => { r.rank = i + 1; });
+
+  // The in-progress group cannot be ranked by percentage: shape() nulls the
+  // score for anyone who has not finished, precisely so a printed register
+  // never shows a score for a student still sitting the exam. Questions
+  // answered is the honest progress measure, and it is compared as a number so
+  // '9' never sorts below '10'.
+  inProgress.sort((a, b) => (b.questions_answered ?? 0) - (a.questions_answered ?? 0)
+    || byName(a, b));
+
+  // The two unscored groups have no measure to rank by at all. Sorting by name
+  // is not a ranking, it is determinism: the buckets above are filled in SQL
+  // recipient order, and a printed register that reshuffles between two prints
+  // of the same exam is a register nobody can check against.
+  notStarted.sort(byName);
+  notSent.sort(byName);
 
   return {
     exam: {
@@ -605,8 +628,9 @@ const PRINT_CSS = `
   .summary { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 16px; }
   .chip { border: 1px solid #ccc; border-radius: 4px; padding: 4px 9px; }
   .chip b { font-size: 14px; }
-  h2 { font-size: 13px; margin: 18px 0 6px; text-transform: uppercase;
-       letter-spacing: .5px; border-bottom: 2px solid #333; padding-bottom: 3px; }
+  /* The group headings are gone by request, so consecutive tables need their
+     own separation or they read as one long register with no group break. */
+  .block + .block { margin-top: 16px; }
   table { width: 100%; border-collapse: collapse; }
   th, td { border: 1px solid #bbb; padding: 5px 7px; text-align: left; }
   th { background: #ececec; font-size: 11px; text-transform: uppercase; }
@@ -622,8 +646,16 @@ const PRINT_CSS = `
   .none { color: #777; font-style: italic; padding: 7px; }
   .foot { margin-top: 18px; color: #666; font-size: 10px; }
   /* Chrome ignores \`@page { border }\` entirely, so the page frame is a fixed
-     element instead: it repeats on every page in Chrome, Edge and Firefox. */
-  .frame { position: fixed; inset: 6mm; border: 2.5pt solid #25D366;
+     element instead: it repeats on every page in Chrome, Edge and Firefox.
+
+     The inset is deliberately smaller than the \`@page\` margin (14mm/12mm) so the
+     frame sits close to the sheet edge without touching the table. It is not 0:
+     printers have a non-printable margin and a zero-inset border is clipped off
+     the paper, which is worse than the floating look it was meant to fix. A
+     1.5pt rule paired with an inset hairline reads as a deliberate double
+     border rather than a stray box, and the radius keeps the corners soft. */
+  .frame { position: fixed; inset: 8mm; border: 1.5pt solid #25D366;
+           border-radius: 2mm; box-shadow: inset 0 0 0 1pt #25D366;
            pointer-events: none; z-index: 0; }
   /* Centred on the page, behind everything. \`width\` rather than \`height\` so a
      wide mark scales to the paper instead of overflowing it. */
@@ -639,7 +671,6 @@ const PRINT_CSS = `
   @media print {
     .frame, .wm { display: block; }
     .none { color: #000; }
-    h2 { break-after: avoid; page-break-after: avoid; }
   }
 `;
 
@@ -778,10 +809,13 @@ function rosterPrintHTML(roster, section, watermarkDataUri) {
   const s = roster.summary;
 
   // The blocks come from the shared section vocabulary rather than from four
-  // hard-coded headings, so a print of one section cannot leak another's rows.
+  // hard-coded tables, so a print of one section cannot leak another's rows.
+  // The group's title is deliberately NOT rendered: the group labels read as
+  // section headers the register does not have, and the sub-line already stamps
+  // which section is on the page.
   const sections = rosterBlocks(roster, section)
-    .map(({ title, ranked, rows }) =>
-      `<h2>${esc(title)}</h2>\n${ranked ? finishedRowsOf(rows) : otherRowsOf(rows)}`)
+    .map(({ ranked, rows }) =>
+      `<div class="block">\n${ranked ? finishedRowsOf(rows) : otherRowsOf(rows)}</div>`)
     .join('\n');
 
   return `<!DOCTYPE html>
@@ -856,10 +890,6 @@ function rosterDocx(roster, section, watermarkPngBuffer) {
   const run = (s, extra = '') =>
     `<w:r>${extra}<w:t xml:space="preserve">${escXml(s)}</w:t></w:r>`;
   const para = (s, extra = '') => W(run(s, extra));
-  const heading = (s) =>
-    '<w:p><w:pPr><w:spacing w:before="200" w:after="80"/></w:pPr>' +
-    '<w:r><w:rPr><w:b/><w:color w:val="1A1A1A"/><w:sz w:val="26"/></w:rPr>' +
-    `<w:t xml:space="preserve">${escXml(s)}</w:t></w:r></w:p>`;
   const cell = (v, width, header) =>
     `<w:tc><w:tcPr><w:tcW w:w="${width}" w:type="dxa"/>` +
     (header ? `<w:shd w:val="clear" w:fill="${DOCX_GREEN}"/>` : '') +
@@ -900,11 +930,15 @@ function rosterDocx(roster, section, watermarkPngBuffer) {
   const simpleCells = (r) => [val(r.name), val(r.phone), val(r.questions_answered), val(r.started_at)];
 
   // rosterBlocks from Task 2 decides which groups appear and in what order.
-  const block = ({ title, ranked, rows }) => {
+  // The group title is deliberately not emitted here either, matching the print
+  // page: the labels read as section headers the document does not have, and
+  // the 'Section: <stamp>' line already says which one is on the page. An
+  // empty spacer keeps consecutive tables from reading as one long table.
+  const block = ({ ranked, rows }) => {
     const head = ranked ? DOCX_FINISHED_HEAD : DOCX_SIMPLE_HEAD;
     const widths = ranked ? DOCX_FINISHED_WIDTHS : DOCX_SIMPLE_WIDTHS;
     const cells = ranked ? finishedCells : simpleCells;
-    return heading(title) +
+    return para('') +
       (rows.length
         ? table(head, rows.map(cells), widths)
         : emptyTable(DOCX_FULL_WIDTH));

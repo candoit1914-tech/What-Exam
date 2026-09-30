@@ -192,24 +192,41 @@ test('the watermark png part is the exact buffer handed in, and a real one survi
 
 test('section filtering and the section stamp are reflected in the body', () => {
   const total = part(docx('total'), 'word/document.xml');
-  for (const t of ['Finished', 'In Progress', 'Not Started', 'Not Sent']) {
-    assert.ok(total.includes(t), `total should contain ${t}`);
+  // The group headings were removed by request, so `total` is proved by its
+  // rows rather than by four group labels. The count chips render either way.
+  for (const n of ['Bob', 'Cid', 'Dee']) {
+    assert.ok(total.includes(n), `total should contain ${n}`);
   }
   const notSent = part(docx('not_sent'), 'word/document.xml');
   assertXMLWellFormed(notSent);
   assert.ok(notSent.includes('Section: Not sent'));
-  assert.ok(notSent.includes('Not Sent'));
-  // The count chips always render, so a leak shows up as a block title.
-  for (const t of ['In Progress', 'Not Started']) assert.ok(!notSent.includes(t), `${t} leaked`);
+  // The count chips always render, so a leak can only be a row from another
+  // group; the group labels are gone and must not reappear either.
+  for (const t of ['In Progress', 'Not Started', 'Finished (ranked']) {
+    assert.ok(!notSent.includes(t), `group heading "${t}" leaked`);
+  }
+  for (const n of ['Bob', 'Cid', 'Dee']) {
+    const isTheNotSentOne = n === 'Dee';
+    assert.equal(notSent.includes(n), isTheNotSentOne, `${n} should ${isTheNotSentOne ? '' : 'not '}be on a not_sent document`);
+  }
   assert.ok(!total.includes('Section:'), 'total stays unadorned');
   assert.ok(!ROSTER_SECTIONS.total.label.includes('Section'), 'sanity: the stamp is a per-section string');
+});
+
+test('the four group headings are absent from the document body', () => {
+  const body = part(docx('total'), 'word/document.xml');
+  for (const t of ['In Progress', 'Not Started', 'Not Sent', 'Finished (ranked by percentage)']) {
+    assert.ok(!body.includes(t), `group heading "${t}" must not be printed`);
+  }
 });
 
 test('an empty selected group renders an empty-state row, not a broken table', () => {
   const body = part(rosterDocx({ ...roster, finished: [] }, 'finished', WATERMARK), 'word/document.xml');
   assertXMLWellFormed(body);
   assert.ok(body.includes('None'), body.slice(-600));
-  assert.ok(body.includes('Finished (ranked by percentage)'), 'the heading still names the group');
+  // With no heading to name the group, the section stamp is what tells the
+  // reader which group the empty table belongs to.
+  assert.ok(body.includes('Section: Finished'), 'the stamp must still name the section');
 });
 
 test('a huge roster does not blow the stack or produce invalid XML', () => {
