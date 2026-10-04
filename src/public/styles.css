@@ -1020,6 +1020,9 @@ button.danger, .btn.danger { color: var(--red); }
 
 /* ── Tables ──────────────────────────────────────────────── */
 .table-card { padding: 8px; overflow: hidden; }
+/* Bulk-select column: one bare checkbox, centred, with no label padding. */
+.table-card th.pick, .table-card td.pick { width: 34px; padding-left: 8px; padding-right: 0; }
+.table-card .pick label { gap: 0; margin: 0; justify-content: center; }
 table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
 thead th {
   text-align: left;

@@ -2098,13 +2098,22 @@ async function renderStudents() {
   const students = await api('/api/students');
   $view.innerHTML = `
     ${pageHead('people', 'STUD<span class="gr">ENTS</span>', 'Everyone who has interacted with the exam bot')}
+    <div class="row" id="bulkBar" hidden>
+      <strong id="bulkCount"></strong>
+      <button class="btn btn-ghost danger" id="bulkDeleteBtn">Delete selected</button>
+      <button class="btn btn-ghost" id="bulkClearBtn">Clear</button>
+    </div>
     <div class="card table-card reveal">
       <table>
-        <thead><tr><th>Name</th><th>Phone</th><th>Exams</th><th>Attempts</th><th>First seen</th><th></th></tr></thead>
+        <thead><tr>
+          <th class="pick"><label class="row"><input type="checkbox" id="pickAll" aria-label="Select every student"></label></th>
+          <th>Name</th><th>Phone</th><th>Exams</th><th>Attempts</th><th>First seen</th><th></th>
+        </tr></thead>
         <tbody>
-          ${students.length === 0 ? `<tr><td colspan="6"><div class="empty-state">${I.empty}<p>No students yet.</p></div></td></tr>` : ''}
+          ${students.length === 0 ? `<tr><td colspan="7"><div class="empty-state">${I.empty}<p>No students yet.</p></div></td></tr>` : ''}
           ${students.map((s) => `<tr>
-            <td>${esc(s.name || '—')}</td>
+            <td class="pick"><label class="row"><input type="checkbox" class="stu-pick" value="${s.id}" aria-label="Select ${esc(s.name || s.phone)}"></label></td>
+            <td class="stu-name">${esc(s.name || '—')}</td>
             <td>${esc(s.phone)}</td>
             <td>${s.exams}</td>
             <td>${s.attempts}</td>
@@ -2115,6 +2124,56 @@ async function renderStudents() {
       </table>
     </div>`;
   observeReveals();
+  wireStudentSelection();
+}
+
+// Selection state lives only in the DOM, so it resets whenever the list
+// re-renders. Keeping it there means a bulk delete and a single delete converge
+// on the same renderStudents() refresh with no cache to invalidate by hand.
+function wireStudentSelection() {
+  const picks = [...document.querySelectorAll('.stu-pick')];
+  const all = document.getElementById('pickAll');
+  const bar = document.getElementById('bulkBar');
+  const count = document.getElementById('bulkCount');
+  if (!bar) return;
+
+  const sync = () => {
+    const chosen = picks.filter((el) => el.checked);
+    bar.hidden = chosen.length === 0;
+    count.textContent = `${chosen.length} selected`;
+    all.checked = picks.length > 0 && chosen.length === picks.length;
+    all.indeterminate = chosen.length > 0 && chosen.length < picks.length;
+  };
+
+  all.addEventListener('change', () => {
+    picks.forEach((el) => { el.checked = all.checked; });
+    sync();
+  });
+  picks.forEach((el) => el.addEventListener('change', sync));
+  document.getElementById('bulkClearBtn').addEventListener('click', () => {
+    picks.forEach((el) => { el.checked = false; });
+    sync();
+  });
+  document.getElementById('bulkDeleteBtn').addEventListener('click', bulkDeleteStudents);
+  sync();
+}
+
+async function bulkDeleteStudents() {
+  const ids = [...document.querySelectorAll('.stu-pick:checked')].map((el) => Number(el.value));
+  if (ids.length === 0) return;
+  const many = `${ids.length} selected student${ids.length === 1 ? '' : 's'}`;
+  if (!confirm(`Delete ${many}? This permanently removes their exam sessions and answers.`)) return;
+  const btn = document.getElementById('bulkDeleteBtn');
+  btn.disabled = true;
+  try {
+    const { deleted } = await api('/api/students/bulk-delete', { method: 'POST', body: { ids } });
+    invalidateCache('/api/students');
+    toast(`${deleted} student${deleted === 1 ? '' : 's'} deleted`);
+    renderStudents();
+  } catch (e) {
+    toast(e.message, true);
+    btn.disabled = false;
+  }
 }
 
 async function renameStudent(id) {
@@ -2126,7 +2185,9 @@ async function renameStudent(id) {
 }
 
 async function deleteStudent(id, btn) {
-  const name = btn.closest('tr').children[0].textContent.trim();
+  // Read the name cell by class, not by column index: the bulk-select column now
+  // sits first, and a positional lookup would silently return an empty string.
+  const name = btn.closest('tr').querySelector('.stu-name').textContent.trim();
   if (!confirm(`Delete ${name || 'this student'}? This permanently removes their exam sessions and answers.`)) return;
   await api(`/api/students/${id}`, { method: 'DELETE' });
   invalidateCache('/api/students');
