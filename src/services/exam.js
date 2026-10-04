@@ -1001,7 +1001,7 @@ async function maybeStartSession(student) {
     const questionCount =
       getSessionQuestionCount(existing.id) ||
       db.prepare('SELECT COUNT(*) c FROM questions WHERE exam_id = ?').get(exam.id).c;
-await wa.sendText(student.phone, formatExamIntro(exam, questionCount, { started: true }));
+    await wa.sendText(student.phone, formatExamIntro(exam, questionCount, { started: true }));
     await sendQuestionTo(existing, student);
     return { ok: true, reason: 'resumed' };
   }
