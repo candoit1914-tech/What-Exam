@@ -440,7 +440,10 @@ function formatQuestion(exam, question, qCount, body, session) {
 
 /** mm:ss left on the clock, computed from the session start + exam duration. */
 function timeRemaining(session, exam) {
-  const startedAtStr = String(session.started_at || '');
+  // Reachable only if a question is ever delivered before the student engages.
+  // new Date('') is NaN, and "Time remaining: NaN:NaN" must never ship.
+  if (!session || !session.started_at) return '—';
+  const startedAtStr = String(session.started_at);
   const utcStr = /[Zz]|[+-]\d{2}:\d{2}$/.test(startedAtStr) ? startedAtStr : startedAtStr + 'Z';
   const ms = new Date(utcStr).getTime() + exam.duration_minutes * 60000 - Date.now();
   const total = Math.max(0, Math.round(ms / 1000));
@@ -640,7 +643,7 @@ function examTypeOf(examId) {
   return 'Mixed';
 }
 
-function formatExamIntro(exam, questionCount) {
+function formatExamIntro(exam, questionCount, { started = false } = {}) {
   const type = examTypeOf(exam.id);
   const steps = [
     'Questions arrive one at a time.',
@@ -648,9 +651,18 @@ function formatExamIntro(exam, questionCount) {
       ? 'Type your full answer to each question as a single message. Theory answers are marked at the end of the exam.'
       : 'After each question, its answer options are sent in a separate message; reply with the letter of your answer (e.g. *A*).',
     'Answers are locked once you send them.',
-    'Your timer starts now. The exam ends automatically when time is up.',
+    started
+      ? 'Your timer starts now. The exam ends automatically when time is up.'
+      : 'Reply START to begin — your timer starts the moment you reply.',
     'Copying AI-written answers (e.g. ChatGPT, Gemini) is cheating — such answers are detected and earn 0 marks.',
   ];
+  // The START prompt only makes sense before the student has begun. Telling
+  // someone who has just started to reply START, or that their exam "begins
+  // instantly" the moment an admin presses Send, is the confusion this split
+  // exists to remove.
+  const startLine = started
+    ? ''
+    : 'Reply *START* to this chat to open it.\n\n';
   const instructions = steps.map((s, i) => `${i + 1}. ${s}`).join('\n');
   return (
     `*${String(exam.title).toUpperCase()}*\n\n` +
@@ -659,7 +671,7 @@ function formatExamIntro(exam, questionCount) {
     `Duration: *${exam.duration_minutes} minute${exam.duration_minutes === 1 ? '' : 's'}*\n` +
     `Number of questions: *${questionCount}*\n` +
     `Pass mark: *${exam.pass_percentage}%*\n\n` +
-    `Reply *START* to this chat to open it - your exam begins instantly.\n\n` +
+    startLine +
     `*INSTRUCTIONS*\n${instructions}`
   );
 }
@@ -919,7 +931,10 @@ async function handleInbound(phone, body, meta = {}) {
   const invited = db.prepare("SELECT id FROM message_outbox WHERE session_id=? AND kind='intro' AND state='sent'").get(session.id);
   const questionSent = db.prepare("SELECT id FROM message_outbox WHERE session_id=? AND kind='question' AND state='sent'").get(session.id);
   if (invited && !questionSent && sessionHasNoAnswers(session.id)) {
-    db.prepare("UPDATE sessions SET started_at=datetime('now') WHERE id=?").run(session.id);
+    // Stored in the same ISO-8601-Z form as every other write to started_at, so
+    // the column holds one format rather than a mix of SQLite and JS datetimes.
+    const now = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+    db.prepare('UPDATE sessions SET started_at = ? WHERE id=?').run(now, session.id);
     await sendQuestionTo(session, student);
     return { started: true, ok: true, reason: 'started' };
   }
@@ -986,7 +1001,7 @@ async function maybeStartSession(student) {
     const questionCount =
       getSessionQuestionCount(existing.id) ||
       db.prepare('SELECT COUNT(*) c FROM questions WHERE exam_id = ?').get(exam.id).c;
-    await wa.sendText(student.phone, formatExamIntro(exam, questionCount));
+await wa.sendText(student.phone, formatExamIntro(exam, questionCount, { started: true }));
     await sendQuestionTo(existing, student);
     return { ok: true, reason: 'resumed' };
   }
