@@ -1721,7 +1721,7 @@ async function sendIntro(session, student, exam, count, template) {
       await wa.sendText(student.phone, formatExamIntro(exam, count));
     }
     outbox.markSent(entry.id);
-    recordAcceptance(session.exam_id, session.student_id);
+    recordAcceptance(session);
   } catch (error) {
     outbox.markFailed(entry.id, error, Math.max(1, config.exam.sendRetries));
     throw error;
@@ -1770,9 +1770,16 @@ async function sendExamToStudent(exam, student, questionCount, template, report)
 
     if (fresh) {
       const attemptCount = getSessionQuestionCount(session.id) || questionCount;
+      // The clock does not run from the send. createSession/restartSession
+      // already left started_at NULL; re-assert it so a session carried over
+      // from an older code path cannot resume a stale countdown.
       db.prepare('UPDATE sessions SET started_at=NULL WHERE id=?').run(session.id);
       await sendIntro(session, student, exam, attemptCount, template);
-      if (template) { report.sent++; return; }
+      // Only the invite goes out now. Question 1 is delivered by handleInbound
+      // when the student actually replies, so that starting the clock and
+      // receiving the paper are the same event rather than two separate ones.
+      report.sent++;
+      return;
     }
     await sendQuestionTo(session, student);
     report.sent++;
@@ -1842,6 +1849,7 @@ module.exports = {
   topUpPool,
   nextInSequence,
   deadline,
+  timeRemaining,
   markAllPendingTheory,
   drainSession,
   formatQuestion,

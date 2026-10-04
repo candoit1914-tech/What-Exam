@@ -43,6 +43,45 @@ test('a restarted attempt also waits for the student', () => {
   assert.equal(db.prepare('SELECT started_at FROM sessions WHERE id=?').get(next.id).started_at, null);
 });
 
+test('sending an exam delivers the invite only, not a question', async () => {
+  const { eid } = fixture();
+  const sent = [];
+  const original = wa.sendText;
+  wa.sendText = async (phone, text) => { sent.push(text); return { messages: [{ id: 'mock' }] }; };
+  try {
+    const report = await exam.sendExamToRecipients(eid);
+    assert.equal(report.sent, 1);
+    assert.equal(report.failed, 0);
+    const joined = sent.join('\n');
+    assert.ok(joined.includes('INSTRUCTIONS'), 'the invite must be delivered');
+    assert.ok(!joined.includes('QUESTION 1'), 'no question may be pushed at send time');
+    assert.ok(!joined.includes('Time remaining'), 'no countdown before the student begins');
+  } finally { wa.sendText = original; }
+});
+
+test('the first student reply starts the clock and delivers question 1', async () => {
+  const { eid, student } = fixture();
+  const sent = [];
+  const original = wa.sendText;
+  wa.sendText = async (phone, text) => { sent.push(text); return { messages: [{ id: 'mock' }] }; };
+  try {
+    await exam.sendExamToRecipients(eid);
+    sent.length = 0;
+    await exam.handleInbound(student.phone, 'START');
+    const row = db.prepare('SELECT started_at FROM sessions WHERE exam_id=?').get(eid);
+    assert.ok(row.started_at, 'the clock must start on first engagement');
+    assert.ok(sent.join('\n').includes('QUESTION 1'), 'question 1 must arrive on the reply');
+  } finally { wa.sendText = original; }
+});
+
+test('an unstarted session never emits a NaN countdown', () => {
+  const { eid, sid } = fixture();
+  const session = exam.createSession(eid, sid);
+  const examRow = db.prepare('SELECT * FROM exams WHERE id=?').get(eid);
+  const text = exam.timeRemaining(session, examRow);
+  assert.ok(!/NaN/.test(text), `timer text was ${JSON.stringify(text)}`);
+});
+
 test('an unstarted session has a far-future deadline, not an invalid one', () => {
   const { eid, sid } = fixture();
   const session = exam.createSession(eid, sid);
