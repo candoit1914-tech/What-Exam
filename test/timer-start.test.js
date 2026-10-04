@@ -101,9 +101,11 @@ function runAgainstOldSchemaDb(dbFile) {
   return JSON.parse(line);
 }
 
-test('an existing database is rebuilt so started_at can be null', () => {
-  const old = path.join(tmp, 'existing.db');
-  const seed = new DatabaseSync(old);
+// Builds a database that predates the nullable column. `seedRows` adds the rows
+// the first test needs to prove nothing is lost; the idempotency test leaves the
+// sessions table empty so a second rebuild has no row to duplicate.
+function seedLegacyDb(dbFile, { withRows }) {
+  const seed = new DatabaseSync(dbFile);
   seed.exec('PRAGMA foreign_keys = OFF');
   seed.exec(`CREATE TABLE exams (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, duration_minutes INTEGER, status TEXT)`);
   seed.exec(`CREATE TABLE students (id INTEGER PRIMARY KEY AUTOINCREMENT, phone TEXT NOT NULL, name TEXT)`);
@@ -129,9 +131,16 @@ test('an existing database is rebuilt so started_at can be null', () => {
   seed.exec("INSERT INTO students(id,phone,name) VALUES (1,'233legacy00','Legacy Student')");
   seed.exec("INSERT INTO exam_recipients(exam_id,student_id) VALUES (1,1)");
   seed.exec("INSERT INTO questions(id,exam_id,q_order,type,text) VALUES (1,1,1,'objective','Q1')");
-  seed.exec("INSERT INTO sessions(id,exam_id,student_id,started_at) VALUES (1,1,1,'2026-01-01 09:00:00')");
-  seed.exec("INSERT INTO answers(session_id,question_id,q_order,answer_text) VALUES (1,1,1,'A')");
+  if (withRows) {
+    seed.exec("INSERT INTO sessions(id,exam_id,student_id,started_at) VALUES (1,1,1,'2026-01-01 09:00:00')");
+    seed.exec("INSERT INTO answers(session_id,question_id,q_order,answer_text) VALUES (1,1,1,'A')");
+  }
   seed.close();
+}
+
+test('an existing database is rebuilt so started_at can be null', () => {
+  const old = path.join(tmp, 'existing.db');
+  seedLegacyDb(old, { withRows: true });
 
   const result = runAgainstOldSchemaDb(old);
 
@@ -149,31 +158,7 @@ test('an existing database is rebuilt so started_at can be null', () => {
 
 test('the started_at migration does not run twice', () => {
   const old = path.join(tmp, 'idempotent.db');
-  const seed = new DatabaseSync(old);
-  seed.exec('PRAGMA foreign_keys = OFF');
-  seed.exec(`CREATE TABLE exams (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, duration_minutes INTEGER, status TEXT)`);
-  seed.exec(`CREATE TABLE students (id INTEGER PRIMARY KEY AUTOINCREMENT, phone TEXT NOT NULL, name TEXT)`);
-  seed.exec(`CREATE TABLE sessions (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    exam_id         INTEGER NOT NULL REFERENCES exams(id) ON DELETE CASCADE,
-    student_id      INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
-    current_q_order INTEGER NOT NULL DEFAULT 1,
-    status          TEXT NOT NULL DEFAULT 'in_progress',
-    started_at      TEXT NOT NULL DEFAULT (datetime('now')),
-    last_active_at  TEXT NOT NULL DEFAULT (datetime('now')),
-    ended_at        TEXT,
-    final_score     REAL DEFAULT 0,
-    final_percentage REAL DEFAULT 0,
-    passed          INTEGER DEFAULT 0,
-    retry_count     INTEGER NOT NULL DEFAULT 0,
-    attempt_no      INTEGER NOT NULL DEFAULT 1
-  )`);
-  seed.exec('CREATE TABLE questions (id INTEGER PRIMARY KEY AUTOINCREMENT, exam_id INTEGER, q_order INTEGER, type TEXT, text TEXT)');
-  seed.exec(`CREATE TABLE answers (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, question_id INTEGER, q_order INTEGER, answer_text TEXT)`);
-  seed.exec(`CREATE TABLE exam_recipients (exam_id INTEGER NOT NULL REFERENCES exams(id) ON DELETE CASCADE, student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE)`);
-  seed.exec("INSERT INTO exams(id,title,duration_minutes,status) VALUES (1,'Legacy',30,'live')");
-  seed.exec("INSERT INTO students(id,phone,name) VALUES (1,'233legacy00','Legacy Student')");
-  seed.close();
+  seedLegacyDb(old, { withRows: false });
 
   const first = runAgainstOldSchemaDb(old);
   const second = runAgainstOldSchemaDb(old);
