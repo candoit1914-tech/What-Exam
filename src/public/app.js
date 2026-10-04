@@ -662,16 +662,21 @@ async function renderTab() {
       ? `<div class="empty-state">${I.empty}<p>No questions yet.</p></div>`
       : questions.map((q) => schemeHTML(q, id)).join('');
   } else if (tab === 'recipients') {
-    // Build participation map: student_id -> session info
-    const participatedMap = {};
+    // A student can hold several sessions — a resend restarts a lapsed exam
+    // rather than editing the old row — so collapse to one representative per
+    // student. A started attempt outranks an untouched invite, and a finished
+    // one outranks an in-progress one.
+    const sessionMap = {};
+    const rank = (s) => (s.started_at ? (s.status === 'completed' ? 2 : 1) : 0);
     for (const s of results) {
-      if (s.student_id && s.started_at) {
-        participatedMap[s.student_id] = s;
-      }
+      if (!s.student_id) continue;
+      const cur = sessionMap[s.student_id];
+      if (!cur || rank(s) > rank(cur)) sessionMap[s.student_id] = s;
     }
+    const rows = recipients.map((r) => ({ r, sess: sessionMap[r.id] || null }));
+    const tally = { not_sent: 0, invited: 0, in_progress: 0, finished: 0 };
+    for (const row of rows) tally[recipientState(row.r, row.sess).key]++;
     const totalR = recipients.length;
-    const participated = recipients.filter((r) => participatedMap[r.id]);
-    const notParticipated = recipients.filter((r) => !participatedMap[r.id]);
     bodyEl.innerHTML = `
       <div class="card">
         <h3 style="margin-bottom:4px">ADD A <span class="gr">STUDENT</span></h3>
@@ -690,6 +695,7 @@ async function renderTab() {
         <div class="row" style="margin-top:12px">
           <button class="btn btn-primary" onclick="addRecipients(${id})">Add Recipients</button>
           <button class="btn btn-ghost" onclick="sendExam(${id})">${I.wa} Send Exam to Recipients</button>
+          <button class="btn btn-ghost" onclick="resendExamToNotStarted(${id}, this)" ${exam.status !== 'live' ? 'disabled' : ''}>Resend to not started</button>
         </div>
         <div id="recipientReview" hidden></div>
       </div>
@@ -698,26 +704,25 @@ async function renderTab() {
         <h3 style="margin-bottom:4px">PARTICIPATION <span class="gr">SUMMARY</span></h3>
         <div class="row" style="margin-top:10px;gap:16px;flex-wrap:wrap">
           <div><b>${totalR}</b> <span class="muted">Total recipients</span></div>
-          <div><b style="color:var(--green,#10b981)">${participated.length}</b> <span class="muted">Participated</span></div>
-          <div><b style="color:var(--red,#ef4444)">${notParticipated.length}</b> <span class="muted">Did not participate</span></div>
+          <div><b>${tally.finished}</b> <span class="muted">Finished</span></div>
+          <div><b style="color:var(--green,#10b981)">${tally.in_progress}</b> <span class="muted">In progress</span></div>
+          <div><b>${tally.invited}</b> <span class="muted">Invited, not started</span></div>
+          <div><b style="color:var(--muted,#64748b)">${tally.not_sent}</b> <span class="muted">Not sent</span></div>
         </div>
       </div>` : ''}
       <div class="card table-card" style="margin-top:14px"><table>
         <thead><tr><th>Name</th><th>Phone</th><th>Sent</th><th>Status</th><th></th></tr></thead>
         <tbody>
-          ${recipients.length === 0 ? `<tr><td colspan="5"><div class="empty-state">${I.empty}<p>No recipients yet.</p></div></td></tr>` : ''}
-          ${recipients.map((r) => {
-            const sess = participatedMap[r.id];
-            const status = sess
-              ? `<span class="pass">${sess.status === 'completed' ? 'Finished' : 'In progress'}</span>`
-              : (r.sent_at ? '<span class="fail">Not started</span>' : '<span class="muted">Not sent</span>');
+          ${rows.length === 0 ? `<tr><td colspan="5"><div class="empty-state">${I.empty}<p>No recipients yet.</p></div></td></tr>` : ''}
+          ${rows.map(({ r, sess }) => {
+            const state = recipientState(r, sess);
             const time = sess && sess.started_at ? sess.started_at : '';
             return `<tr>
               <td>${esc(r.name || '—')}</td>
               <td>${esc(r.phone)}</td>
               <td class="muted">${esc(r.sent_at || '—')}</td>
-              <td>${status} ${time ? `<span class="muted qmeta">(${esc(time)})</span>` : ''}</td>
-              <td><button class="small ghost danger" onclick="removeRecipient(${id}, ${r.id})">Remove</button></td>
+              <td><span class="${state.cls}">${state.label}</span> ${time ? `<span class="muted qmeta">(${esc(time)})</span>` : ''}</td>
+              <td><button class="small ghost" onclick="resendToStudent(${id}, ${r.id}, this)">Resend</button> <button class="small ghost danger" onclick="removeRecipient(${id}, ${r.id})">Remove</button></td>
             </tr>`;
           }).join('')}
         </tbody>
@@ -1655,7 +1660,7 @@ async function removeRecipient(id, sid) {
 }
 
 async function sendExam(id) {
-  if (!confirm('Send this exam to all recipients now? Sessions start immediately.')) return;
+  if (!confirm('Send this exam to all recipients now? Each student\'s timer starts when they first reply.')) return;
   const btn = event.currentTarget;
   btn.disabled = true;
   btn.textContent = 'Sending…';
@@ -1667,6 +1672,58 @@ async function sendExam(id) {
     toast(errList ? `${parts.join(', ')}. ${errList}` : parts.join(', ') + '.');
     renderExam(id);
   } catch (e) { toast(e.message, true); btn.disabled = false; btn.textContent = 'Send Exam to Recipients'; }
+}
+
+// ── Resend ─────────────────────────────────────────────────────
+
+// The four states a recipient can be in. Under start-on-engagement the clock is
+// only running once the student has actually replied, so "invited" is a normal
+// resting state rather than the red failure "did not participate" used to imply.
+const RECIPIENT_STATES = {
+  not_sent:    { key: 'not_sent',    label: 'Not sent',    cls: 'muted' },
+  invited:     { key: 'invited',     label: 'Invited',     cls: 'qmeta' },
+  in_progress: { key: 'in_progress', label: 'In progress', cls: 'pass' },
+  finished:    { key: 'finished',    label: 'Finished',    cls: 'pass' },
+};
+
+function recipientState(r, sess) {
+  if (sess && sess.status === 'completed') return RECIPIENT_STATES.finished;
+  if (sess && sess.started_at) return RECIPIENT_STATES.in_progress;
+  // A session row exists as soon as the invite is created, and sent_at covers
+  // the legacy case where a recipient was invited before sessions existed.
+  if (sess || r.sent_at) return RECIPIENT_STATES.invited;
+  return RECIPIENT_STATES.not_sent;
+}
+
+// Both resend buttons share one call: with no studentIds the server targets
+// everyone who has not started, which is exactly the "Resend to not started"
+// button's promise.
+async function postResend(id, studentIds, btn, idleLabel) {
+  if (btn) { btn.disabled = true; btn.textContent = 'Sending.'; }
+  try {
+    const body = studentIds ? { studentIds } : undefined;
+    const res = await api(`/api/exams/${id}/resend`, { method: 'POST', body });
+    invalidateCache(`/api/exams/${id}`);
+    const errList = (res.errors || []).map((e) => `${e.phone}: ${e.error}`).join(' | ');
+    const parts = [`Resent ${res.sent}`];
+    if (res.resumed) parts.push(`nudged ${res.resumed} in progress`);
+    if (res.skipped) parts.push(`skipped ${res.skipped} finished`);
+    parts.push(`failed ${res.failed}`);
+    toast(errList ? `${parts.join(', ')}. ${errList}` : parts.join(', ') + '.');
+    renderExam(id);
+  } catch (e) {
+    toast(e.message, true);
+    if (btn) { btn.disabled = false; btn.textContent = idleLabel; }
+  }
+}
+
+function resendExamToNotStarted(id, btn) {
+  if (!confirm('Resend this exam to everyone who has not started yet? Their timer starts when they first reply.')) return;
+  return postResend(id, null, btn, 'Resend to not started');
+}
+
+function resendToStudent(id, studentId, btn) {
+  return postResend(id, [studentId], btn, 'Resend');
 }
 
 // ── Exam actions ─────────────────────────────────────────────────

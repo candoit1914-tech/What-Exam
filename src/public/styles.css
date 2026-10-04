@@ -1019,6 +1019,9 @@ button.danger, .btn.danger { color: var(--red); }
 .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 
 /* ── Tables ──────────────────────────────────────────────── */
+/* Any class that sets display (e.g. .row's flex) outranks the user-agent
+   [hidden] rule, which would leave hidden panels on screen. Restore it. */
+[hidden] { display: none !important; }
 .table-card { padding: 8px; overflow: hidden; }
 /* Bulk-select column: one bare checkbox, centred, with no label padding. */
 .table-card th.pick, .table-card td.pick { width: 34px; padding-left: 8px; padding-right: 0; }
