@@ -1165,4 +1165,17 @@ router.post('/exams/:id/resend-all', asyncWrap(async (req, res) => {
   res.json(report);
 }));
 
+// Re-invite an exam. No studentIds targets everyone who has not started; an
+// explicit list targets exactly those students. Registered after the admin
+// auth guard, so it inherits admin auth.
+router.post('/exams/:id/resend', asyncWrap(async (req, res) => {
+  const exam = db.prepare('SELECT * FROM exams WHERE id = ?').get(req.params.id);
+  if (!exam) return res.status(404).json({ error: 'Exam not found' });
+  if (exam.status !== 'live' && exam.status !== 'published') {
+    return res.status(400).json({ error: 'Only a live exam can be resent.' });
+  }
+  const ids = req.body && Array.isArray(req.body.studentIds) ? req.body.studentIds : null;
+  res.json(await examService.resendExamToRecipients(req.params.id, ids));
+}));
+
 module.exports = router;

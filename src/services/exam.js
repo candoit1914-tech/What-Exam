@@ -1724,8 +1724,15 @@ async function mapLimit(items, limit, fn) {
 }
 
 /** Deliver (or nudge) the exam to one recipient, mutating `report`. */
-async function sendIntro(session, student, exam, count, template) {
+async function sendIntro(session, student, exam, count, template, { force = false } = {}) {
   const entry = outbox.enqueue({ sessionId: session.id, kind: 'intro', recipient: student.phone });
+  if (force && entry.state === 'sent') {
+    // Resending an invite the student never answered is the whole point of a
+    // resend, so the recorded-but-already-sent entry goes back in the queue
+    // instead of short-circuiting the send.
+    db.prepare("UPDATE message_outbox SET state='queued', error='', sent_at=NULL WHERE id=?").run(entry.id);
+    entry.state = 'queued';
+  }
   if (entry.state === 'sent') return;
   try {
     if (template) {
@@ -1756,6 +1763,14 @@ async function sendExamToStudent(exam, student, questionCount, template, report)
       session = restartSession(session);
       fresh = true;
     } else if (session.status === 'in_progress') {
+      // No start time means the invite went out and the student never replied.
+      // That is not a live attempt, so nudging them a question they have never
+      // seen would be wrong — re-deliver the invite and leave the clock alone.
+      if (!session.started_at) {
+        await sendIntro(session, student, exam, getSessionQuestionCount(session.id) || questionCount, template, { force: true });
+        report.sent++;
+        return;
+      }
       // A session whose timer already lapsed must restart, or the next
       // answer would be rejected by the deadline check.
       const startedAtStr = String(session.started_at || '');
@@ -1840,6 +1855,54 @@ async function sendExamToRecipients(examId) {
   return report;
 }
 
+/**
+ * Re-invite recipients. With no `studentIds` the target is every recipient who
+ * has no started attempt — the cohort that got the invite but never began, plus
+ * anyone whose send failed. An explicit list is honoured as given, so a
+ * per-student resend can also nudge somebody already mid-exam.
+ */
+async function resendExamToRecipients(examId, studentIds = null) {
+  const exam = db.prepare('SELECT * FROM exams WHERE id = ?').get(examId);
+  if (!exam) throw new Error('Exam not found');
+  const report = { sent: 0, failed: 0, skipped: 0, resumed: 0, errors: [] };
+  if (!['published', 'live'].includes(exam.status)) {
+    report.skipped = db
+      .prepare('SELECT COUNT(*) c FROM exam_recipients WHERE exam_id = ?')
+      .get(examId).c;
+    return report;
+  }
+
+  const unique = [...new Set(
+    (Array.isArray(studentIds) ? studentIds : [])
+      .map(Number)
+      .filter((v) => Number.isInteger(v) && v > 0)
+  )];
+  const placeholders = unique.map(() => '?').join(',');
+  const rows = unique.length
+    ? db.prepare(
+        `SELECT s.* FROM students s
+         JOIN exam_recipients r ON r.student_id = s.id
+         WHERE r.exam_id = ? AND s.id IN (${placeholders})`
+      ).all(examId, ...unique)
+    : db.prepare(
+        `SELECT s.* FROM students s
+         JOIN exam_recipients r ON r.student_id = s.id
+         WHERE r.exam_id = ?
+           AND NOT EXISTS (
+             SELECT 1 FROM sessions ss
+              WHERE ss.exam_id = r.exam_id AND ss.student_id = s.id
+                AND ss.started_at IS NOT NULL
+           )`
+      ).all(examId);
+
+  const questionCount = db.prepare('SELECT COUNT(*) c FROM questions WHERE exam_id = ?').get(examId).c;
+  const template = config.whatsapp.templateName;
+  await mapLimit(rows, config.exam.sendConcurrency, (student) =>
+    sendExamToStudent(exam, student, questionCount, template, report)
+  );
+  return report;
+}
+
 module.exports = {
   normalizePhone,
   splitRecipients,
@@ -1855,6 +1918,7 @@ module.exports = {
   finalizeStaleSessions,
   endExam,
   sendExamToRecipients,
+  resendExamToRecipients,
   sendQuestionTo,
   restartSession,
   getSessionQuestion,
