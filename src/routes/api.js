@@ -8,6 +8,7 @@ const marking = require('../services/marking');
 const pdf = require('../services/pdf');
 const pdfImport = require('../services/pdfImport');
 const examService = require('../services/exam');
+const studentsService = require('../services/students');
 const results = require('../services/results');
 const watermarkService = require('../services/watermark');
 const config = require('../config');
@@ -1145,6 +1146,16 @@ router.delete('/students/:id', (req, res) => {
   const info = db.prepare('DELETE FROM students WHERE id = ?').run(req.params.id);
   if (info.changes === 0) return res.status(404).json({ error: 'Student not found' });
   res.json({ ok: true });
+});
+
+// Bulk delete. Delegates to the same helper the cascade relies on, so bulk and
+// individual removal cannot drift apart in behaviour. Registered after the admin
+// auth guard; it cannot collide with DELETE /students/:id because Express
+// matches method and path together.
+router.post('/students/bulk-delete', (req, res) => {
+  const raw = (req.body && req.body.ids) || [];
+  if (!Array.isArray(raw)) return res.status(400).json({ error: 'ids must be an array of student ids' });
+  res.json({ deleted: studentsService.bulkDeleteStudents(raw) });
 });
 
 // ── Resend result ──────────────────────────────────────────────────────
