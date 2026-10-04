@@ -238,7 +238,10 @@ function createSession(examId, studentId) {
   let info;
   try {
     info = db
-      .prepare('INSERT INTO sessions (exam_id, student_id, attempt_no) VALUES (?, ?, ?)')
+      // started_at is written explicitly rather than left to a column default.
+      // A session exists from the moment the invite goes out, so its absence is
+      // what tells the timer not to run until the student actually replies.
+      .prepare('INSERT INTO sessions (exam_id, student_id, attempt_no, started_at) VALUES (?, ?, ?, NULL)')
       .run(examId, studentId, attemptsUsed(examId, studentId) + 1);
   } catch (err) {
     // Two simultaneous inbound messages raced. The partial unique index kept
@@ -694,7 +697,9 @@ function restartSession(session) {
     db.prepare("UPDATE sessions SET status='abandoned' WHERE id = ?").run(current.id);
   }
   const info = db
-    .prepare('INSERT INTO sessions (exam_id, student_id, attempt_no) VALUES (?, ?, ?)')
+    // Same reasoning as createSession: a restart is a fresh invite, so the new
+    // attempt must never inherit a running clock from the attempt it replaces.
+    .prepare('INSERT INTO sessions (exam_id, student_id, attempt_no, started_at) VALUES (?, ?, ?, NULL)')
     .run(current.exam_id, current.student_id, used + 1);
   const fresh = db.prepare('SELECT * FROM sessions WHERE id = ?').get(info.lastInsertRowid);
   drawSessionQuestions(fresh.id, fresh.exam_id);

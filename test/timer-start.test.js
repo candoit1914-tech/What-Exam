@@ -34,6 +34,15 @@ test('a new session has no start time, so the clock is not running yet', () => {
   assert.equal(row.started_at, null);
 });
 
+test('a restarted attempt also waits for the student', () => {
+  const { eid, sid } = fixture();
+  const first = exam.createSession(eid, sid);
+  db.prepare("UPDATE sessions SET started_at=datetime('now') WHERE id=?").run(first.id);
+  db.prepare("UPDATE sessions SET status='completed' WHERE id=?").run(first.id);
+  const next = exam.restartSession(first);
+  assert.equal(db.prepare('SELECT started_at FROM sessions WHERE id=?').get(next.id).started_at, null);
+});
+
 test('an unstarted session has a far-future deadline, not an invalid one', () => {
   const { eid, sid } = fixture();
   const session = exam.createSession(eid, sid);
