@@ -72,7 +72,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   student_id      INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
   current_q_order INTEGER NOT NULL DEFAULT 1,
   status          TEXT NOT NULL DEFAULT 'in_progress', -- in_progress|completed|expired|abandoned
-  started_at      TEXT NOT NULL DEFAULT (datetime('now')),
+  started_at      TEXT,
   last_active_at  TEXT NOT NULL DEFAULT (datetime('now')),
   ended_at        TEXT,
   final_score     REAL DEFAULT 0,
@@ -271,7 +271,7 @@ if (sessionsDdl && /UNIQUE\s*\(\s*exam_id\s*,\s*student_id\s*\)/i.test(sessionsD
         student_id      INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
         current_q_order INTEGER NOT NULL DEFAULT 1,
         status          TEXT NOT NULL DEFAULT 'in_progress',
-        started_at      TEXT NOT NULL DEFAULT (datetime('now')),
+        started_at      TEXT,
         last_active_at  TEXT NOT NULL DEFAULT (datetime('now')),
         ended_at        TEXT,
         final_score     REAL DEFAULT 0,
@@ -292,6 +292,59 @@ if (sessionsDdl && /UNIQUE\s*\(\s*exam_id\s*,\s*student_id\s*\)/i.test(sessionsD
       COMMIT;
     `);
     console.log('Migrated sessions table (removed unique exam/student constraint for attempts).');
+  } finally {
+    db.exec('PRAGMA foreign_keys = ON');
+  }
+}
+
+// Migration: started_at was NOT NULL DEFAULT (datetime('now')), so the write
+// that parks an invited-but-unstarted session (started_at = NULL) always threw.
+// A session that exists without a start time is the normal state between
+// "invite sent" and "student replied", so the column has to allow it. SQLite
+// cannot relax NOT NULL in place, so the table is rebuilt. This must stay
+// before the attempt_no backfill and the idx_sessions_active creation below, so
+// both operate on the rebuilt table.
+const sessionsStartedDdl = db
+  .prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='sessions'")
+  .get();
+if (sessionsStartedDdl && /started_at\s+TEXT\s+NOT\s+NULL/i.test(sessionsStartedDdl.sql)) {
+  db.exec('PRAGMA foreign_keys = OFF');
+  try {
+    db.exec(`
+      BEGIN;
+      CREATE TABLE sessions_nullable_start (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        exam_id         INTEGER NOT NULL REFERENCES exams(id) ON DELETE CASCADE,
+        student_id      INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+        current_q_order INTEGER NOT NULL DEFAULT 1,
+        status          TEXT NOT NULL DEFAULT 'in_progress',
+        started_at      TEXT,
+        last_active_at  TEXT NOT NULL DEFAULT (datetime('now')),
+        ended_at        TEXT,
+        final_score     REAL DEFAULT 0,
+        final_percentage REAL DEFAULT 0,
+        passed          INTEGER DEFAULT 0,
+        retry_count     INTEGER NOT NULL DEFAULT 0,
+        attempt_no      INTEGER NOT NULL DEFAULT 1
+      );
+      INSERT INTO sessions_nullable_start
+        (id, exam_id, student_id, current_q_order, status, started_at, last_active_at,
+         ended_at, final_score, final_percentage, passed, retry_count, attempt_no)
+      SELECT
+        id, exam_id, student_id, current_q_order, status, started_at, last_active_at,
+        ended_at, final_score, final_percentage, passed, COALESCE(retry_count, 0), attempt_no
+      FROM sessions;
+      DROP TABLE sessions;
+      ALTER TABLE sessions_nullable_start RENAME TO sessions;
+      COMMIT;
+    `);
+    // Re-created because the DROP above took them with it. idx_sessions_active
+    // is not listed here because it is created further down, after this
+    // migration has run.
+    db.exec('CREATE INDEX IF NOT EXISTS idx_sessions_exam ON sessions(exam_id)');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_sessions_exam_student ON sessions(exam_id, student_id)');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status)');
+    console.log('Migrated sessions: started_at is now nullable.');
   } finally {
     db.exec('PRAGMA foreign_keys = ON');
   }
