@@ -303,6 +303,94 @@ test('computePaperTotal falls back to every drawn question when none were droppe
   assert.equal(selection.computePaperTotal(sid.id), 10);
 });
 
+// ── Task 3: drawing and ordering ───────────────────────────────────────
+
+function order(eid) {
+  const sid = examSvc.createSession(eid, 1);
+  return examSvc.sessionQuestionSequence(db.prepare('SELECT * FROM sessions WHERE id=?').get(sid.id))
+    .map((q) => q.text);
+}
+
+test('an exam with no rules keeps the objective-first order', () => {
+  const eid = paperExam([
+    { type: 'theory' },
+    { type: 'objective' },
+    { type: 'theory' },
+  ]);
+  // paperExam writes text as Q<n>; rename so the assertion is readable.
+  db.prepare("UPDATE questions SET text='T1' WHERE exam_id=? AND q_order=1").run(eid);
+  db.prepare("UPDATE questions SET text='O1' WHERE exam_id=? AND q_order=2").run(eid);
+  db.prepare("UPDATE questions SET text='T2' WHERE exam_id=? AND q_order=3").run(eid);
+  assert.deepEqual(order(eid), ['O1', 'T1', 'T2'], 'unchanged behaviour for quota-free exams');
+});
+
+test('a selective exam orders by section, then paper order within it', () => {
+  const eid = paperExam([
+    { section: 'a' }, { section: 'a' },
+    { section: 'b', compulsory: false }, { section: 'b', compulsory: false },
+  ]);
+  rule(eid, 'b', 'SECTION B', 1);
+  db.prepare('UPDATE questions SET is_compulsory=0 WHERE exam_id=? AND section_key=?').run(eid, 'a');
+  const seq = order(eid);
+  const sectionA = seq.filter((t) => t === 'Q1' || t === 'Q2');
+  assert.deepEqual(sectionA, ['Q1', 'Q2'], 'section A stays in paper order');
+});
+
+test('only selected questions reach the sequence', () => {
+  const eid = paperExam([
+    { section: 'b', compulsory: true },
+    { section: 'b', compulsory: false },
+    { section: 'b', compulsory: false },
+  ]);
+  rule(eid, 'b', 'SECTION B', 1);
+  const sid = examSvc.createSession(eid, 1);
+  const pool = poolOf(sid.id, 'b');
+  selection.applySelection(sid.id, 'b', [pool[0]]);
+  const seq = examSvc.sessionQuestionSequence(db.prepare('SELECT * FROM sessions WHERE id=?').get(sid.id));
+  assert.equal(seq.length, 2, 'compulsory + one chosen');
+});
+
+test('a session records its paper total the moment it is created', () => {
+  const eid = paperExam([{ marks: 3 }, { marks: 7 }]);
+  const sid = examSvc.createSession(eid, 1);
+  const row = db.prepare('SELECT paper_total FROM sessions WHERE id=?').get(sid.id);
+  assert.equal(row.paper_total, 10);
+});
+
+test('topUpPool copies the selection columns into the pool', () => {
+  const eid = paperExam([
+    { section: 'b', compulsory: false, marks: 6 },
+  ]);
+  rule(eid, 'b', 'SECTION B', 1);
+  db.prepare('DELETE FROM question_pool WHERE exam_id = ?').run(eid);
+  examSvc.createSession(eid, 1);
+  const pooled = db.prepare('SELECT * FROM question_pool WHERE exam_id=?').all(eid);
+  assert.equal(pooled.length, 1);
+  assert.equal(pooled[0].is_compulsory, 0, 'the pool copy must keep compulsory = 0');
+  assert.equal(pooled[0].section_key, 'b');
+});
+
+test('nextInSequence steps over a question the student deselected', () => {
+  const eid = paperExam([
+    { section: 'b', compulsory: true },
+    { section: 'b', compulsory: false },
+    { section: 'b', compulsory: false },
+    { section: 'b', compulsory: false },
+  ]);
+  rule(eid, 'b', 'SECTION B', 1);
+  const sid = examSvc.createSession(eid, 1);
+  const pool = poolOf(sid.id, 'b');
+  // Keep only the first optional; the rest are deselected. A question id that is
+  // not in the sequence drives the q_order + 1 fallback, which is the path that
+  // would otherwise hand back a question the student explicitly rejected.
+  selection.applySelection(sid.id, 'b', [pool[0]]);
+  const session = db.prepare('SELECT * FROM sessions WHERE id=?').get(sid.id);
+  assert.equal(selection.sessionPlan(sid.id)[0].quota, 1);
+
+  const next = examSvc.nextInSequence(session, { id: -1, q_order: pool[0] });
+  assert.equal(next, null, `q_order ${pool[0] + 1} was deselected, so there is nothing after it`);
+});
+
 test('clearing the rules deletes them all', () => {
   const eid = db.prepare("INSERT INTO exams(title,duration_minutes,status) VALUES ('Clear',30,'live')").run().lastInsertRowid;
   db.prepare(

@@ -9,6 +9,9 @@ const certificate = require('./certificate');
 const ai = require('./ai');
 const ocr = require('./ocr');
 const outbox = require('./outbox');
+// selection.js requires only ../db, so this edge is not circular. Never require
+// ./exam back from selection.js — exam is the caller, not the callee.
+const selection = require('./selection');
 const { stripSourceWatermarks } = require('./textClean');
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -271,7 +274,7 @@ function drawSessionQuestions(sessionId, examId) {
   if (pool.length < n) topUpPool(examId, pool, n);
   // Sort pool questions: objective first, then theory, maintaining original order within each type
   // Deduplicate by question text to prevent the same question appearing twice in one exam
-  const poolRows = db.prepare('SELECT id, type, text FROM question_pool WHERE exam_id = ? ORDER BY id').all(examId);
+  const poolRows = db.prepare('SELECT id, type, text, is_compulsory, section_key FROM question_pool WHERE exam_id = ? ORDER BY id').all(examId);
   const seenTexts = new Set();
   const uniqueRows = [];
   for (const row of poolRows) {
@@ -280,17 +283,39 @@ function drawSessionQuestions(sessionId, examId) {
     if (key) seenTexts.add(key);
     uniqueRows.push(row);
   }
-  // Hard sort: ALL objective questions first, then ALL theory questions.
-  // Within each type, preserve pool insertion order (by id).
-  uniqueRows.sort((a, b) => {
-    if (a.type !== b.type) return a.type === 'objective' ? -1 : 1;
-    return (a.id || 0) - (b.id || 0);
-  });
+  // Papers without a quota keep today's objective-first ordering verbatim.
+  // Only a paper that actually asks the student to choose switches to
+  // section order, because grouping by section is the whole point.
+  const plan = selection.sectionPlan(examId);
+  const position = new Map(plan.map((s) => [s.section_key, s.position]));
+  if (plan.some((s) => s.quota > 0)) {
+    uniqueRows.sort((a, b) => {
+      const pa = position.has(a.section_key) ? position.get(a.section_key) : 9999;
+      const pb = position.has(b.section_key) ? position.get(b.section_key) : 9999;
+      return pa !== pb ? pa - pb : (a.id || 0) - (b.id || 0);
+    });
+  } else {
+    // Hard sort: ALL objective questions first, then ALL theory questions.
+    // Within each type, preserve pool insertion order (by id).
+    uniqueRows.sort((a, b) => {
+      if (a.type !== b.type) return a.type === 'objective' ? -1 : 1;
+      return (a.id || 0) - (b.id || 0);
+    });
+  }
   const chosen = uniqueRows.slice(0, n);
   const ins = db.prepare(
-    'INSERT INTO session_questions (session_id, question_id, q_order) VALUES (?,?,?)'
+    'INSERT INTO session_questions (session_id, question_id, q_order, is_selected, section_key) VALUES (?,?,?,?,?)'
   );
-  chosen.forEach((p, i) => ins.run(sessionId, p.id, i + 1));
+  // Every drawn question starts selected, INCLUDING the optional ones the student
+  // will get to pick from. They are only deselected once the student commits, in
+  // applySelection. Writing 0 here would hide the whole section from
+  // sessionQuestionSequence, which filters on is_selected, so the selector could
+  // never open and the student would be delivered the section unasked.
+  chosen.forEach((p, i) => {
+    ins.run(sessionId, p.id, i + 1, 1, p.section_key || '');
+  });
+  db.prepare('UPDATE sessions SET paper_total = ? WHERE id = ?')
+    .run(selection.computePaperTotal(sessionId), sessionId);
   return chosen.length;
 }
 
@@ -299,8 +324,8 @@ function topUpPool(examId, currentPool, target) {
   const inPool = new Set(currentPool.map((r) => String(r.text || '').trim()));
   const templates = db.prepare('SELECT * FROM questions WHERE exam_id = ? ORDER BY q_order').all(examId);
   const insertPool = db.prepare(
-    `INSERT INTO question_pool (exam_id, type, text, passage, options, correct_answer, marks, difficulty, learning_objective, explanation, scheme_json, source, image)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`
+    `INSERT INTO question_pool (exam_id, type, text, passage, options, correct_answer, marks, difficulty, learning_objective, explanation, scheme_json, source, image, is_compulsory, section_key)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
   );
   let added = 0;
   for (const t of templates) {
@@ -311,7 +336,8 @@ function topUpPool(examId, currentPool, target) {
     insertPool.run(
       examId, t.type, t.text, t.passage || '', t.options || null, t.correct_answer || null,
       t.marks, t.difficulty || 'medium', t.learning_objective || '', t.explanation || '',
-      scheme ? scheme.scheme : '', t.source || 'manual', t.image || ''
+      scheme ? scheme.scheme : '', t.source || 'manual', t.image || '',
+      t.is_compulsory == null ? 1 : t.is_compulsory, t.section_key || ''
     );
     inPool.add(text);
     added++;
@@ -351,7 +377,7 @@ function sessionQuestionSequence(session) {
   const s = db.prepare('SELECT exam_id FROM sessions WHERE id = ?').get(session.id);
   if (!s) return [];
   const drawn = db
-    .prepare('SELECT q_order, question_id FROM session_questions WHERE session_id = ? ORDER BY q_order')
+    .prepare('SELECT q_order, question_id, is_selected FROM session_questions WHERE session_id = ? ORDER BY q_order')
     .all(session.id);
   let questions;
   if (drawn.length) {
@@ -362,6 +388,10 @@ function sessionQuestionSequence(session) {
         if (row) {
           row._pool = true;
           row.q_order = m.q_order;
+          // is_selected lives on the snapshot, not on question_pool: it is this
+          // student's private choice. Two students drawn the same pool row can
+          // disagree about it, which is exactly why it cannot be a pool column.
+          row.is_selected = m.is_selected;
         }
         return row;
       })
@@ -369,13 +399,26 @@ function sessionQuestionSequence(session) {
   } else {
     questions = db.prepare('SELECT * FROM questions WHERE exam_id = ? ORDER BY q_order').all(s.exam_id);
   }
-  // Hard sort: ALL objective questions first, then ALL theory questions.
-  // Within each type, preserve q_order.
-  questions.sort((a, b) => {
-    if (a.type !== b.type) return a.type === 'objective' ? -1 : 1;
-    return (a.q_order || 0) - (b.q_order || 0);
-  });
-  return questions;
+  // Same rule as drawSessionQuestions, and for the same reason: a quota-free
+  // exam must come out byte-identical to how it behaved before this feature.
+  const plan = selection.sectionPlan(s.exam_id);
+  const position = new Map(plan.map((x) => [x.section_key, x.position]));
+  if (plan.some((x) => x.quota > 0)) {
+    questions.sort((a, b) => {
+      const pa = position.has(a.section_key) ? position.get(a.section_key) : 9999;
+      const pb = position.has(b.section_key) ? position.get(b.section_key) : 9999;
+      return pa !== pb ? pa - pb : (a.q_order || 0) - (b.q_order || 0);
+    });
+  } else {
+    // Hard sort: ALL objective questions first, then ALL theory questions.
+    // Within each type, preserve q_order.
+    questions.sort((a, b) => {
+      if (a.type !== b.type) return a.type === 'objective' ? -1 : 1;
+      return (a.q_order || 0) - (b.q_order || 0);
+    });
+  }
+  // is_selected defaults to 1, so an exam with no quota loses nothing here.
+  return questions.filter((q) => q.is_selected !== 0);
 }
 
 /**
@@ -387,7 +430,20 @@ function sessionQuestionSequence(session) {
 function nextInSequence(session, question) {
   const seq = sessionQuestionSequence(session);
   const i = seq.findIndex((q) => q.id === question.id);
-  if (i === -1) return getSessionQuestion(session.id, question.q_order + 1);
+  if (i === -1) {
+    // q_order + 1 may be a question this student deselected. Step over those
+    // rather than offering a question they said no to.
+    let next = question.q_order + 1;
+    for (;;) {
+      const candidate = getSessionQuestion(session.id, next);
+      if (!candidate) return null;
+      const row = db
+        .prepare('SELECT is_selected FROM session_questions WHERE session_id = ? AND q_order = ?')
+        .get(session.id, next);
+      if (!row || row.is_selected !== 0) return candidate;
+      next++;
+    }
+  }
   return seq[i + 1] || null;
 }
 
