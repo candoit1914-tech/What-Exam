@@ -28,11 +28,11 @@
 | File | Responsibility |
 |---|---|
 | `src/services/selection.js` | **New.** Owns rules + selector + reply parsing + commit. No knowledge of bubbles or question formatting. |
-| `src/db.js` | Additive schema: `exam_sections` table, `is_compulsory`/`section_key` on `questions` and `question_pool`, `selection_state`/`selection_section`/`paper_total` on `sessions`, `is_selected`/`section_key` on `session_questions`. |
+| `src/db.js` | Additive schema: `exam_sections` table; `is_compulsory`/`section_key`/`source_number` on `questions`; `is_compulsory`/`section_key` on `question_pool`; `selection_state`/`selection_section`/`selection_tentative`/`paper_total` on `sessions`; `is_selected`/`section_key` on `session_questions`. |
 | `src/services/exam.js` | Four seams call `selection.*`; draw/sequence honour `is_selected`; `topUpPool` copies new columns; intro states the rule. |
 | `src/services/results.js` | `computeForSession` divides by `sessions.paper_total`. |
-| `src/services/ai.js` | Extraction prompt returns a structured `selection` array. |
-| `src/services/pdfImport.js` | Reconcile the AI's rules against saved questions. |
+| `src/services/ai.js` | Extraction prompt carries `number`, `section` and `compulsory` **per question**; the array it returns is the only rule source (there is no `selection` envelope). |
+| `src/services/pdfImport.js` | Persist `source_number`/`section_key`; `applySelectionRules` derives section rules by grouping and writes `is_compulsory` in both directions. |
 | `src/routes/api.js` | `PATCH /exams/:id/sections`; `is_compulsory`/`section_key` on question POST/PUT/batch; expose both in `qWithScheme`. |
 | `src/public/app.js` | Compulsory checkbox + section select on the question form; Selection-rules card; rule summary in `editExamMeta`. |
 

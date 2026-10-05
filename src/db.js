@@ -41,6 +41,9 @@ CREATE TABLE IF NOT EXISTS questions (
   learning_objective TEXT DEFAULT '',
   explanation   TEXT DEFAULT '',
   source        TEXT NOT NULL DEFAULT 'manual',       -- manual|ai|pdf
+  is_compulsory INTEGER NOT NULL DEFAULT 1,           -- 0 = goes in the selectable pool
+  section_key   TEXT    NOT NULL DEFAULT '',          -- '' = implicit single section
+  source_number INTEGER NOT NULL DEFAULT 0,           -- printed number on the paper; 0 = unknown
   UNIQUE(exam_id, q_order)
 );
 
@@ -78,7 +81,17 @@ CREATE TABLE IF NOT EXISTS sessions (
   final_score     REAL DEFAULT 0,
   final_percentage REAL DEFAULT 0,
   passed          INTEGER DEFAULT 0,
-  attempt_no      INTEGER NOT NULL DEFAULT 1
+  attempt_no      INTEGER NOT NULL DEFAULT 1,
+  -- ''|'selecting'. No 'locked' value: whether a section is already chosen is
+  -- derived from the committed session_questions rows, because one column cannot
+  -- represent two selective sections in the same paper.
+  selection_state   TEXT NOT NULL DEFAULT '',
+  selection_section TEXT NOT NULL DEFAULT '',
+  -- Provisional ticks as a JSON array of session q_orders. is_selected is the
+  -- committed answer and is written only by a commit, so a student who taps two
+  -- questions and goes quiet has silently deselected nothing.
+  selection_tentative TEXT NOT NULL DEFAULT '',
+  paper_total       REAL NOT NULL DEFAULT 0            -- compulsory + selected marks
 );
 
 CREATE TABLE IF NOT EXISTS answers (
@@ -125,6 +138,8 @@ CREATE TABLE IF NOT EXISTS question_pool (
   explanation        TEXT DEFAULT '',
   scheme_json        TEXT DEFAULT '',                     -- full marking scheme JSON
   source             TEXT NOT NULL DEFAULT 'ai',
+  is_compulsory      INTEGER NOT NULL DEFAULT 1,      -- mirrors questions.is_compulsory
+  section_key        TEXT    NOT NULL DEFAULT '',      -- mirrors questions.section_key
   created_at         TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -134,6 +149,8 @@ CREATE TABLE IF NOT EXISTS session_questions (
   session_id  INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
   question_id INTEGER NOT NULL REFERENCES question_pool(id) ON DELETE CASCADE,
   q_order     INTEGER NOT NULL,
+  is_selected INTEGER NOT NULL DEFAULT 1,               -- 0 = in the pool, not chosen
+  section_key TEXT    NOT NULL DEFAULT '',              -- copied from the pool row at draw time
   PRIMARY KEY (session_id, q_order),
   UNIQUE (session_id, question_id)
 );
@@ -200,6 +217,20 @@ CREATE TABLE IF NOT EXISTS question_images (
   UNIQUE(question_id, position)
 );
 CREATE INDEX IF NOT EXISTS idx_question_images_question ON question_images(question_id, position);
+
+-- "Answer any N of M" rules. One row per paper section that carries a quota;
+-- answer_count = 0 means the section is answered in full and never prompts.
+CREATE TABLE IF NOT EXISTS exam_sections (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  exam_id      INTEGER NOT NULL REFERENCES exams(id) ON DELETE CASCADE,
+  section_key  TEXT    NOT NULL,        -- stable slug matching questions.section_key
+  title        TEXT    DEFAULT '',     -- "SECTION B"
+  instructions TEXT    DEFAULT '',     -- the paper's verbatim line, shown to the student
+  position     INTEGER NOT NULL DEFAULT 0,
+  answer_count INTEGER NOT NULL DEFAULT 0,
+  UNIQUE(exam_id, section_key)
+);
+CREATE INDEX IF NOT EXISTS idx_exam_sections_exam ON exam_sections(exam_id, position);
 CREATE INDEX IF NOT EXISTS idx_sessions_exam ON sessions(exam_id);
 -- One live attempt per (exam, student); finished attempts accumulate freely.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_active ON sessions(exam_id, student_id) WHERE status = 'in_progress';
@@ -253,6 +284,25 @@ ensureColumn('sessions', 'attempt_no', 'INTEGER NOT NULL DEFAULT 1');
 // exams has no settings blob, so the per-exam attempt cap is a plain column.
 ensureColumn('exams', 'max_attempts', 'INTEGER NOT NULL DEFAULT 0');
 
+// "Answer any N of M" selection. is_compulsory and is_selected default to 1 so
+// every existing question is compulsory and every existing exam behaves exactly
+// as it does today -- that default is what makes the feature opt-in with no data
+// migration of the question set.
+ensureColumn('questions', 'is_compulsory', 'INTEGER NOT NULL DEFAULT 1');
+ensureColumn('questions', 'section_key', "TEXT NOT NULL DEFAULT ''");
+// The paper's own question number. Import assigns q_order by insertion order, so
+// q_order silently diverges from the printed number the moment a block is dropped
+// or merged. PDF rule reconciliation must match on this instead.
+ensureColumn('questions', 'source_number', 'INTEGER NOT NULL DEFAULT 0');
+ensureColumn('question_pool', 'is_compulsory', 'INTEGER NOT NULL DEFAULT 1');
+ensureColumn('question_pool', 'section_key', "TEXT NOT NULL DEFAULT ''");
+ensureColumn('sessions', 'selection_state', "TEXT NOT NULL DEFAULT ''");
+ensureColumn('sessions', 'selection_section', "TEXT NOT NULL DEFAULT ''");
+ensureColumn('sessions', 'selection_tentative', "TEXT NOT NULL DEFAULT ''");
+ensureColumn('sessions', 'paper_total', 'REAL NOT NULL DEFAULT 0');
+ensureColumn('session_questions', 'is_selected', 'INTEGER NOT NULL DEFAULT 1');
+ensureColumn('session_questions', 'section_key', "TEXT NOT NULL DEFAULT ''");
+
 // Migration: the table-level UNIQUE(exam_id, student_id) made a second attempt
 // impossible. The constraint lives in the CREATE TABLE and cannot be dropped in
 // place, so the table is rebuilt. Mirrors the answers rebuild below, and keeps
@@ -278,14 +328,20 @@ if (sessionsDdl && /UNIQUE\s*\(\s*exam_id\s*,\s*student_id\s*\)/i.test(sessionsD
         final_percentage REAL DEFAULT 0,
         passed          INTEGER DEFAULT 0,
         retry_count     INTEGER NOT NULL DEFAULT 0,
-        attempt_no      INTEGER NOT NULL DEFAULT 1
+        attempt_no      INTEGER NOT NULL DEFAULT 1,
+        selection_state   TEXT NOT NULL DEFAULT '',
+        selection_section TEXT NOT NULL DEFAULT '',
+        selection_tentative TEXT NOT NULL DEFAULT '',
+        paper_total       REAL NOT NULL DEFAULT 0
       );
       INSERT INTO sessions_new
         (id, exam_id, student_id, current_q_order, status, started_at, last_active_at,
-         ended_at, final_score, final_percentage, passed, retry_count, attempt_no)
+         ended_at, final_score, final_percentage, passed, retry_count, attempt_no,
+         selection_state, selection_section, selection_tentative, paper_total)
       SELECT
         id, exam_id, student_id, current_q_order, status, started_at, last_active_at,
-        ended_at, final_score, final_percentage, passed, COALESCE(retry_count, 0), 1
+        ended_at, final_score, final_percentage, passed, COALESCE(retry_count, 0), 1,
+        '', '', '', 0
       FROM sessions;
       DROP TABLE sessions;
       ALTER TABLE sessions_new RENAME TO sessions;
@@ -325,14 +381,20 @@ if (sessionsStartedDdl && /started_at\s+TEXT\s+NOT\s+NULL/i.test(sessionsStarted
         final_percentage REAL DEFAULT 0,
         passed          INTEGER DEFAULT 0,
         retry_count     INTEGER NOT NULL DEFAULT 0,
-        attempt_no      INTEGER NOT NULL DEFAULT 1
+        attempt_no      INTEGER NOT NULL DEFAULT 1,
+        selection_state   TEXT NOT NULL DEFAULT '',
+        selection_section TEXT NOT NULL DEFAULT '',
+        selection_tentative TEXT NOT NULL DEFAULT '',
+        paper_total       REAL NOT NULL DEFAULT 0
       );
       INSERT INTO sessions_nullable_start
         (id, exam_id, student_id, current_q_order, status, started_at, last_active_at,
-         ended_at, final_score, final_percentage, passed, retry_count, attempt_no)
+         ended_at, final_score, final_percentage, passed, retry_count, attempt_no,
+         selection_state, selection_section, selection_tentative, paper_total)
       SELECT
         id, exam_id, student_id, current_q_order, status, started_at, last_active_at,
-        ended_at, final_score, final_percentage, passed, COALESCE(retry_count, 0), attempt_no
+        ended_at, final_score, final_percentage, passed, COALESCE(retry_count, 0), attempt_no,
+        selection_state, selection_section, selection_tentative, paper_total
       FROM sessions;
       DROP TABLE sessions;
       ALTER TABLE sessions_nullable_start RENAME TO sessions;
