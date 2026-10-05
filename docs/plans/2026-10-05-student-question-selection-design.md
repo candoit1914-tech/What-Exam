@@ -77,8 +77,14 @@ CREATE TABLE IF NOT EXISTS exam_sections (
 );
 CREATE INDEX IF NOT EXISTS idx_exam_sections_exam ON exam_sections(exam_id, position);
 
+ALTER TABLE questions        ADD COLUMN is_compulsory   INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE questions        ADD COLUMN section_key     TEXT    NOT NULL DEFAULT '';
+ALTER TABLE questions        ADD COLUMN source_number   INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE question_pool    ADD COLUMN is_compulsory   INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE question_pool    ADD COLUMN section_key     TEXT    NOT NULL DEFAULT '';
 ALTER TABLE sessions         ADD COLUMN selection_state   TEXT NOT NULL DEFAULT '';
 ALTER TABLE sessions         ADD COLUMN selection_section TEXT NOT NULL DEFAULT '';
+ALTER TABLE sessions         ADD COLUMN selection_tentative TEXT NOT NULL DEFAULT '';
 ALTER TABLE sessions         ADD COLUMN paper_total REAL NOT NULL DEFAULT 0;
 ALTER TABLE session_questions ADD COLUMN is_selected INTEGER NOT NULL DEFAULT 1;
 ALTER TABLE session_questions ADD COLUMN section_key   TEXT    NOT NULL DEFAULT '';
@@ -86,6 +92,20 @@ ALTER TABLE session_questions ADD COLUMN section_key   TEXT    NOT NULL DEFAULT 
 
 `is_compulsory` defaults to `1`, so every pre-existing question is compulsory and
 every pre-existing exam behaves exactly as it does today.
+
+`selection_state` has **no `locked` value**. "Has this section already been chosen?"
+is derived from the committed `session_questions.is_selected` rows for that section,
+not stored. A single state column cannot represent two selective sections in one
+paper, so the derived check is the only correct formulation.
+
+`selection_tentative` holds provisional ticks as a JSON array of session `q_order`s.
+`is_selected` is the committed answer and is written only by a commit, so a student
+who taps two questions and then goes quiet has silently deselected nothing.
+
+`source_number` stores the number printed on the paper. Import assigns `q_order` by
+insertion order, so `q_order` diverges from the printed number the moment a block is
+dropped or merged — anything that matches the paper's own numbering must use
+`source_number`, never `q_order`.
 
 ### The `is_selected DEFAULT 1` guarantee
 
@@ -119,43 +139,50 @@ compulsory and ungrouped — the safe fallback.
 
 ## 2. Reading the rule out of the PDF
 
-The extraction prompt (`src/services/ai.js:1546`) already preserves section
-instructions verbatim. It is extended to return the rule as **structured data**
-alongside the questions, so the platform reads what the paper says rather than
-guessing:
+`extractQuestionsFromText` (`src/services/ai.js:1472`) calls the model per block,
+gets `{ questions: [...] }` back, and **flattens every block into a single array of
+questions**. There is no envelope object and no sibling `selection` key. So the rule
+is requested **per question**, in the shape the pipeline already returns, and the
+section rules are derived by grouping. A second AI call would be a new dependency
+edge for no gain.
 
 ```
-- SELECTION RULES: If the document limits how many questions a candidate answers
-  (e.g. "Answer any FOUR (4) questions from Section B", "Answer ALL the questions
-  in Section A", "Questions 1 and 2 are compulsory"), return a "selection" array
-  with one entry per section that carries a rule:
-    { section, title, instructions, answer_count, compulsory_question_numbers }
-  - answer_count = the exact number stated, 0 when the paper says answer ALL.
-  - compulsory_question_numbers = the 1-based question numbers the paper forces
-    (["1","2"] from "Questions 1 and 2 are compulsory"). [] otherwise.
-  - Quote instructions VERBATIM from the document.
-  - Omit "selection" entirely when the paper imposes no limit. Never invent one.
+Theory/Objective object, per question:
+  "number":      7,                // the number printed on the paper
+  "section":     "SECTION B",     // the heading verbatim; "" if the paper has none
+  "compulsory":  true,             // true ONLY if the paper forces this question
 ```
 
-`pdfImport.js` then reconciles that against the questions it actually saved:
+```
+- SELECTION: "compulsory" is true ONLY for questions the document itself forces.
+  A question that merely sits in a section with a limit is NOT compulsory — do not
+  mark it true because it shares a section with compulsory questions.
+- SECTION: "section" is the heading verbatim, or "" when the paper has none.
+  Grouping by this value is how the platform reconstructs sections, so it must be
+  consistent across every question of the same section.
+```
 
-1. Match each entry's `section` to a detected section header, else synthesise a slug.
-2. **Drop** `compulsory_question_numbers` that do not exist in the saved set.
-   Extraction can miss a question; under-forcing is recoverable, pointing at the
-   wrong question is not.
-3. **Clamp** `answer_count` to the real pool size. A count that clamps down to the
+`pdfImport.js` persists `number` as `questions.source_number` (it was previously
+discarded) and `section` as `questions.section_key`, then reconciles:
+
+1. **Group** the extraction by `section`, slugging the heading. A group whose
+   questions never landed in the database is skipped and reported.
+2. **Match on the printed number**, never on `q_order`. Match compulsory questions
+   through `source_number`; a claimed number that was never extracted is reported and
+   dropped, because under-forcing is recoverable and pointing at the wrong question
+   is not.
+3. **Write `is_compulsory` in both directions** — `1` for forced questions and `0`
+   for the rest of the section. The column defaults to `1`, so a reconciliation that
+   only ever *forces* questions leaves the whole pool compulsory, the selectable pool
+   computes to zero, and every quota silently clamps to answer-all.
+4. **Clamp** `answer_count` to the real pool size. A count that clamps down to the
    pool size leaves the section non-selective, so it is delivered in full — the
    clamp and the answer-all rule in §1 compose deliberately rather than
    accidentally.
-4. If nothing survives, **write no rule at all.** The exam stays exactly as it is
-   today. `is_compulsory` flags are written first and are harmless on their own:
-   a section with no quota is delivered in full regardless of its flags.
+5. If nothing survives, **write no rule at all.** The exam stays exactly as it is
+   today.
 
-The `compulsory` list is positional (1-based across the paper) because papers
-number continuously across sections. A `["1","2"]` list therefore makes the first
-two questions compulsory regardless of section.
-
-A rule is stored per section; `is_compulsory` is set on each named question.
+A rule is stored per section; `is_compulsory` is set on each question of that section.
 
 ## 3. Chat flow
 
@@ -218,7 +245,7 @@ Both helpers already exist: `sendInteractiveList` and `sendInteractiveButtons`
 | list row tap | toggle that question, persist, ack `✓ Added Q4 — 2 of 3 chosen.` |
 | `CONFIRM` / Confirm tap | count **must equal** the quota → commit; otherwise error + re-prompt |
 | `2,4,5` / `2 4 5` / `2.4. 5.` | set exactly those; over-quota rejected, under-quota flagged |
-| `CHANGE` | reopens — only while `selection_state='locked'` **and** the session has no answers |
+| `CHANGE` | reopens — only while the session has **no answers recorded** |
 | anything else | `I didn't catch that. Tap questions, or reply like 2,4,5.` + re-send selector |
 
 ### 3d. Text fallback
@@ -331,8 +358,10 @@ New `test/question-selection.test.js` and `test/selection-rules.test.js`, using 
    with `selection_state='selecting'` re-renders the selector instead of sending a
    question.
 9. More than 10 optional questions falls back to text and still completes.
-10. Import reconciliation: phantom question numbers dropped, counts clamped, and a
-    missing `selection` array writes no rule.
+10. Import reconciliation: phantom question numbers dropped (matched on
+    `source_number`, never `q_order`), counts clamped, a dropped block still leaves
+    the right question compulsory, and an extraction with no section data writes no
+    rule at all.
 
 ## Non-goals
 
