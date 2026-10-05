@@ -347,6 +347,16 @@ if (sessionsDdl && /UNIQUE\s*\(\s*exam_id\s*,\s*student_id\s*\)/i.test(sessionsD
       ALTER TABLE sessions_new RENAME TO sessions;
       COMMIT;
     `);
+    // DROP TABLE took every sessions index with it, and they are not part of the
+    // CREATE TABLE above, so they have to be put back here. Without this the
+    // table silently loses idx_sessions_exam / _exam_student / _status and every
+    // attempt and cleanup query degrades to a full scan. The later started_at
+    // rebuild re-creates them, but only on databases that still carry the old
+    // NOT NULL started_at — a database that only had the UNIQUE constraint kept
+    // none of them.
+    db.exec('CREATE INDEX IF NOT EXISTS idx_sessions_exam ON sessions(exam_id)');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_sessions_exam_student ON sessions(exam_id, student_id)');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status)');
     console.log('Migrated sessions table (removed unique exam/student constraint for attempts).');
   } finally {
     db.exec('PRAGMA foreign_keys = ON');

@@ -663,6 +663,39 @@ test('a session predating paper_total is priced from what it was drawn, not answ
   assert.equal(r.percentage, 40);
 });
 
+test('a historical timed-out attempt can flip from pass to fail, and that is intended', () => {
+  // This is the one user-visible consequence of repricing, so it is pinned
+  // deliberately rather than left to be discovered after deploy. A student who
+  // answered 2 of 4 and scored full marks on both used to read 10/10 = 100%
+  // and PASS; the honest denominator is the 4 questions they were actually
+  // served, so it now reads 50%. Under the old rule a student improved their
+  // score by running out of time, which is the bug this change exists to fix.
+  // sessions.final_percentage is only written at finalize; reportHTML and the
+  // dashboard recompute, so historical reports shift the first time they load.
+  const eid = paperExam([{ marks: 5 }, { marks: 5 }, { marks: 5 }, { marks: 5 }]);
+  db.prepare('UPDATE exams SET pass_percentage = 50 WHERE id = ?').run(eid);
+  const sid = examSvc.createSession(eid, 1);
+  db.prepare('UPDATE sessions SET paper_total = 0, status = ? WHERE id = ?').run('ended', sid.id);
+
+  for (const row of db.prepare('SELECT question_id, q_order FROM session_questions WHERE session_id=? AND q_order<=2 ORDER BY q_order').all(sid.id)) {
+    db.prepare(
+      `INSERT INTO answers(session_id,question_id,q_order,answer_text,marks_awarded,max_marks,marked_by)
+       VALUES (?,?,?,'x',5,5,'auto')`
+    ).run(sid.id, row.question_id, row.q_order);
+  }
+
+  const r = results.computeForSession(sid.id);
+  assert.equal(r.priceSource, 'drawn');
+  assert.equal(r.totalMarks, 20, 'four questions were served, so four are owed');
+  assert.equal(r.score, 10);
+  assert.equal(r.percentage, 50);
+  assert.equal(r.passed, true, 'exactly on the pass mark');
+
+  db.prepare('UPDATE exams SET pass_percentage = 60 WHERE id = ?').run(eid);
+  assert.equal(results.computeForSession(sid.id).passed, false,
+    'the same attempt fails once the bar is above 50%');
+});
+
 // ── Task 6: admin API ──────────────────────────────────────────────────
 
 const express = require('express');
