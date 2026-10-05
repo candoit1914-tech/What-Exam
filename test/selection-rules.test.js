@@ -13,6 +13,9 @@ const { test, after } = require('node:test');
 const assert = require('node:assert/strict');
 const db = require('../src/db');
 const { applySelectionRules, slugOf, buildSectionMeta } = require('../src/services/pdfImport');
+// Pure classic script, no DB behind it — the browser slug must equal the importer's
+// or a section key set on the dashboard never matches what an import wrote.
+const selectionUi = require('../src/public/selection-ui');
 
 after(() => {
   db.close();
@@ -135,6 +138,17 @@ test('a section whose questions were all dropped is skipped', () => {
   });
   assert.equal(out.applied, 0);
   assert.equal(db.prepare('SELECT COUNT(*) c FROM exam_sections WHERE exam_id=?').get(eid).c, 0);
+});
+
+test('the browser and the importer slug a heading identically', () => {
+  // The dashboard's Section select stores section_key, and an imported paper
+  // derives it from the heading. If the two disagree, an admin editing an
+  // imported section creates a second, empty group instead of editing the real one.
+  for (const heading of ['SECTION B', 'Part II', '  Section  C  ', 'Q.4', 'Section A']) {
+    assert.equal(selectionUi.sectionSlug(heading), slugOf(heading), heading);
+  }
+  assert.equal(slugOf(''), '');
+  assert.equal(slugOf(null), '');
 });
 
 test('the answer-N count is recovered from the instruction wording', () => {

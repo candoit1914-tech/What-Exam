@@ -638,6 +638,58 @@ function setTab(tab) {
   renderExam(examState.id);
 }
 
+async /** <summary>for a rule row, using the resolved pool the server reported. */
+function selectionRulesCardHTML(examId, sections, selection) {
+  const rows = SelectionUI.ruleRows(sections, selection);
+  if (!rows.length) {
+    return `<div class="card" style="margin-top:14px">
+      <h3 style="margin-bottom:4px">SELECTION <span class="gr">RULES</span></h3>
+      <p class="muted qmeta">No section limits which questions a student answers &mdash; everyone answers everything.
+      Give some questions a Section above, untick <em>Compulsory</em>, then set a quota here to offer a choice.</p>
+    </div>`;
+  }
+  const editable = examState.data.exam && !['live', 'ended'].includes(examState.data.exam.status);
+  return `<div class="card" style="margin-top:14px">
+    <h3 style="margin-bottom:4px">SELECTION <span class="gr">RULES</span></h3>
+    <p class="muted qmeta">Students choose which questions to answer. Compulsory questions are always answered.</p>
+    ${rows.map((r) => `<div class="row" style="margin-top:12px;gap:10px;align-items:flex-end;flex-wrap:wrap">
+      <div class="field" style="flex:1;min-width:180px"><label>Section</label>
+        <input type="text" data-skey="${esc(r.section_key)}" value="${esc(r.title)}" ${editable ? '' : 'disabled'}></div>
+      <div class="field" style="flex:2;min-width:220px"><label>Paper instruction</label>
+        <input type="text" data-sinst="${esc(r.section_key)}" value="${esc(r.instructions)}" ${editable ? '' : 'disabled'}></div>
+      <div class="field" style="width:120px"><label>Answer any</label>
+        <input type="number" data-scount="${esc(r.section_key)}" min="0" max="${r.pool}" value="${r.answer_count}" ${editable ? '' : 'disabled'}></div>
+      <div class="muted" style="padding-bottom:10px">of ${SelectionUI.rowHint(r)}</div>
+    </div>`).join('')}
+    ${editable ? `<div class="row" style="margin-top:14px">
+      <button class="btn btn-primary" onclick="saveSelectionRules(${examId})">Save selection rules</button>
+    </div>` : '<p class="muted qmeta">This exam is live, so selection rules can no longer be edited.</p>'}
+  </div>`;
+}
+
+async function saveSelectionRules(examId) {
+  const rows = [...document.querySelectorAll('[data-scount]')].map((input) => {
+    const k = input.dataset.scount;
+    const titleEl = document.querySelector(`[data-skey="${CSS.escape(k)}"]`);
+    const instEl = document.querySelector(`[data-sinst="${CSS.escape(k)}"]`);
+    return {
+      section_key: k,
+      title: titleEl ? titleEl.value : k,
+      instructions: instEl ? instEl.value : '',
+      answer_count: input.value,
+    };
+  });
+  // An emptied card sends [] on purpose: the server treats that as "remove every
+  // rule", which is what clearing the quotas must do. Guarding it here would
+  // leave stale rules behind and the paper would still be selective on send.
+  try {
+    await api(`/api/exams/${examId}/sections`, { method: 'PATCH', body: SelectionUI.rulesPayload(rows) });
+  } catch (e) { toast(e.message, true); return; }
+  invalidateCache(`/api/exams/${examId}`);
+  toast('Selection rules saved');
+  renderExam(examId);
+}
+
 async function renderTab() {
   const bodyEl = document.getElementById('tabbody');
   const { exam, questions, recipients, results } = examState.data;
@@ -651,6 +703,7 @@ async function renderTab() {
         <button class="btn btn-ghost" onclick="aiGenerateForm(${id})">${I.spark} AI Generate</button>
         <button class="btn btn-ghost" onclick="pdfUploadForm(${id})">${I.doc} Upload PDF</button>
       </div>
+      ${selectionRulesCardHTML(id, examState.data.sections || [], examState.data.selection || [])}
       ${questions.length === 0 ? `<div class="empty-state">${I.empty}<p>No questions yet. Add manually, generate with AI, or upload a PDF.</p></div>` : ''}
       ${questions.map((q, i) => {
         const prev = i > 0 ? questions[i - 1] : null;
@@ -1024,12 +1077,27 @@ async function printRoster(id) {
   }
 }
 
+/** <option>s for #qf_section, from the exam payload SelectionUI already merged. */
+function sectionSelectHTML(current) {
+  const data = examState.data || {};
+  const opts = SelectionUI.sectionOptions(data.sections || [], data.selection || [], current);
+  return `<option value="" ${current ? '' : 'selected'}>&mdash; none &mdash;</option>` +
+    opts.map(([k, t]) => `<option value="${esc(k)}" ${k === current ? 'selected' : ''}>${esc(t)}</option>`).join('');
+}
+
+/** The compulsory/optional badge beside a question in the list. */
+function selectionBadgeHTML(q) {
+  return q.is_compulsory === 0
+    ? '<span class="pass" title="The student may choose not to answer this">optional</span>'
+    : '<span class="muted" title="Always answered, never offered as a choice">compulsory</span>';
+}
+
 function qitemHTML(q, id, samePassageAsPrev = false) {
   const opts = q.options || [];
   return `<div class="qitem">
     <div class="qhead">
       <div>
-        <div class="muted qmeta">Q${q.q_order} · ${q.type} · ${q.marks} mark(s) · ${q.difficulty} · ${badge(q.source)}</div>
+        <div class="muted qmeta">Q${q.q_order} · ${q.type} · ${q.marks} mark(s) · ${q.difficulty} · ${badge(q.source)} ${selectionBadgeHTML(q)}</div>
         ${q.passage && samePassageAsPrev
           ? `<div class="qpassage-same">↳ same passage as above</div>`
           : q.passage ? `<div class="qpassage">${esc(q.passage)}</div>` : ''}
@@ -1119,6 +1187,16 @@ function questionFormHTML(q, id) {
       </div>
     </div>
     <div class="field" id="qf_theory_marks"><label>Marks</label><input type="number" id="qf_marks" value="${q?.marks || (type === 'theory' ? 5 : 1)}" step="0.5"></div>
+    <div class="field"><label>Section (paper grouping)</label>
+      <select id="qf_section">${sectionSelectHTML(q?.section_key || '')}</select>
+      <p class="muted qmeta">Questions sharing a section are grouped when the paper asks the student to choose.</p>
+    </div>
+    <div class="field">
+      <label style="display:flex;gap:8px;align-items:center;font-weight:400">
+        <input type="checkbox" id="qf_compulsory" ${q?.is_compulsory === 0 ? '' : 'checked'}>
+        Compulsory &mdash; always answered, never offered as a choice
+      </label>
+    </div>
     <div class="field"><label>Difficulty</label>
       <select id="qf_diff">
         ${['easy', 'medium', 'hard'].map((d) => `<option ${q?.difficulty === d ? 'selected' : ''}>${d}</option>`).join('')}
@@ -1205,6 +1283,16 @@ async function addQuestionForm(id) {
     </div>
     <div class="field"><label>Marks</label><input type="number" id="qf_marks" value="1" step="0.5"></div>
     <div class="field"><label>Difficulty</label><select id="qf_diff"><option>easy</option><option selected>medium</option><option>hard</option></select></div>
+    <div class="field"><label>Section (paper grouping)</label>
+      <select id="qf_section">${sectionSelectHTML('')}</select>
+      <p class="muted qmeta">Questions sharing a section are grouped when the paper asks the student to choose.</p>
+    </div>
+    <div class="field">
+      <label style="display:flex;gap:8px;align-items:center;font-weight:400">
+        <input type="checkbox" id="qf_compulsory" checked>
+        Compulsory &mdash; always answered, never offered as a choice
+      </label>
+    </div>
     <div class="field">
       <label style="display:flex;align-items:center;gap:8px;cursor:pointer"><input type="checkbox" id="qf_add_another"> Add another question after saving</label>
       <p class="muted" style="margin:4px 0 0">Check this to add multiple questions quickly without reopening the form each time.</p>
@@ -1228,6 +1316,8 @@ async function addQuestionForm(id) {
       formData.append('difficulty', document.querySelector('#qf_diff').value);
       formData.append('learning_objective', '');
       formData.append('explanation', '');
+      formData.append('is_compulsory', document.querySelector('#qf_compulsory')?.checked ? '1' : '0');
+      formData.append('section_key', document.querySelector('#qf_section')?.value || '');
       if (type === 'objective') {
         const opts = ['A', 'B', 'C', 'D'].map((k) => document.querySelector(`[data-opt="${k}"]`).value.trim());
         opts.forEach((text, i) => formData.append(`options[${i}][key]`, ['A','B','C','D'][i]));
@@ -1249,6 +1339,8 @@ async function addQuestionForm(id) {
         difficulty: document.querySelector('#qf_diff').value,
         learning_objective: '',
         explanation: '',
+        is_compulsory: document.querySelector('#qf_compulsory')?.checked ? 1 : 0,
+        section_key: document.querySelector('#qf_section')?.value || '',
       };
       if (type === 'objective') {
         payload.options = ['A', 'B', 'C', 'D'].map((k) => document.querySelector(`[data-opt="${k}"]`).value.trim());
@@ -1305,6 +1397,8 @@ async function editQuestionForm(id, qid) {
       formData.append('difficulty', document.querySelector('#qf_diff').value);
       formData.append('learning_objective', document.querySelector('#qf_lo').value);
       formData.append('explanation', document.querySelector('#qf_expl').value);
+      formData.append('is_compulsory', document.querySelector('#qf_compulsory')?.checked ? '1' : '0');
+      formData.append('section_key', document.querySelector('#qf_section')?.value || '');
       if (type === 'objective') {
         const opts = ['A', 'B', 'C', 'D'].map((k) => document.querySelector(`[data-opt="${k}"]`).value.trim());
         opts.forEach((text, i) => formData.append(`options[${i}][key]`, ['A','B','C','D'][i]));
@@ -1328,6 +1422,8 @@ async function editQuestionForm(id, qid) {
         difficulty: document.querySelector('#qf_diff').value,
         learning_objective: document.querySelector('#qf_lo').value,
         explanation: document.querySelector('#qf_expl').value,
+        is_compulsory: document.querySelector('#qf_compulsory')?.checked ? 1 : 0,
+        section_key: document.querySelector('#qf_section')?.value || '',
       };
       if (type === 'objective') {
         payload.options = ['A', 'B', 'C', 'D'].map((k) => document.querySelector(`[data-opt="${k}"]`).value.trim());
@@ -1944,6 +2040,14 @@ async function deleteExam(id) {
   location.hash = '#/exams';
 }
 
+/** The paper's selection shape, read-only, in the Edit Exam modal. */
+function selectionSummaryHTML() {
+  const lines = SelectionUI.summaryLines((examState.data || {}).selection || []);
+  return `<div class="field"><label>Selection rules</label><div class="muted">${
+    lines.length ? lines.map(esc).join('<br>') : 'None &mdash; students answer every question.'
+  }</div></div>`;
+}
+
 async function editExamMeta(id) {
   const { exam } = examState.data;
   const div = await openModal('Edit Exam', `
@@ -1952,6 +2056,7 @@ async function editExamMeta(id) {
     <div class="field"><label>Description</label><textarea id="em_desc">${esc(exam.description)}</textarea></div>
     <div class="field"><label>Duration (minutes)</label><input type="number" id="em_dur" value="${exam.duration_minutes}"></div>
     <div class="field"><label>Pass mark (%)</label><input type="number" id="em_pass" value="${exam.pass_percentage}"></div>
+    ${selectionSummaryHTML()}
     <div class="modal-actions" style="margin-top:18px"><button id="em_save" class="btn btn-primary">Save</button></div>
   `);
   if (!div) return;
