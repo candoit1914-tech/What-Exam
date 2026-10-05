@@ -648,52 +648,113 @@ test('skipping the hard questions cannot raise a percentage', () => {
   assert.equal(r.percentage, 10, 'answering only the 1-mark question scores 10%, not 100%');
 });
 
-test('a session predating paper_total is priced from what it was drawn, not answered', () => {
+test('a live session predating paper_total is priced from what it was drawn, not answered', () => {
   const eid = paperExam([{ marks: 4 }, { marks: 6 }]);
   const sid = examSvc.createSession(eid, 1);
-  // Simulate a session created before this feature: no recorded price.
+  // Simulate a session created before this feature: no recorded price. It is
+  // still live, so it has not been graded yet and gets graded honestly below.
   db.prepare('UPDATE sessions SET paper_total = 0 WHERE id = ?').run(sid.id);
   answerFirst(sid.id, 4);
   const r = results.computeForSession(sid.id);
   assert.equal(r.priceSource, 'drawn');
   assert.equal(
     r.totalMarks, 10,
-    'a historical attempt is owed both questions it was drawn; summing only the answer would report 4/4 = 100%'
+    'an ungraded attempt is owed both questions it was drawn; summing only the answer would report 4/4 = 100%'
   );
   assert.equal(r.percentage, 40);
 });
 
-test('a historical timed-out attempt can flip from pass to fail, and that is intended', () => {
-  // This is the one user-visible consequence of repricing, so it is pinned
-  // deliberately rather than left to be discovered after deploy. A student who
-  // answered 2 of 4 and scored full marks on both used to read 10/10 = 100%
-  // and PASS; the honest denominator is the 4 questions they were actually
-  // served, so it now reads 50%. Under the old rule a student improved their
-  // score by running out of time, which is the bug this change exists to fix.
-  // sessions.final_percentage is only written at finalize; reportHTML and the
-  // dashboard recompute, so historical reports shift the first time they load.
+test('an already-graded legacy attempt keeps the percentage it was published with', () => {
+  // A student who already saw a result on WhatsApp, a certificate or a printed
+  // roster must not have it retroactively rewritten. Under the old rule this
+  // timed-out attempt scored 2 of 4 answered questions, both at full marks, and
+  // read 10/10 = 100%. Repricing it would drop it to 50% and could turn a
+  // published PASS into a FAIL, so a finished session with no recorded price is
+  // deliberately left on the denominator it was graded against.
   const eid = paperExam([{ marks: 5 }, { marks: 5 }, { marks: 5 }, { marks: 5 }]);
   db.prepare('UPDATE exams SET pass_percentage = 50 WHERE id = ?').run(eid);
   const sid = examSvc.createSession(eid, 1);
   db.prepare('UPDATE sessions SET paper_total = 0, status = ? WHERE id = ?').run('ended', sid.id);
 
-  for (const row of db.prepare('SELECT question_id, q_order FROM session_questions WHERE session_id=? AND q_order<=2 ORDER BY q_order').all(sid.id)) {
+  for (const row of db.prepare(
+    'SELECT question_id, q_order FROM session_questions WHERE session_id=? AND q_order<=2 ORDER BY q_order'
+  ).all(sid.id)) {
     db.prepare(
       `INSERT INTO answers(session_id,question_id,q_order,answer_text,marks_awarded,max_marks,marked_by)
        VALUES (?,?,?,'x',5,5,'auto')`
     ).run(sid.id, row.question_id, row.q_order);
   }
 
-  const r = results.computeForSession(sid.id);
-  assert.equal(r.priceSource, 'drawn');
-  assert.equal(r.totalMarks, 20, 'four questions were served, so four are owed');
-  assert.equal(r.score, 10);
-  assert.equal(r.percentage, 50);
-  assert.equal(r.passed, true, 'exactly on the pass mark');
+  // Simulate the state finalize left behind when it graded this attempt under
+  // the old rule: published grade persisted, no paper_total.
+  db.prepare('UPDATE sessions SET final_score = 10, final_percentage = 100, passed = 1 WHERE id = ?').run(sid.id);
 
-  db.prepare('UPDATE exams SET pass_percentage = 60 WHERE id = ?').run(eid);
-  assert.equal(results.computeForSession(sid.id).passed, false,
-    'the same attempt fails once the bar is above 50%');
+  const r = results.computeForSession(sid.id);
+  assert.equal(r.priceSource, 'stored');
+  assert.equal(r.score, 10);
+  assert.equal(r.percentage, 100, 'the grade this student was already shown');
+  assert.equal(r.passed, true);
+  assert.equal(
+    r.totalMarks, 20,
+    'totalMarks falls back to drawnTotal: the paper still had 4 questions worth 20, so certificates and result messages keep showing the real paper size'
+  );
+
+  // passed is still derived from the frozen percentage against the exam's current
+  // bar, which is how it behaved before this change too: editing the pass mark
+  // reclassifies an old attempt, it does not regrade it. The percentage is what
+  // must not move.
+  // The whole point: repricing logic must not reach in and rewrite it. Even after
+  // the answers are edited, the published grade stands.
+  db.prepare(
+    `UPDATE answers SET marks_awarded = 0 WHERE session_id = ?
+       AND q_order = 1`
+  ).run(sid.id);
+  const after = results.computeForSession(sid.id);
+  assert.equal(after.percentage, 100, 'a regrade does not rewrite a published result');
+  assert.equal(after.score, 10);
+});
+
+test('a live legacy attempt is repriced the moment it is graded', () => {
+  // The same attempt shape, but still live: nothing has been published yet, so
+  // finishing it under the new rule is the whole point of this feature. This is
+  // what stops a student from improving their score by running out of time.
+  const eid = paperExam([{ marks: 5 }, { marks: 5 }, { marks: 5 }, { marks: 5 }]);
+  db.prepare('UPDATE exams SET pass_percentage = 50 WHERE id = ?').run(eid);
+  const sid = examSvc.createSession(eid, 1);
+  db.prepare('UPDATE sessions SET paper_total = 0 WHERE id = ?').run(sid.id);
+
+  for (const row of db.prepare(
+    'SELECT question_id, q_order FROM session_questions WHERE session_id=? AND q_order<=2 ORDER BY q_order'
+  ).all(sid.id)) {
+    db.prepare(
+      `INSERT INTO answers(session_id,question_id,q_order,answer_text,marks_awarded,max_marks,marked_by)
+       VALUES (?,?,?,'x',5,5,'auto')`
+    ).run(sid.id, row.question_id, row.q_order);
+  }
+
+  assert.equal(results.computeForSession(sid.id).percentage, 50, 'live, so priced from the 4 drawn');
+
+  // finalize() grades while still in_progress, persists, then flips the status.
+  // Replay that exact order so this test fails if anyone moves the status
+  // update ahead of the persistence.
+  const graded = results.computeForSession(sid.id);
+  db.prepare(
+    `UPDATE sessions SET status = 'completed', final_score = ?, final_percentage = ?, passed = ? WHERE id = ?`
+  ).run(graded.score, graded.percentage, graded.passed ? 1 : 0, sid.id);
+
+  // An attempt that finished after this deploy was repriced on the way in, so
+  // the stored 50% is the grade that was published and it must be reported as
+  // such. Reporting the pre-feature denominator here would contradict both the
+  // stored column and the message the student received.
+  const finished = results.computeForSession(sid.id);
+  assert.equal(finished.priceSource, 'stored');
+  assert.equal(finished.totalMarks, 20);
+  assert.equal(finished.percentage, 50, 'the repriced grade finalize published and stored');
+  assert.equal(finished.score, 10);
+  assert.equal(
+    finished.score / finished.totalMarks * 100, finished.percentage,
+    'percentage and totalMarks agree here because finalize repriced both together'
+  );
 });
 
 // ── Task 6: admin API ──────────────────────────────────────────────────

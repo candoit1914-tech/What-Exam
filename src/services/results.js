@@ -5,6 +5,10 @@ const auth = require('../auth');
 const certificate = require('./certificate');
 const { buildZip } = require('./zip');
 
+// Statuses that carry a real, final result. Any other status has no score yet.
+const FINISHED_STATUSES = "('completed','ended','expired')";
+const isFinished = (status) => FINISHED_STATUSES.includes(`'${status}'`);
+
 function computeForSession(sessionId) {
   const session = db.prepare('SELECT * FROM sessions WHERE id = ?').get(sessionId);
   const exam = db.prepare('SELECT * FROM exams WHERE id = ?').get(session.exam_id);
@@ -12,23 +16,63 @@ function computeForSession(sessionId) {
   // Summing answers let a student raise their percentage by skipping the
   // hard questions, and left every timed-out attempt graded on a short paper.
   const priced = Number(session.paper_total) || 0;
-  // Sessions predating paper_total have none recorded, so price them from the
-  // questions they were DRAWN. Falling back to the answered marks would grade a
-  // historical 1-of-2 attempt as a perfect score, which is the exact bug this
-  // change exists to remove — so it must not be reintroduced for legacy rows.
   const drawnTotal = db.prepare(
     `SELECT COALESCE(SUM(qp.marks), 0) t
        FROM session_questions sq JOIN question_pool qp ON qp.id = sq.question_id
       WHERE sq.session_id = ?`
   ).get(sessionId).t;
   const answeredTotal = db.prepare('SELECT COALESCE(SUM(max_marks),0) t FROM answers WHERE session_id = ?').get(sessionId).t;
-  const totalMarks = priced > 0 ? priced : (drawnTotal > 0 ? drawnTotal : answeredTotal);
   const awarded = db.prepare('SELECT COALESCE(SUM(marks_awarded),0) s FROM answers WHERE session_id = ?').get(sessionId).s;
   const answered = db.prepare('SELECT COUNT(*) c FROM answers WHERE session_id = ?').get(sessionId).c;
   const drawn = db.prepare('SELECT COUNT(*) c FROM session_questions WHERE session_id = ?').get(sessionId).c;
   const questionCount =
     drawn > 0 ? drawn : db.prepare('SELECT COUNT(*) c FROM questions WHERE exam_id = ?').get(exam.id).c;
 
+  // A finished attempt with no recorded price reports the grade that was
+  // actually published to its student, rather than recomputing one.
+  //
+  // finalize() sends the result message while the session is still in_progress,
+  // then flips the status and persists final_score / final_percentage / passed
+  // from that same computation. So those columns are the grade that went out on
+  // WhatsApp, onto the certificate and onto any printed roster — recomputing
+  // here could contradict them.
+  //
+  // Reading the stored value rather than replaying the old formula also settles
+  // the ordering problem: an attempt that finishes after this deploy was
+  // repriced on the way in and stores the repriced number, so reporting the
+  // stored value is correct for those too, while an attempt graded before it
+  // keeps the number its student has already seen. Recomputing cannot
+  // distinguish the two cases and would silently disagree with the stored
+  // column for one of them.
+  //
+  // paper_total = 0 marks "predates the feature": drawSessionQuestions has
+  // always written it. answeredTotal > 0 excludes an attempt that was ended
+  // without being graded, where there is no published grade to report.
+  if (priced === 0 && isFinished(session.status) && answeredTotal > 0) {
+    return {
+      sessionId,
+      exam,
+      score: Number(session.final_score) || awarded,
+      // totalMarks is deliberately the drawn total, not answeredTotal: the
+      // paper really did carry four questions worth 20, and this value is what
+      // certificates and result messages print. Holding it at 10 would make the
+      // published grade internally inconsistent (a 10/20 answer sheet that
+      // somehow scored 100%) without changing what the student was told.
+      totalMarks: drawnTotal > 0 ? drawnTotal : answeredTotal,
+      percentage: Number(session.final_percentage),
+      passed: !!session.passed,
+      answered,
+      questionCount,
+      priceSource: 'stored',
+    };
+  }
+
+  // Sessions predating paper_total that are still live are graded the honest
+  // way when they do finish: price them from the questions they were DRAWN.
+  // Falling back to the answered marks would grade a 1-of-2 attempt as a perfect
+  // score, which is the exact bug this change exists to remove — so it must not
+  // be reintroduced for legacy rows.
+  const totalMarks = priced > 0 ? priced : (drawnTotal > 0 ? drawnTotal : answeredTotal);
   const percentage = totalMarks > 0 ? Math.round((awarded / totalMarks) * 1000) / 10 : 0;
   return {
     sessionId,
@@ -440,9 +484,6 @@ async function bulkResendResults(examId) {
 }
 
 // Statuses that carry a real, final result. Any other status has no score yet.
-const FINISHED_STATUSES = "('completed','ended','expired')";
-const isFinished = (status) => FINISHED_STATUSES.includes(`'${status}'`);
-
 /**
  * Build the participant roster for one exam: every recipient, sorted into
  * finished (ranked) / in progress / not started / not sent.
