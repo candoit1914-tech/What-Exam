@@ -720,13 +720,21 @@ function formatExamIntro(exam, questionCount, { started = false } = {}) {
     ? ''
     : 'Reply *START* to this chat to open it.\n\n';
   const instructions = steps.map((s, i) => `${i + 1}. ${s}`).join('\n');
+  // A paper that asks the student to choose says so up front, so nobody only
+  // discovers the rule when the selector interrupts them mid-exam.
+  const rules = selection
+    .sectionPlan(exam.id)
+    .filter((s) => s.quota > 0)
+    .map((s) => `${s.title || s.section_key}: answer any ${s.quota} of the ${s.optional.length} questions.`);
+  const ruleLines = rules.length ? `${rules.join('\n')}\n\n` : '';
   return (
     `*${String(exam.title).toUpperCase()}*\n\n` +
     `Subject: *${exam.subject || 'General'}*\n` +
     `Exam type: *${type}*\n` +
     `Duration: *${exam.duration_minutes} minute${exam.duration_minutes === 1 ? '' : 's'}*\n` +
-    `Number of questions: *${questionCount}*\n` +
-    `Pass mark: *${exam.pass_percentage}%*\n\n` +
+`Number of questions: *${questionCount}*\n` +
+    `Pass mark: *${exam.pass_percentage}%\n\n` +
+    ruleLines +
     startLine +
     `*INSTRUCTIONS*\n${instructions}`
   );
@@ -820,6 +828,14 @@ async function sendQuestionTo(session, student, qOrder = null) {
     await finalize(session, student);
     return false;
   }
+  // Delivery has reached an optional question of a selective section: the student
+  // picks from it before seeing it, so the selector replaces this question rather
+  // than arriving after it.
+  if (selection.needsChoice(session, question)) {
+    selection.beginChoice(session.id, question.section_key);
+    await selection.sendSelector(student.phone, session.id, question.section_key);
+    return false;
+  }
   const sequence = sessionQuestionSequence(session);
   const index = sequence.findIndex((q) => q.id === question.id);
 
@@ -901,7 +917,31 @@ async function sendQuestionTo(session, student, qOrder = null) {
  * crash or outage in between leaves a queued row that recoverQueuedSends()
  * replays exactly once.
  */
+/**
+ * The next question this student should see: the first selected question in
+ * delivery order that has no answer yet. Used after a selection is committed,
+ * where "where now?" depends on what the student just picked rather than on the
+ * q_order that happened to be current before the selector opened.
+ */
+function firstUnansweredSelected(session) {
+  const answered = new Set(
+    db.prepare('SELECT q_order FROM answers WHERE session_id = ?').all(session.id)
+      .map((r) => Number(r.q_order))
+  );
+  const seq = sessionQuestionSequence(session);
+  return seq.find((q) => !answered.has(Number(q.q_order))) || null;
+}
+
 async function advanceAndSend(session, student, nextQ) {
+  // The selector is a decision, not a delivery: nothing is owed until the student
+  // picks, so this must not enqueue a question send. current_q_order is also left
+  // alone — the commit path re-reads the sequence and lands on the first SELECTED
+  // question, which is usually not nextQ at all.
+  if (selection.needsChoice(session, nextQ)) {
+    selection.beginChoice(session.id, nextQ.section_key);
+    await selection.sendSelector(student.phone, session.id, nextQ.section_key);
+    return;
+  }
   const entry = outbox.enqueue({
     sessionId: session.id,
     questionId: nextQ.id,
@@ -1000,7 +1040,10 @@ async function handleInbound(phone, body, meta = {}) {
   // answers yet restarts its clock on the first inbound message, so a late
   // starter is never greeted by a countdown that already ran down (e.g. the
   // 59:57 → 6:47 jump from sending hours after the admin pressed Send).
-  if (sessionHasNoAnswers(session.id)) {
+  //
+  // A student still choosing has no answers yet, but their clock is already
+  // running — restarting it on every tap would make the selection cost no time.
+  if (sessionHasNoAnswers(session.id) && session.selection_state !== 'selecting') {
     // Store as ISO 8601 with 'Z' suffix for consistent UTC parsing in deadline().
     const now = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
     db.prepare(
@@ -1058,6 +1101,12 @@ async function maybeStartSession(student) {
       getSessionQuestionCount(existing.id) ||
       db.prepare('SELECT COUNT(*) c FROM questions WHERE exam_id = ?').get(exam.id).c;
     await wa.sendText(student.phone, formatExamIntro(exam, questionCount, { started: true }));
+    // A restart can leave a selector pending with no question sent; re-render it
+    // rather than pushing a question the student never chose.
+    if (existing.selection_state === 'selecting') {
+      await selection.sendSelector(student.phone, existing.id, existing.selection_section);
+      return { ok: true, reason: 'reselecting' };
+    }
     await sendQuestionTo(existing, student);
     return { ok: true, reason: 'resumed' };
   }
@@ -1127,6 +1176,27 @@ async function maybeStartSession(student) {
 // ── Answer processing ──────────────────────────────────────────────────
 
 async function processAnswer(session, student, body, meta = {}) {
+  // A student replying while a selector is open is choosing, not answering. This
+  // must run before the question lookup: current_q_order still points at the
+  // optional question whose selector is open, so grading would record their tap
+  // as an answer to it.
+  if (session.selection_state === 'selecting') {
+    const res = await selection.handleReply(session, student, body, meta);
+    if (res && res.committed) {
+      // The choice is committed and the paper priced. Find where we now are and
+      // deliver — handleReply never sends a question itself.
+      const fresh = getActiveSession(student.id) || session;
+      const nextQ = firstUnansweredSelected(fresh);
+      if (nextQ) {
+        db.prepare('UPDATE sessions SET current_q_order = ? WHERE id = ?').run(nextQ.q_order, fresh.id);
+        await sendQuestionTo(fresh, student, nextQ.q_order);
+      } else {
+        await finalize(fresh, student, 'completed');
+      }
+    }
+    return;
+  }
+
   const exam = db.prepare('SELECT * FROM exams WHERE id = ?').get(session.exam_id);
   const question = getSessionQuestion(session.id, session.current_q_order);
   if (!question) return;
@@ -1983,6 +2053,7 @@ module.exports = {
   drawSessionQuestions,
   topUpPool,
   nextInSequence,
+  firstUnansweredSelected,
   deadline,
   timeRemaining,
   markAllPendingTheory,

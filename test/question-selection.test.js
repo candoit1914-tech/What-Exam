@@ -303,6 +303,281 @@ test('computePaperTotal falls back to every drawn question when none were droppe
   assert.equal(selection.computePaperTotal(sid.id), 10);
 });
 
+// ── Task 4: the WhatsApp selector ──────────────────────────────────────
+
+const wa = require('../src/services/whatsapp');
+
+/** Records every outbound message, whatever helper sends it. */
+function captureWa() {
+  const sent = [];
+  const orig = {
+    sendText: wa.sendText,
+    sendInteractiveList: wa.sendInteractiveList,
+    sendInteractiveButtons: wa.sendInteractiveButtons,
+  };
+  wa.sendText = async (phone, text) => { sent.push({ kind: 'text', text }); return {}; };
+  wa.sendInteractiveList = async (phone, title, body, buttonText, rows, footer) => {
+    sent.push({ kind: 'list', title, body, buttonText, rows, footer });
+    return {};
+  };
+  wa.sendInteractiveButtons = async (phone, text, buttons) => {
+    sent.push({ kind: 'buttons', text, buttons });
+    return {};
+  };
+  return { sent, restore: () => Object.assign(wa, orig) };
+}
+
+function selectiveSession(quota = 2, poolSize = 3) {
+  const eid = paperExam([
+    { marks: 5, compulsory: true, section: 'b' },
+    ...Array.from({ length: poolSize }, () => ({ marks: 5, compulsory: false, section: 'b' })),
+  ]);
+  rule(eid, 'b', 'SECTION B', quota);
+  const sid = examSvc.createSession(eid, 1);
+  return { eid, sid, phone: '23300000000' };
+}
+
+// examSvc.createSession() returns the session ROW itself, so it already has .id.
+// Tests pass either the row or a bare id; accept both so a caller cannot bind an
+// object straight to a SQLite parameter and fail with a driver error.
+const sidOf = (s) => (s && s.id !== undefined ? s.id : s);
+const sessionRow = (sid) => db.prepare('SELECT * FROM sessions WHERE id=?').get(sidOf(sid));
+const allText = (sent) => sent.map((m) => m.text || m.body || '').join('\n');
+
+// Typed numbers are 1-based POSITIONS in the printed listing, not q_orders —
+// that is what the student reads on screen and types back. The pool here starts
+// at q_order 2, so typing a q_order would silently pick a different question.
+// Selection by tap goes through the row id, which does carry q_order.
+const typePositions = (...positions) => positions.join(',');
+
+test('the selector only opens at a non-compulsory question of a selective section', () => {
+  const { sid } = selectiveSession();
+  const drawn = db.prepare(
+    `SELECT sq.q_order, sq.section_key, qp.is_compulsory
+       FROM session_questions sq JOIN question_pool qp ON qp.id = sq.question_id
+      WHERE sq.session_id = ? ORDER BY sq.q_order`
+  ).all(sid.id);
+  const compulsory = drawn.find((r) => r.is_compulsory);
+  const optional = drawn.find((r) => !r.is_compulsory);
+  assert.equal(selection.needsChoice(sessionRow(sid), compulsory), false);
+  assert.equal(selection.needsChoice(sessionRow(sid), optional), true);
+});
+
+test('the selector lists this session q_orders, and never a template id', async () => {
+  const { sid, phone } = selectiveSession(2, 3);
+  const pool = poolOf(sid.id, 'b');
+  const cap = captureWa();
+  try { await selection.sendSelector(phone, sid.id, 'b'); }
+  finally { cap.restore(); }
+  const list = cap.sent.find((m) => m.kind === 'list');
+  assert.ok(list, 'a three-question pool must use an interactive list');
+  assert.equal(list.rows.length, pool.length);
+  for (const row of list.rows) {
+    const qOrder = Number(row.id.split(':')[2]);
+    assert.ok(pool.includes(qOrder), `row id must be a session q_order, got ${row.id}`);
+  }
+});
+
+test('the selector names the compulsory questions and the exact count', async () => {
+  const { sid, phone } = selectiveSession(2, 3);
+  const cap = captureWa();
+  try { await selection.sendSelector(phone, sid.id, 'b'); }
+  finally { cap.restore(); }
+  const body = cap.sent.find((m) => m.kind === 'list').body;
+  assert.match(body, /exactly 2/);
+  assert.match(body, /[Cc]ompulsory/);
+});
+
+test('a pool over ten falls back to numbered text', async () => {
+  const { sid, phone } = selectiveSession(3, 12);
+  const cap = captureWa();
+  try { await selection.sendSelector(phone, sid.id, 'b'); }
+  finally { cap.restore(); }
+  assert.equal(cap.sent.find((m) => m.kind === 'list'), undefined, 'twelve rows must not use a list');
+  const text = cap.sent.find((m) => m.kind === 'text' && /Reply with the numbers/.test(m.text));
+  assert.ok(text, 'the fallback must tell the student how to reply');
+});
+
+test('list rows never exceed ten rows or twenty-four title characters', async () => {
+  const { sid, phone } = selectiveSession(3, 10);
+  const cap = captureWa();
+  try { await selection.sendSelector(phone, sid.id, 'b'); }
+  finally { cap.restore(); }
+  const list = cap.sent.find((m) => m.kind === 'list');
+  if (!list) return; // the text path is covered by the test above
+  assert.ok(list.rows.length <= 10, 'never more than ten rows');
+  for (const r of list.rows) assert.ok(r.title.length <= 24, `row title too long: ${r.title}`);
+});
+
+test('CONFIRM with too few chosen is refused and stays open', async () => {
+  const { sid, phone } = selectiveSession(2, 3);
+  const cap = captureWa();
+  try {
+    selection.beginChoice(sid.id, 'b');
+    await selection.handleReply(sessionRow(sid), { phone }, '1');
+    const res = await selection.handleReply(sessionRow(sid), { phone }, 'CONFIRM');
+    assert.equal(res.committed, false);
+    assert.match(allText(cap.sent), /must choose exactly 2/);
+    assert.equal(sessionRow(sid).selection_state, 'selecting');
+  } finally { cap.restore(); }
+});
+
+test('CONFIRM with the right count commits, prices, and reports committed', async () => {
+  const { sid, phone } = selectiveSession(2, 3);
+  const pool = poolOf(sid.id, 'b');
+  const cap = captureWa();
+  try {
+    selection.beginChoice(sid.id, 'b');
+    await selection.handleReply(sessionRow(sid), { phone }, typePositions(1, 2));
+    const res = await selection.handleReply(sessionRow(sid), { phone }, 'CONFIRM');
+    assert.equal(res.committed, true, 'exam.js needs this signal to deliver the first question');
+    const row = sessionRow(sid);
+    assert.equal(row.paper_total, 15, 'compulsory 5 + two chosen 5s');
+    assert.equal(row.selection_state, '', 'a committed choice is no longer pending');
+    assert.equal(row.selection_tentative, '', 'provisional state is cleared on commit');
+    const chosen = db.prepare(
+      'SELECT q_order, is_selected FROM session_questions WHERE session_id=? ORDER BY q_order'
+    ).all(sid.id);
+    assert.equal(chosen.find((r) => r.q_order === pool[0]).is_selected, 1);
+    assert.equal(chosen.find((r) => r.q_order === pool[1]).is_selected, 1);
+    assert.equal(chosen.find((r) => r.q_order === pool[2]).is_selected, 0);
+  } finally { cap.restore(); }
+});
+
+test('ticks are provisional until CONFIRM', async () => {
+  const { sid, phone } = selectiveSession(2, 3);
+  const pool = poolOf(sid.id, 'b');
+  const cap = captureWa();
+  try {
+    selection.beginChoice(sid.id, 'b');
+    await selection.handleReply(sessionRow(sid), { phone }, '1');
+    const row = sessionRow(sid);
+    assert.equal(row.paper_total, 20, 'the paper is not re-priced on a provisional tick');
+    const drawn = db.prepare(
+      'SELECT q_order, is_selected FROM session_questions WHERE session_id=? ORDER BY q_order'
+    ).all(sid.id);
+    for (const r of drawn) assert.equal(r.is_selected, 1, 'nothing is deselected before CONFIRM');
+    assert.deepEqual(JSON.parse(row.selection_tentative), [pool[0]],
+      'position 1 is the first optional question, which is not q_order 1');
+  } finally { cap.restore(); }
+});
+
+test('CHANGE reopens a committed choice, but only before the first answer', async () => {
+  const { sid, phone } = selectiveSession(1, 2);
+  const cap = captureWa();
+  try {
+    selection.beginChoice(sid.id, 'b');
+    await selection.handleReply(sessionRow(sid), { phone }, '1');
+    await selection.handleReply(sessionRow(sid), { phone }, 'CONFIRM');
+
+    await selection.handleReply(sessionRow(sid), { phone }, 'CHANGE');
+    assert.equal(sessionRow(sid).selection_state, 'selecting', 'CHANGE reopens the selector');
+
+    // Record an answer, which closes the window for good.
+    const first = db.prepare(
+      'SELECT question_id FROM session_questions WHERE session_id=? AND q_order=1'
+    ).get(sid.id);
+    db.prepare(
+      'INSERT INTO answers(session_id,question_id,q_order,answer_text,max_marks) VALUES (?,?,1,?,5)'
+    ).run(sid.id, first.question_id, 'x');
+    await selection.handleReply(sessionRow(sid), { phone }, 'CHANGE');
+    assert.match(allText(cap.sent), /cannot change/i);
+  } finally { cap.restore(); }
+});
+
+test('a reply that is not a choice re-prompts instead of guessing', async () => {
+  const { sid, phone } = selectiveSession();
+  const cap = captureWa();
+  try {
+    selection.beginChoice(sid.id, 'b');
+    const res = await selection.handleReply(sessionRow(sid), { phone }, 'what time is it');
+    assert.equal(res.committed, false);
+    assert.match(allText(cap.sent), /didn't catch that/);
+    assert.equal(sessionRow(sid).selection_state, 'selecting');
+  } finally { cap.restore(); }
+});
+
+test('a fourth tap is refused once the quota is reached', async () => {
+  const { sid, phone } = selectiveSession(2, 3);
+  const pool = poolOf(sid.id, 'b');
+  const cap = captureWa();
+  try {
+    selection.beginChoice(sid.id, 'b');
+    await selection.handleReply(sessionRow(sid), { phone }, '', { replyId: `sel:b:${pool[0]}` });
+    await selection.handleReply(sessionRow(sid), { phone }, '', { replyId: `sel:b:${pool[1]}` });
+    // Tap the third optional: the quota is full, so it must be refused outright.
+    const res = await selection.handleReply(
+      sessionRow(sid), { phone }, '', { replyId: `sel:b:${pool[2]}` }
+    );
+    assert.equal(res.committed, false);
+    assert.match(allText(cap.sent), /already 2 chosen/);
+    assert.deepEqual(JSON.parse(sessionRow(sid).selection_tentative).sort(), [pool[0], pool[1]].sort(),
+      'the refused tap must not be recorded');
+  } finally { cap.restore(); }
+});
+
+test('tapping the same row twice un-chooses it', async () => {
+  const { sid, phone } = selectiveSession(2, 3);
+  const pool = poolOf(sid.id, 'b');
+  const cap = captureWa();
+  try {
+    selection.beginChoice(sid.id, 'b');
+    await selection.handleReply(sessionRow(sid), { phone }, '', { replyId: `sel:b:${pool[0]}` });
+    await selection.handleReply(sessionRow(sid), { phone }, '', { replyId: `sel:b:${pool[0]}` });
+    assert.deepEqual(JSON.parse(sessionRow(sid).selection_tentative), [],
+      'a second tap on the same row is a toggle off');
+  } finally { cap.restore(); }
+});
+
+test('a reply with no selector open is left alone', async () => {
+  const { sid, phone } = selectiveSession();
+  const cap = captureWa();
+  try {
+    const res = await selection.handleReply(sessionRow(sid), { phone }, '2');
+    assert.deepEqual(res, { handled: false, committed: false });
+    assert.equal(cap.sent.length, 0, 'nothing is sent when no section is pending');
+  } finally { cap.restore(); }
+});
+
+test('a student who confirms is actually sent their first chosen question', async () => {
+  const { sid, phone } = selectiveSession(2, 3);
+  const pool = poolOf(sid.id, 'b');
+  const cap = captureWa();
+  try {
+    const student = { id: 1, phone };
+    const compulsory = db.prepare(
+      `SELECT sq.q_order FROM session_questions sq
+         JOIN question_pool qp ON qp.id = sq.question_id
+        WHERE sq.session_id = ? AND qp.is_compulsory = 1 ORDER BY sq.q_order LIMIT 1`
+    ).get(sid.id);
+    assert.ok(compulsory, 'the fixture needs a compulsory question to deliver first');
+
+    // Deliver up to the optional question; the selector should take over there.
+    const atOptional = pool[0];
+    const session = sessionRow(sid);
+    db.prepare('UPDATE sessions SET current_q_order = ? WHERE id = ?').run(atOptional, session.id);
+    const opened = await examSvc.sendQuestionTo(sessionRow(sid), student, atOptional);
+    assert.equal(opened, false, 'the selector replaces the question, so nothing was delivered');
+    assert.equal(sessionRow(sid).selection_state, 'selecting');
+
+    // Answer the compulsory question, then reach the selector like exam.js does.
+    await examSvc.processAnswer(
+      sessionRow(sid), student, 'my answer',
+    );
+    assert.equal(sessionRow(sid).selection_state, 'selecting',
+      'answering the compulsory question must not close the pending selector');
+
+    const res = await examSvc.processAnswer(sessionRow(sid), student, '1,2 CONFIRM');
+    assert.equal(res, undefined, 'processAnswer returns nothing; delivery is the assertion');
+
+    const fresh = sessionRow(sid);
+    assert.equal(fresh.selection_state, '', 'the committed choice is no longer pending');
+    assert.equal(fresh.current_q_order, pool[0],
+      'delivery resumed at the first question the student chose');
+    assert.ok(allText(cap.sent).includes('Locked in'), 'the commit is acknowledged to the student');
+  } finally { cap.restore(); }
+});
+
 // ── Task 3: drawing and ordering ───────────────────────────────────────
 
 function order(eid) {

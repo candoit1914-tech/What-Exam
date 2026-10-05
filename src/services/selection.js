@@ -1,4 +1,5 @@
 const db = require('../db');
+const wa = require('./whatsapp');
 
 // ── Rule resolution ────────────────────────────────────────────────────
 //
@@ -210,13 +211,262 @@ function applySelection(sessionId, sectionKey, chosenQOrders) {
     setSel.run(chosen.has(row.q_order) ? 1 : 0, sessionId, row.q_order);
   }
   const total = computePaperTotal(sessionId);
-  // Clear any provisional state; the choice is now committed.
+  // Clear the provisional state; the choice is now committed. selection_section
+  // is deliberately KEPT: it is the only pointer handleReply has to the section,
+  // so clearing it would make a later CHANGE reply an unroutable no-op.
   db.prepare(
-    `UPDATE sessions SET paper_total = ?, selection_state = '', selection_section = '',
-                        selection_tentative = ''
+    `UPDATE sessions SET paper_total = ?, selection_state = '', selection_tentative = ''
       WHERE id = ?`
   ).run(total, sessionId);
   return total;
+}
+
+// ── Selector ───────────────────────────────────────────────────────────
+//
+// WhatsApp list messages cap at ten rows and row titles at 24 characters, so
+// a bigger pool has to arrive as numbered text. Both paths speak the same
+// protocol (taps, "2,4,5", CONFIRM) so nothing downstream branches on which
+// one was used.
+//
+// Every key below is a session q_order. The student is told "QUESTION 7", taps
+// row `sel:b:7`, and types "7" — so q_order is the only identifier that means
+// the same thing to all three.
+
+const LIST_ROW_CAP = 10;
+const ROW_TITLE_CAP = 24;
+const CONFIRM_WORDS = new Set(['confirm', 'done', 'ok', 'okay', 'yes', 'submit']);
+const CHANGE_WORDS = new Set(['change', 'edit', 'switch', 'back']);
+
+function hasSelections(examId) {
+  return sectionPlan(examId).some((s) => s.quota > 0);
+}
+
+function beginChoice(sessionId, sectionKey) {
+  db.prepare("UPDATE sessions SET selection_state='selecting', selection_section=? WHERE id=?")
+    .run(sectionKey, sessionId);
+}
+
+function stem(q) {
+  return String(q.text || '').replace(/\s+/g, ' ').trim();
+}
+
+function rowTitle(q, n) {
+  return (`${n}. ${stem(q)}`).slice(0, ROW_TITLE_CAP);
+}
+
+/** The numbered listing used by both the big-pool and the error paths. */
+function listing(plan) {
+  return plan.optional.map((q, i) => `${i + 1}. ${stem(q).slice(0, 90)}`).join('\n');
+}
+
+function selectorBody(plan) {
+  const lines = [];
+  if (plan.title) lines.push(`*${plan.title}*`, '');
+  if (plan.instructions) lines.push(`${plan.instructions}`, '');
+  const locked = plan.compulsory.map((q) => `Q${q.q_order}`);
+  if (locked.length) {
+    lines.push(`🔒 Compulsory — you will answer ${locked.join(', ')}.`);
+  }
+  lines.push(`You must choose exactly ${plan.quota} of the ${plan.optional.length} questions below.`);
+  return lines.join('\n');
+}
+
+async function sendSelector(phone, sessionId, sectionKey) {
+  const plan = sessionPlan(sessionId).find((s) => s.section_key === sectionKey);
+  if (!plan || plan.quota <= 0) return;
+  const body = selectorBody(plan);
+
+  if (plan.optional.length > LIST_ROW_CAP) {
+    await wa.sendText(
+      phone,
+      `${body}\n\n${listing(plan)}\n\nReply with the numbers you choose, e.g. 1,3 — then CONFIRM.`
+    );
+    return;
+  }
+
+  const rows = plan.optional.map((q, i) => ({
+    id: `sel:${sectionKey}:${q.q_order}`,
+    title: rowTitle(q, i + 1),
+  }));
+  try {
+    await wa.sendInteractiveList(
+      phone, plan.title || 'Choose', body, 'Choose questions', rows,
+      `Tap to toggle · choose ${plan.quota}`
+    );
+  } catch (err) {
+    // An interactive message can be rejected outright; the numbered-text path
+    // always works, so fall back rather than stranding the student.
+    console.error('[selection] list message failed, using text:', err.message);
+    await wa.sendText(
+      phone,
+      `${body}\n\n${listing(plan)}\n\nReply with the numbers you choose, e.g. 1,3 — then CONFIRM.`
+    );
+  }
+}
+
+/**
+ * The q_orders a student means, from a typed reply or a list row id.
+ * Returns { toggles: [q_order] } for a tap, or { set: [q_order] } for typed
+ * numbers.
+ */
+function parseChoice(text, meta, plan) {
+  const byRowId = new Map(plan.optional.map((q) => [`sel:${plan.section_key}:${q.q_order}`, q.q_order]));
+  const tapped = byRowId.get(meta.replyId || meta.selectedId || '');
+  if (tapped != null) return { toggles: [tapped] };
+
+  const pool = plan.optional.map((q) => q.q_order);
+  const digits = (String(text || '').match(/\d+/g) || []).map((d) => parseInt(d, 10));
+  // A typed number is read first as a position in the printed listing, because
+  // that is what the student just read. It is only then read as a q_order, so a
+  // student who types the question number they were shown still gets it right.
+  const byIndex = digits.filter((n) => n >= 1 && n <= pool.length).map((n) => pool[n - 1]);
+  if (byIndex.length) return { set: [...new Set(byIndex)] };
+  const byOrder = digits.filter((n) => pool.includes(n));
+  if (byOrder.length) return { set: [...new Set(byOrder)] };
+  return null;
+}
+
+/** q_orders the student has provisionally ticked, without committing anything. */
+function currentChoice(sessionId, sectionKey) {
+  const plan = sessionPlan(sessionId).find((s) => s.section_key === sectionKey);
+  if (!plan) return [];
+  const pending = db.prepare('SELECT selection_tentative FROM sessions WHERE id = ?').get(sessionId);
+  let ids = [];
+  if (pending && pending.selection_tentative) {
+    try { ids = JSON.parse(pending.selection_tentative); } catch { ids = []; }
+  }
+  const pool = new Set(plan.optional.map((q) => q.q_order));
+  return ids.filter((id) => pool.has(Number(id)));
+}
+
+/** Ticks are provisional; only applySelection commits them. */
+function persistChoice(sessionId, sectionKey, chosen) {
+  db.prepare('UPDATE sessions SET selection_tentative = ? WHERE id = ?')
+    .run(JSON.stringify(chosen), sessionId);
+}
+
+/**
+ * Handle one reply while a selector is open.
+ *
+ * Returns { handled, committed }. `committed: true` means exam.js must now
+ * deliver the first selected question — the selector never sends it itself.
+ */
+async function handleReply(session, student, body, meta = {}) {
+  const phone = student.phone;
+  const sectionKey = session.selection_section;
+  const plan = sessionPlan(session.id).find((s) => s.section_key === sectionKey);
+  if (!plan || plan.quota <= 0) return { handled: false, committed: false };
+
+  const raw = String(body || '').trim().toLowerCase();
+  // Students type the choice and the word in one message ("1,3 CONFIRM"), so the
+  // keyword is matched as a word anywhere in the reply rather than as the whole
+  // body — an exact match would silently treat that as an unconfirmed tick.
+  const says = (words) => raw.split(/[^a-z]+/).some((w) => words.has(w));
+  // A CHANGE keyword must be the whole reply: "back" is a normal English word and
+  // would otherwise hijack any question containing it.
+  const isChangeOnly = CHANGE_WORDS.has(raw) && raw.split(/[^a-z]+/).length === 1;
+
+  // CHANGE reopens a committed choice, but only while nothing has been
+  // answered — the first answer is what closes the window.
+  if (isChangeOnly) {
+    const answered = db
+      .prepare('SELECT COUNT(*) c FROM answers WHERE session_id = ?')
+      .get(session.id).c;
+    if (answered > 0) {
+      await wa.sendText(phone, 'Your question choice is locked now that you have answered. You cannot change it.');
+      return { handled: true, committed: false };
+    }
+    // Undo the previous commit so the section reads as unchosen again, and carry
+    // the committed picks over as the provisional ones so the student does not
+    // lose their work by reopening.
+    const committed = db
+      .prepare(
+        `SELECT q_order FROM session_questions
+          WHERE session_id = ? AND section_key = ? AND is_selected = 1
+            AND question_id IN (SELECT id FROM question_pool WHERE is_compulsory = 0)
+          ORDER BY q_order`
+      )
+      .all(session.id, sectionKey)
+      .map((r) => r.q_order);
+    db.prepare(
+      'UPDATE session_questions SET is_selected = 1 WHERE session_id = ? AND section_key = ?'
+    ).run(session.id, sectionKey);
+    db.prepare('UPDATE sessions SET selection_tentative = ? WHERE id = ?')
+      .run(JSON.stringify(committed), session.id);
+    beginChoice(session.id, sectionKey);
+    await sendSelector(phone, session.id, sectionKey);
+    return { handled: true, committed: false };
+  }
+
+  const chosen = new Set(currentChoice(session.id, sectionKey));
+
+  // A combined "1,3 CONFIRM" both sets the choice and commits it, so apply any
+  // numbers in the message before testing the count.
+  const digitsInRaw = raw.match(/\d+/g);
+  if (meta.replyId !== 'sel:confirm' && says(CONFIRM_WORDS) && digitsInRaw && digitsInRaw.length) {
+    const parsed = parseChoice(raw, meta, plan);
+    chosen.clear();
+    for (const q of (parsed ? parsed.set || parsed.toggles || [] : [])) chosen.add(q);
+  }
+
+  if (meta.replyId === 'sel:confirm' || says(CONFIRM_WORDS)) {
+    if (chosen.size !== plan.quota) {
+      await wa.sendText(
+        phone,
+        `You must choose exactly ${plan.quota} question${plan.quota === 1 ? '' : 's'}. ` +
+        `You have chosen ${chosen.size}. Reply with the numbers, e.g. 1,3, then CONFIRM.`
+      );
+      await sendSelector(phone, session.id, sectionKey);
+      return { handled: true, committed: false };
+    }
+    applySelection(session.id, sectionKey, [...chosen]);
+    await wa.sendText(
+      phone,
+      `✅ Locked in. Answering ${chosen.size} question${chosen.size === 1 ? '' : 's'} from this section.`
+    );
+    return { handled: true, committed: true };
+  }
+
+  const parsed = parseChoice(body, meta, plan);
+  if (!parsed) {
+    await wa.sendText(
+      phone,
+      `I didn't catch that. Tap the questions you want, or reply with their numbers like *1,3*, then send CONFIRM.`
+    );
+    await sendSelector(phone, session.id, sectionKey);
+    return { handled: true, committed: false };
+  }
+
+  if (parsed.set) {
+    if (parsed.set.length > plan.quota) {
+      await wa.sendText(
+        phone,
+        `You chose ${parsed.set.length} but this section needs exactly ${plan.quota}. ` +
+        `Pick ${plan.quota}, e.g. *1,3*, then CONFIRM.`
+      );
+      return { handled: true, committed: false };
+    }
+    chosen.clear();
+    parsed.set.forEach((q) => chosen.add(q));
+  } else {
+    for (const q of parsed.toggles) {
+      if (chosen.has(q)) chosen.delete(q);
+      else if (chosen.size < plan.quota) chosen.add(q);
+      else {
+        await wa.sendText(phone, `That is already ${plan.quota} chosen — remove one first, or reply CONFIRM.`);
+        return { handled: true, committed: false };
+      }
+    }
+  }
+
+  persistChoice(session.id, sectionKey, [...chosen]);
+  await wa.sendText(
+    phone,
+    chosen.size
+      ? `✓ Chosen: ${[...chosen].map((q) => `Q${q}`).join(', ')} — ${chosen.size} of ${plan.quota}. Reply CONFIRM to lock it in.`
+      : `Cleared. Choose ${plan.quota} question${plan.quota === 1 ? '' : 's'}.`
+  );
+  return { handled: true, committed: false };
 }
 
 module.exports = {
@@ -224,7 +474,11 @@ module.exports = {
   sectionPlan,
   sessionPlan,
   isSelective,
+  hasSelections,
   needsChoice,
   computePaperTotal,
   applySelection,
+  beginChoice,
+  sendSelector,
+  handleReply,
 };
