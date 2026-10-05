@@ -233,6 +233,10 @@ async function startJob(jobId, buffer, opts = {}) {
   updateJob(jobId, { status: 'running', stage: 'Reading PDF…', progress: 2 });
 
   const created = [];
+  // Every question row this job wrote, as ids. applySelectionRules re-reads them
+  // so its claims are checked against what was really saved, not against what the
+  // model claimed.
+  const savedRows = [];
   try {
     const sourceText = await pdf.textWithMarkers(buffer);
     // textWithMarkers already calls analyzeDocument internally which includes
@@ -319,8 +323,8 @@ async function startJob(jobId, buffer, opts = {}) {
     let nextOrder =
       (db.prepare('SELECT MAX(q_order) m FROM questions WHERE exam_id = ?').get(job.exam_id).m || 0) + 1;
     const insert = db.prepare(
-      `INSERT INTO questions (exam_id, q_order, type, text, passage, options, correct_answer, marks, difficulty, learning_objective, explanation, source, image)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`
+      `INSERT INTO questions (exam_id, q_order, type, text, passage, options, correct_answer, marks, difficulty, learning_objective, explanation, source, image, section_key, source_number)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
     );
 
     // Reading-comprehension papers share one passage across a run of
@@ -382,9 +386,11 @@ async function startJob(jobId, buffer, opts = {}) {
         const marks = parseFloat(g.marks) || 1;
         const info = insert.run(
           job.exam_id, nextOrder, 'objective', g.text, passage, JSON.stringify(opts),
-          correct, marks, g.difficulty || 'medium', g.learning_objective || '', explanation, 'pdf', imageFile
+          correct, marks, g.difficulty || 'medium', g.learning_objective || '', explanation, 'pdf', imageFile,
+          slugOf(g.section), Number(g.number) || 0
         );
         created.push(info.lastInsertRowid);
+        savedRows.push(info.lastInsertRowid);
         await storeMathImages(g, info.lastInsertRowid, sourceText.mathExprs || [], pageCache, buffer, job.exam_id, nextOrder);
         db.prepare(
           `INSERT INTO marking_schemes (question_id, type, scheme) VALUES (?, 'objective', ?)
@@ -398,10 +404,12 @@ async function startJob(jobId, buffer, opts = {}) {
       } else {
         const info = insert.run(
           job.exam_id, nextOrder, 'theory', g.text, passage, null, null,
-          parseFloat(g.marks) || 5, g.difficulty || 'medium', g.learning_objective || '', '', 'pdf', imageFile
+          parseFloat(g.marks) || 5, g.difficulty || 'medium', g.learning_objective || '', '', 'pdf', imageFile,
+          slugOf(g.section), Number(g.number) || 0
         );
         const q = db.prepare('SELECT * FROM questions WHERE id = ?').get(info.lastInsertRowid);
         created.push(q.id);
+        savedRows.push(q.id);
         await storeMathImages(g, q.id, sourceText.mathExprs || [], pageCache, buffer, job.exam_id, nextOrder);
         // Preserve ANY marking-scheme content the paper provides (model answer,
         // key points, rubric). A partial scheme is kept verbatim and then passed
@@ -459,6 +467,21 @@ async function startJob(jobId, buffer, opts = {}) {
       }
     }
 
+    // Selection rules last: every question row must exist before any claim about
+    // those rows can be checked against what was really extracted.
+    try {
+      const out = applySelectionRules(
+        job.exam_id,
+        filtered,
+        savedRows.map((id) => db.prepare('SELECT id, q_order, section_key, source_number FROM questions WHERE id = ?').get(id)),
+        buildSectionMeta(filtered)
+      );
+      if (out.applied) updateJob(jobId, { stage: 'Applying selection rules…', progress: 68 });
+    } catch (err) {
+      // A rule we cannot read must never fail an otherwise good import.
+      console.error('[pdfImport] selection rules failed (continuing):', err.message);
+    }
+
     marking.recomputeExamTotal(job.exam_id);
     updateJob(jobId, { status: 'done', stage: 'Done', progress: 100, count: created.length });
   } catch (err) {
@@ -480,6 +503,144 @@ async function startJob(jobId, buffer, opts = {}) {
   }
 }
 
+/** "SECTION B" -> "section-b". Stable, so it matches what the admin sees. */
+function slugOf(section) {
+  return String(section || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '');
+}
+
+/**
+ * Read the "answer any N of M" limit out of the section instruction the extractor
+ * preserved on the first question of each section. The instruction text lands in
+ * `passage` (see the SECTION INSTRUCTIONS prompt rule), so the count has to be
+ * recovered from there; anything not recognised is simply left at 0, which means
+ * answer-all and therefore no rule.
+ */
+function buildSectionMeta(questions) {
+  const meta = {};
+  for (const q of Array.isArray(questions) ? questions : []) {
+    const section = String((q && q.section) || '').trim();
+    if (!section || meta[section]) continue;
+    const text = `${q.instructions || ''} ${q.passage || ''}`;
+    // "Answer any TWO questions", "Answer TWO (2) questions", "Answer 2 questions".
+    const words = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
+    // "Answer all FOUR", "Answer any TWO", "Answer 2" — `all`/`any` is filler, not
+    // a count, and a word here must not be read as a digit.
+    const byWord = text.match(/answer\s+(?:all\s+|any\s+)?(\w+)(?:\s*\(\d+\))?\s+(?:of\s+(?:the\s+)?\w+\s+)?questions?/i);
+    const byDigit = text.match(/answer\s+(?:any\s+)?(\d+)\s+(?:of\s+(?:the\s+)?\w+\s+)?questions?/i);
+    let count = 0;
+    if (byDigit) count = parseInt(byDigit[1], 10);
+    else if (byWord && words[String(byWord[1]).toLowerCase()]) count = words[String(byWord[1]).toLowerCase()];
+    meta[section] = {
+      title: section,
+      instructions: String(q.instructions || ''),
+      answer_count: count,
+    };
+  }
+  return meta;
+}
+
+/**
+ * Turn the extraction's per-question selection facts into stored rules.
+ *
+ * `questions` is the extraction array itself — the only shape this pipeline
+ * actually returns. Section rules are DERIVED by grouping on each question's
+ * `section`, and `sectionMeta` (title, instructions, answer_count, keyed by the
+ * verbatim heading) supplies the wording. Every claim is checked against the rows
+ * we actually saved:
+ *
+ *   - a compulsory question whose number never landed in the database is reported
+ *     and dropped, because pointing at the wrong question is unrecoverable;
+ *   - a count larger than the real pool is clamped;
+ *   - a rule that ends up meaning "answer all" is not written at all, so the exam
+ *     behaves exactly as it does today.
+ */
+function applySelectionRules(examId, questions, savedQuestions, sectionMeta = {}) {
+  const list = Array.isArray(questions) ? questions : [];
+  if (!list.length) return { applied: 0, skipped: [] };
+
+  const saved = Array.isArray(savedQuestions) ? savedQuestions : [];
+  // Keyed on the PRINTED number, which is what the paper said and what the model
+  // echoed back. q_order is insertion order and drifts the moment a block drops.
+  const bySourceNumber = new Map();
+  for (const q of saved) {
+    const n = Number(q.source_number);
+    if (n) bySourceNumber.set(n, q);
+  }
+
+  const skipped = [];
+  let applied = 0;
+
+  // Group the extraction by section, keeping the model-declared compulsory flag.
+  const groups = new Map();
+  for (const q of list) {
+    const section = String((q && q.section) || '').trim();
+    if (!section) continue;
+    if (!groups.has(section)) groups.set(section, []);
+    groups.get(section).push(q);
+  }
+
+  db.exec('BEGIN');
+  try {
+    let position = 0;
+    for (const [section, members] of groups) {
+      const key = slugOf(section);
+      const inSection = saved.filter((q) => String(q.section_key || '') === key);
+
+      // Compulsory questions in this section, matched on the printed number.
+      const forcedIds = new Set();
+      for (const q of members) {
+        if (!q.compulsory) continue;
+        const row = bySourceNumber.get(Number(q.number));
+        if (row) forcedIds.add(row.id);
+        else skipped.push(`${section}: compulsory question ${q.number} was not extracted`);
+      }
+      if (!inSection.length) {
+        skipped.push(`${section}: no questions were saved for it`);
+        continue;
+      }
+
+      // Write BOTH directions. is_compulsory defaults to 1, so a reconciliation
+      // that only ever forces questions leaves the whole pool compulsory and
+      // every quota silently collapses to answer-all.
+      const setFlag = db.prepare('UPDATE questions SET is_compulsory = ? WHERE id = ?');
+      for (const q of inSection) setFlag.run(forcedIds.has(q.id) ? 1 : 0, q.id);
+
+      const meta = sectionMeta[section] || sectionMeta[key] || {};
+      const pool = inSection.length - forcedIds.size;
+      const want = Math.max(0, parseInt(meta.answer_count, 10) || 0);
+      const count = Math.min(want, pool);
+      if (count <= 0 || count >= pool) {
+        skipped.push(`${section}: rule is answer-all, nothing to choose`);
+        continue;
+      }
+
+      db.prepare(
+        `INSERT INTO exam_sections(exam_id,section_key,title,instructions,position,answer_count)
+         VALUES (?,?,?,?,?,?)
+         ON CONFLICT(exam_id, section_key) DO UPDATE SET
+           title=excluded.title, instructions=excluded.instructions,
+           position=excluded.position, answer_count=excluded.answer_count`
+      ).run(
+        examId, key,
+        String(meta.title || section),
+        String(meta.instructions || ''),
+        position++, count
+      );
+      applied++;
+    }
+    db.exec('COMMIT');
+  } catch (err) {
+    db.exec('ROLLBACK');
+    throw err;
+  }
+  console.log(`[pdfImport] selection rules: applied ${applied}, skipped ${skipped.length}`, skipped);
+  return { applied, skipped };
+}
+
 module.exports = {
   getJob,
   allJobs,
@@ -495,4 +656,7 @@ module.exports = {
   imageFileNameFor,
   storeMathImages,
   describeExtractionFailure,
+  slugOf,
+  buildSectionMeta,
+  applySelectionRules,
 };

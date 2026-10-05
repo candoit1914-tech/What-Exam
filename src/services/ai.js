@@ -1510,6 +1510,8 @@ Objective:
 {
   "type": "objective",
   "number": 12,            // original question number from the paper, as an integer
+  "section": "SECTION B",  // the section heading this question sits under, verbatim; "" if the paper has no sections
+  "compulsory": false,     // true ONLY if the paper forces this exact question
   "text": "stem (options already removed)",
   "options": ["A. Kumasi", "B. Accra", ...]  // KEEP the original letter prefixes (A., B., C., D.) exactly as written on the paper
   "correct_answer": "B",   // the option LETTER if the document has an answer key, else "" (empty string)
@@ -1525,6 +1527,8 @@ Theory:
 {
   "type": "theory",
   "number": 1,            // original question number from the paper, as an integer
+  "section": "SECTION B",  // the section heading this question sits under, verbatim; "" if the paper has no sections
+  "compulsory": false,     // true ONLY if the paper forces this exact question
   "text": "stem",
   "passage": "",     // full passage/context this question is based on, else ""
   "marks": 5,
@@ -1544,6 +1548,8 @@ Rules:
 - KEEP the options in the exact order and with the exact letters they have on the paper.
 - PASSAGES: Reading-comprehension questions are based on a passage that appears before them in the document. If a question depends on such a passage, set its "passage" field to the full passage text VERBATIM on the FIRST question that uses that passage, and leave "passage": "" on the LATER questions that use the SAME passage (the system attaches it to the whole group). Preserve instructions that introduce the passage ("Read the following passage carefully and answer questions 1 to 5.") as part of that first question's passage.
 - SECTION INSTRUCTIONS: Preserve section-level instructions students need to answer the questions (e.g. "Answer ONE question in this section", "Your answer should be between 250 and 300 words", "Answer ALL questions", "Write a letter", "Translate into English"). Attach them to the "passage" field of the FIRST question of that section — for BOTH objective and theory questions — and leave "passage": "" on the later questions of the same section. Never drop instructions that appear in the document.
+- SECTION: "section" is the heading the question sits under, VERBATIM (e.g. "SECTION B", "Part II"), or "" when the paper has no sections. It must be IDENTICAL for every question of the same section — grouping on this value is how the platform reconstructs sections.
+- COMPULSORY: "compulsory" is true ONLY for questions the document itself forces ("Answer ALL questions in Section A", "Questions 1 and 2 are compulsory", "Question 3 is compulsory"). A question that merely sits in a section with a limit is NOT compulsory — do not mark it true because it shares a section with compulsory questions. When in doubt, leave it false.
 - MARKING SCHEME: If a marking scheme / model answer / suggested answers section for the questions is quoted in the prompt, use it VERBATIM to fill model_answer, key_points and rubric for the matching theory questions (do not regenerate or paraphrase it).
 - For theory questions with no rubric in the source, leave rubric/model_answer empty (the system will generate them).
 - Do NOT invent answer keys that are not in the document. Leave correct_answer as "" and correct_index as null when unknown.
