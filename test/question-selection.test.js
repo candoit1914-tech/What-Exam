@@ -914,6 +914,109 @@ test('nextInSequence steps over a question the student deselected', () => {
   assert.equal(next, null, `q_order ${pool[0] + 1} was deselected, so there is nothing after it`);
 });
 
+// ── Task 9: the whole paper, walked end to end ─────────────────────────
+
+test('a selective paper is walked end to end: compulsory first, then the choice', async () => {
+  // Section A is answer-all. Section B holds three optional questions and the
+  // quota is two. The pool MUST exceed the quota: a two-question pool with
+  // answer_count 2 clamps to answer-all, the selector never opens, and the
+  // failure reads as "the feature does not work" rather than as a bad fixture.
+  const eid = paperExam([
+    { compulsory: true, section: 'a' },
+    { compulsory: true, section: 'a' },
+    { compulsory: false, section: 'b' },
+    { compulsory: false, section: 'b' },
+    { compulsory: false, section: 'b' },
+  ]);
+  rule(eid, 'a', 'SECTION A', 0);
+  rule(eid, 'b', 'SECTION B', 2);
+
+  // handleInbound resolves the student from the phone, then looks up THEIR active
+  // session. Binding the session to an unrelated student id would have
+  // getOrCreateStudent mint a second student with no session, and every reply
+  // would fall through to the "no pending exams" branch instead of grading.
+  const phone = '23355500000';
+  const studentId = db.prepare('INSERT INTO students(phone) VALUES (?)').run(phone).lastInsertRowid;
+  db.prepare('INSERT INTO exam_recipients(exam_id,student_id) VALUES (?,?)').run(eid, studentId);
+  const sid = examSvc.createSession(eid, studentId);
+  const pool = poolOf(sid.id, 'b');          // session q_orders, never template ids
+  assert.equal(pool.length, 3, 'three selectable questions');
+
+  // A free-text theory answer kicks off AI-plagiarism detection in the
+  // background, which reaches the network and logs a 401 here. It never blocks
+  // grading, but the test is about selection, so stub it out.
+  const ai = require('../src/services/ai');
+  const realDetect = ai.detectAiGeneratedAnswer;
+  ai.detectAiGeneratedAnswer = async () => ({ ai_generated: false });
+
+  const cap = captureWa();
+  try {
+    // No START here. createSession already opened the session, so a START reply
+    // would be graded as the answer to the first THEORY question (any text is a
+    // valid theory answer) and silently consume it before selection is reached.
+    assert.equal(sessionRow(sid).current_q_order, 1, 'compulsory questions come first');
+
+    // Answering the FIRST compulsory question must not open a selector: the
+    // student is still inside section A. The assertion belongs here, before the
+    // second answer — checked after it, section A is finished and the section B
+    // selector is supposed to be open, so the check would fail on correct code.
+    await examSvc.handleInbound(phone, 'an answer to A1');
+    assert.equal(
+      cap.sent.find((m) => m.kind === 'list'), undefined,
+      'no selector while section A is still being answered'
+    );
+    assert.equal(sessionRow(sid).current_q_order, 2, 'still inside section A');
+
+    // The second compulsory answer finishes section A, so now the choice opens.
+    await examSvc.handleInbound(phone, 'an answer to A2');
+    const selector = cap.sent.find((m) => m.kind === 'list');
+    assert.ok(selector, 'the section B selector opens once section A is done');
+    assert.equal(selector.rows.length, 3, 'every optional question is offered');
+    assert.equal(sessionRow(sid).selection_state, 'selecting');
+    assert.equal(sessionRow(sid).selection_section, 'b');
+    // current_q_order deliberately stays on the last compulsory question: the
+    // selector is a decision, not a delivery, so nothing is owed until the
+    // student picks. The commit path lands on the first SELECTED question.
+    assert.equal(sessionRow(sid).current_q_order, 2,
+      'the position does not advance until the choice is committed');
+
+    // Choose the first and last optional, leaving the middle one behind. Typed
+    // replies carry listing POSITIONS (1 and 3 here), not the q_orders the
+    // assertions below use — the pool starts at q_order 3, so typing q_orders
+    // would silently pick a different question.
+    const skippedOrder = pool[1];
+    // session_questions holds no text of its own — the wording lives on the pool
+    // row it points at.
+    const skippedText = db.prepare(
+      `SELECT qp.text FROM session_questions sq JOIN question_pool qp ON qp.id = sq.question_id
+        WHERE sq.session_id=? AND sq.q_order=?`
+    ).get(sid.id, skippedOrder).text;
+
+    await examSvc.handleInbound(phone, `${typePositions(1, 3)} CONFIRM`);
+    assert.match(allText(cap.sent), /Locked in/);
+
+    // is_selected lives on session_questions, not on the pool row: the pool is the
+    // template, the session row is this student's actual choice.
+    const flags = db.prepare(
+      `SELECT sq.q_order, sq.is_selected FROM session_questions sq
+        WHERE sq.session_id = ? ORDER BY sq.q_order`
+    ).all(sid.id);
+    assert.equal(flags.find((r) => r.q_order === pool[0]).is_selected, 1);
+    assert.equal(flags.find((r) => r.q_order === skippedOrder).is_selected, 0,
+      'the unchosen question is deselected');
+    assert.equal(flags.find((r) => r.q_order === pool[2]).is_selected, 1);
+
+    assert.ok(
+      !allText(cap.sent).includes(skippedText),
+      'the unchosen question is never delivered'
+    );
+    assert.equal(sessionRow(sid).selection_state, '', 'the selection window closed on commit');
+    assert.equal(sessionRow(sid).selection_tentative, '', 'no provisional state survives the commit');
+    assert.equal(sessionRow(sid).current_q_order, pool[0],
+      'the commit lands on the first selected question, not the skipped middle one');
+  } finally { ai.detectAiGeneratedAnswer = realDetect; cap.restore(); }
+});
+
 test('clearing the rules deletes them all', () => {
   const eid = db.prepare("INSERT INTO exams(title,duration_minutes,status) VALUES ('Clear',30,'live')").run().lastInsertRowid;
   db.prepare(
