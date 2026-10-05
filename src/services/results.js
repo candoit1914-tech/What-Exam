@@ -8,7 +8,21 @@ const { buildZip } = require('./zip');
 function computeForSession(sessionId) {
   const session = db.prepare('SELECT * FROM sessions WHERE id = ?').get(sessionId);
   const exam = db.prepare('SELECT * FROM exams WHERE id = ?').get(session.exam_id);
-  const totalMarks = db.prepare('SELECT COALESCE(SUM(max_marks),0) t FROM answers WHERE session_id = ?').get(sessionId).t;
+  // The denominator is the price of the paper, not the sum of what came back.
+  // Summing answers let a student raise their percentage by skipping the
+  // hard questions, and left every timed-out attempt graded on a short paper.
+  const priced = Number(session.paper_total) || 0;
+  // Sessions predating paper_total have none recorded, so price them from the
+  // questions they were DRAWN. Falling back to the answered marks would grade a
+  // historical 1-of-2 attempt as a perfect score, which is the exact bug this
+  // change exists to remove — so it must not be reintroduced for legacy rows.
+  const drawnTotal = db.prepare(
+    `SELECT COALESCE(SUM(qp.marks), 0) t
+       FROM session_questions sq JOIN question_pool qp ON qp.id = sq.question_id
+      WHERE sq.session_id = ?`
+  ).get(sessionId).t;
+  const answeredTotal = db.prepare('SELECT COALESCE(SUM(max_marks),0) t FROM answers WHERE session_id = ?').get(sessionId).t;
+  const totalMarks = priced > 0 ? priced : (drawnTotal > 0 ? drawnTotal : answeredTotal);
   const awarded = db.prepare('SELECT COALESCE(SUM(marks_awarded),0) s FROM answers WHERE session_id = ?').get(sessionId).s;
   const answered = db.prepare('SELECT COUNT(*) c FROM answers WHERE session_id = ?').get(sessionId).c;
   const drawn = db.prepare('SELECT COUNT(*) c FROM session_questions WHERE session_id = ?').get(sessionId).c;
@@ -25,6 +39,7 @@ function computeForSession(sessionId) {
     passed: percentage >= (exam.pass_percentage ?? config.exam.passPercentage),
     answered,
     questionCount,
+    priceSource: priced > 0 ? 'priced' : (drawnTotal > 0 ? 'drawn' : 'answers'),
   };
 }
 

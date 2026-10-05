@@ -578,6 +578,91 @@ test('a student who confirms is actually sent their first chosen question', asyn
   } finally { cap.restore(); }
 });
 
+const results = require('../src/services/results');
+
+// ── Task 5: grading against the priced paper ───────────────────────────
+
+// answers.question_id points at the DRAWN question — question_pool.id, reached
+// through session_questions — which is what a real inbound answer carries. The
+// column has no FK precisely because template rows also exist, so nothing stops a
+// test from quietly using a template id and testing a shape production never makes.
+function answerFirst(sid, marks) {
+  const q = db.prepare(
+    'SELECT question_id, q_order FROM session_questions WHERE session_id=? ORDER BY q_order'
+  ).get(sid);
+  db.prepare(
+    `INSERT INTO answers(session_id,question_id,q_order,answer_text,marks_awarded,max_marks,marked_by)
+     VALUES (?,?,?,'x',?,?,'auto')`
+  ).run(sid, q.question_id, q.q_order, marks, marks);
+}
+
+test('the denominator is the priced paper, not just what was answered', () => {
+  const eid = paperExam([{ marks: 10 }, { marks: 10 }, { marks: 10 }]);
+  const sid = examSvc.createSession(eid, 1);
+  answerFirst(sid.id, 10);
+  const r = results.computeForSession(sid.id);
+  assert.equal(r.totalMarks, 30, 'all three questions are owed, even though one was answered');
+  assert.equal(r.score, 10);
+  assert.equal(r.priceSource, 'priced');
+});
+
+test('a chosen paper is billed for the choice, not the whole pool', () => {
+  const eid = paperExam([
+    { marks: 10, compulsory: true, section: 'b' },
+    { marks: 10, compulsory: false, section: 'b' },
+    { marks: 10, compulsory: false, section: 'b' },
+    { marks: 10, compulsory: false, section: 'b' },
+  ]);
+  rule(eid, 'b', 'SECTION B', 2);
+  const sid = examSvc.createSession(eid, 1);
+  const pool = poolOf(sid.id, 'b');
+  selection.applySelection(sid.id, 'b', pool.slice(0, 2));
+
+  // Answer everything the student actually chose: the compulsory question plus
+  // both picks. The third question was deselected and must not be owed.
+  const owed = db.prepare(
+    `SELECT sq.q_order, qp.id AS pool_id, qp.marks FROM session_questions sq
+       JOIN question_pool qp ON qp.id = sq.question_id
+      WHERE sq.session_id = ? AND sq.is_selected = 1 ORDER BY sq.q_order`
+  ).all(sid.id);
+  assert.equal(owed.length, 3, 'one compulsory plus two chosen');
+  for (const q of owed) {
+    db.prepare(
+      `INSERT INTO answers(session_id,question_id,q_order,answer_text,marks_awarded,max_marks,marked_by)
+       VALUES (?,?,?,'x',?,?,'auto')`
+    ).run(sid.id, q.pool_id, q.q_order, q.marks, q.marks);
+  }
+
+  const r = results.computeForSession(sid.id);
+  assert.equal(r.totalMarks, 30, 'compulsory 10 + two chosen 10s');
+  assert.equal(r.score, 30);
+  assert.equal(r.percentage, 100, 'answering everything they chose is a full mark, not 3/4');
+});
+
+test('skipping the hard questions cannot raise a percentage', () => {
+  const eid = paperExam([{ marks: 1 }, { marks: 9 }]);
+  const sid = examSvc.createSession(eid, 1);
+  answerFirst(sid.id, 1);
+  const r = results.computeForSession(sid.id);
+  assert.equal(r.totalMarks, 10);
+  assert.equal(r.percentage, 10, 'answering only the 1-mark question scores 10%, not 100%');
+});
+
+test('a session predating paper_total is priced from what it was drawn, not answered', () => {
+  const eid = paperExam([{ marks: 4 }, { marks: 6 }]);
+  const sid = examSvc.createSession(eid, 1);
+  // Simulate a session created before this feature: no recorded price.
+  db.prepare('UPDATE sessions SET paper_total = 0 WHERE id = ?').run(sid.id);
+  answerFirst(sid.id, 4);
+  const r = results.computeForSession(sid.id);
+  assert.equal(r.priceSource, 'drawn');
+  assert.equal(
+    r.totalMarks, 10,
+    'a historical attempt is owed both questions it was drawn; summing only the answer would report 4/4 = 100%'
+  );
+  assert.equal(r.percentage, 40);
+});
+
 // ── Task 3: drawing and ordering ───────────────────────────────────────
 
 function order(eid) {
