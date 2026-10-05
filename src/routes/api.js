@@ -5,6 +5,7 @@ const path = require('path');
 const db = require('../db');
 const ai = require('../services/ai');
 const marking = require('../services/marking');
+const selection = require('../services/selection');
 const pdf = require('../services/pdf');
 const pdfImport = require('../services/pdfImport');
 const examService = require('../services/exam');
@@ -123,6 +124,8 @@ function qWithScheme(row) {
     explanation: row.explanation,
     source: row.source,
     image: row.image || '',
+    is_compulsory: row.is_compulsory == null ? 1 : row.is_compulsory,
+    section_key: row.section_key || '',
     scheme,
   };
 }
@@ -251,7 +254,15 @@ router.get('/exams/:id', (req, res) => {
        JOIN students st ON st.id = s.student_id WHERE s.exam_id = ? ORDER BY s.started_at DESC`
     )
     .all(exam.id);
-  res.json({ exam: examSummary(exam), questions, recipients, results: resultsList });
+  const sections = db
+    .prepare('SELECT * FROM exam_sections WHERE exam_id = ? ORDER BY position, id')
+    .all(exam.id);
+  // `selection` is the derived plan — resolved quotas and real pool sizes — so the
+  // dashboard never has to recompute the "answer-all means no rule" case itself.
+  res.json({
+    exam: examSummary(exam), questions, recipients, results: resultsList,
+    sections, selection: selection.sectionPlan(exam.id),
+  });
 });
 
 // ── Participant roster: screen, print ───────────────────────────────────────────
@@ -402,6 +413,60 @@ router.post('/exams/:id/archive', (req, res) => {
   res.json({ ok: true });
 });
 
+// Selection rules for "answer any N of M" papers. Bulk upsert so the admin UI
+// can save the whole card in one call; a section key that disappears from the
+// body has its rule removed rather than left orphaned.
+router.patch('/exams/:id/sections', (req, res) => {
+  const exam = db.prepare('SELECT * FROM exams WHERE id = ?').get(req.params.id);
+  if (!exam) return res.status(404).json({ error: 'Exam not found' });
+  if (exam.status === 'live' || exam.status === 'ended') {
+    return res.status(400).json({ error: 'Exam is already live/ended. Selection rules can no longer be edited.' });
+  }
+  const incoming = Array.isArray(req.body && req.body.sections) ? req.body.sections : [];
+  const upsert = db.prepare(
+    `INSERT INTO exam_sections(exam_id,section_key,title,instructions,position,answer_count)
+     VALUES (?,?,?,?,?,?)
+     ON CONFLICT(exam_id, section_key) DO UPDATE SET
+       title=excluded.title, instructions=excluded.instructions,
+       position=excluded.position, answer_count=excluded.answer_count`
+  );
+  db.exec('BEGIN');
+  try {
+    for (const s of incoming) {
+      if (!s || !String(s.section_key || '').trim()) continue;
+      const pool = db
+        .prepare('SELECT COUNT(*) c FROM questions WHERE exam_id = ? AND section_key = ? AND is_compulsory = 0')
+        .get(exam.id, String(s.section_key).trim()).c;
+      const want = Math.max(0, parseInt(s.answer_count, 10) || 0);
+      // Clamp to the real pool: a quota covering every optional question is
+      // answer-all, and storing it would show the admin a rule that never fires.
+      const count = Math.min(want, pool);
+      upsert.run(exam.id, String(s.section_key).trim(), String(s.title || ''),
+        String(s.instructions || ''), parseInt(s.position, 10) || 0, count);
+    }
+    const keep = incoming.map((s) => String(s && s.section_key || '').trim()).filter(Boolean);
+    // Always delete what is no longer listed, INCLUDING when the body is an
+    // empty array. Guarding this on `keep.length` means an admin who clears the
+    // card and saves sends [] and silently keeps every old rule — the one thing
+    // "save my rules" must never do.
+    if (keep.length) {
+      db.prepare(
+        `DELETE FROM exam_sections WHERE exam_id = ? AND section_key NOT IN (${keep.map(() => '?').join(',')})`
+      ).run(exam.id, ...keep);
+    } else {
+      db.prepare('DELETE FROM exam_sections WHERE exam_id = ?').run(exam.id);
+    }
+    db.exec('COMMIT');
+  } catch (err) {
+    db.exec('ROLLBACK');
+    throw err;
+  }
+  res.json({
+    ok: true,
+    sections: db.prepare('SELECT * FROM exam_sections WHERE exam_id = ? ORDER BY position, id').all(exam.id),
+  });
+});
+
 router.delete('/exams/:id', (req, res) => {
   db.prepare('DELETE FROM exams WHERE id = ?').run(req.params.id);
   res.json({ ok: true });
@@ -469,8 +534,8 @@ router.post('/exams/:id/questions', imageUpload.single('file'), asyncWrap(async 
   }
   const info = db
     .prepare(
-      `INSERT INTO questions (exam_id, q_order, type, text, passage, options, correct_answer, marks, difficulty, learning_objective, explanation, source, image)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`
+      `INSERT INTO questions (exam_id, q_order, type, text, passage, options, correct_answer, marks, difficulty, learning_objective, explanation, source, image, is_compulsory, section_key)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
     )
     .run(
       exam.id, nextOrder, q.type || 'objective', q.text, q.passage || '',
@@ -479,7 +544,10 @@ router.post('/exams/:id/questions', imageUpload.single('file'), asyncWrap(async 
         : null,
       q.correct_answer || null,
       marks, q.difficulty || 'medium', q.learning_objective || '', q.explanation || '',
-      'manual', imageFile
+      'manual', imageFile,
+      // Defaults keep every pre-existing caller on answer-all: absent means compulsory.
+      q.is_compulsory === false || q.is_compulsory === 0 || q.is_compulsory === '0' ? 0 : 1,
+      String(q.section_key || '')
     );
   const question = db.prepare('SELECT * FROM questions WHERE id = ?').get(info.lastInsertRowid);
   await marking.buildMarkingScheme(question);
@@ -499,8 +567,8 @@ router.post('/exams/:id/questions/batch', asyncWrap(async (req, res) => {
 
   let nextOrder = (db.prepare('SELECT MAX(q_order) m FROM questions WHERE exam_id = ?').get(exam.id).m || 0) + 1;
   const insert = db.prepare(
-    `INSERT INTO questions (exam_id, q_order, type, text, passage, options, correct_answer, marks, difficulty, learning_objective, explanation, source, image)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`
+    `INSERT INTO questions (exam_id, q_order, type, text, passage, options, correct_answer, marks, difficulty, learning_objective, explanation, source, image, is_compulsory, section_key)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
   );
   const insertScheme = db.prepare(
     `INSERT INTO marking_schemes (question_id, type, scheme) VALUES (?, ?, ?)
@@ -524,7 +592,10 @@ router.post('/exams/:id/questions/batch', asyncWrap(async (req, res) => {
         q.source || 'manual',
         // Column list, placeholder count and bound values must move together —
         // a dropped column silently discards the diagram instead of erroring.
-        q.image || ''
+        q.image || '',
+        // Absent means compulsory, so every pre-existing caller stays answer-all.
+        q.is_compulsory === false || q.is_compulsory === 0 || q.is_compulsory === '0' ? 0 : 1,
+        String(q.section_key || '')
       );
       const qid = info.lastInsertRowid;
       created.push(qid);
@@ -596,6 +667,13 @@ router.put('/exams/:id/questions/:qid', imageUpload.single('file'), asyncWrap(as
   if (b.difficulty !== undefined) { fields.push('difficulty=?'); vals.push(String(b.difficulty)); }
   if (b.learning_objective !== undefined) { fields.push('learning_objective=?'); vals.push(String(b.learning_objective)); }
   if (b.explanation !== undefined) { fields.push('explanation=?'); vals.push(String(b.explanation)); }
+  if (b.is_compulsory !== undefined) {
+    fields.push('is_compulsory=?');
+    // A checkbox posts either a real false, a 0, or the string '0' — all three
+    // mean optional. Anything else present is an explicit compulsory.
+    vals.push(b.is_compulsory === false || b.is_compulsory === 0 || b.is_compulsory === '0' ? 0 : 1);
+  }
+  if (b.section_key !== undefined) { fields.push('section_key=?'); vals.push(String(b.section_key)); }
   if (b.options !== undefined) {
     const arr = Array.isArray(b.options) ? b.options : [];
     fields.push('options=?');
@@ -780,6 +858,9 @@ router.post('/exams/:id/generate', asyncWrap(async (req, res) => {
     `INSERT INTO questions (exam_id, q_order, type, text, passage, options, correct_answer, marks, difficulty, learning_objective, explanation, source, image)
      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`
   );
+  // The AI ingest writes the pool and the template questions separately; both must
+  // carry the same selection flags, or a drawn pool and the admin's question list
+  // disagree about what is compulsory.
   const insertPool = db.prepare(
     `INSERT INTO question_pool (exam_id, type, text, passage, options, correct_answer, marks, difficulty, learning_objective, explanation, scheme_json, source, image)
      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`

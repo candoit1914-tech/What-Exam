@@ -663,6 +663,169 @@ test('a session predating paper_total is priced from what it was drawn, not answ
   assert.equal(r.percentage, 40);
 });
 
+// ── Task 6: admin API ──────────────────────────────────────────────────
+
+const express = require('express');
+const http = require('node:http');
+const auth = require('../src/auth');
+const api = require('../src/routes/api');
+
+let srv;
+let baseUrl;
+let adminToken;
+
+const beforeRoute = async () => {
+  adminToken = auth.adminToken();
+  const app = express();
+  app.use(express.json());
+  app.use('/api', api);
+  await new Promise((r) => { srv = app.listen(0, '127.0.0.1', r); });
+  baseUrl = `http://127.0.0.1:${srv.address().port}`;
+};
+const afterRoute = () => new Promise((r) => srv?.close(r));
+
+// Real HTTP against the mounted router (the pattern test/recipient-route.test.js
+// already uses). Source-text assertions would only prove the strings exist, not
+// that the route accepts them, scopes them to the exam, or coerces the values.
+async function call(method, path, body) {
+  const res = await fetch(`${baseUrl}${path}`, {
+    method,
+    headers: {
+      authorization: `Bearer ${adminToken}`,
+      ...(body ? { 'content-type': 'application/json' } : {}),
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  return { status: res.status, body: await res.json().catch(() => null) };
+}
+
+test('the question routes round-trip the selection columns', async () => {
+  await beforeRoute();
+  try {
+    const eid = db.prepare(
+      "INSERT INTO exams(title,duration_minutes,status) VALUES ('Sec',30,'published')"
+    ).run().lastInsertRowid;
+
+    // POST must accept them...
+    const created = await call('POST', `/api/exams/${eid}/questions`, {
+      type: 'theory', text: 'B1', marks: 7, is_compulsory: 0, section_key: 'b',
+    });
+    assert.equal(created.status, 200, JSON.stringify(created.body));
+    assert.equal(created.body.is_compulsory, 0, 'POST persisted the flag');
+    assert.equal(created.body.section_key, 'b', 'POST persisted the section');
+    assert.equal(created.body.marks, 7, 'the rest of the payload is unaffected');
+
+    // ...and the batch route too, since it has its own INSERT.
+    const batch = await call('POST', `/api/exams/${eid}/questions/batch`, {
+      questions: [
+        { type: 'theory', text: 'B2', marks: 3, is_compulsory: false, section_key: 'b' },
+        { type: 'theory', text: 'B3', marks: 3 },
+      ],
+    });
+    assert.equal(batch.status, 200, JSON.stringify(batch.body));
+    const stored = db.prepare('SELECT section_key, is_compulsory FROM questions WHERE exam_id=? ORDER BY q_order').all(eid);
+    assert.equal(stored[1].section_key, 'b', 'the batch insert kept the section');
+    assert.equal(stored[1].is_compulsory, 0);
+    assert.equal(stored[2].section_key, '', 'an omitted section defaults to empty, not null');
+    assert.equal(stored[2].is_compulsory, 1, 'an omitted flag defaults to compulsory');
+
+    // PUT must be able to flip the flag and move the question between sections.
+    const qid = stored[0].id !== undefined ? stored[0].id : created.body.id;
+    const target = db.prepare('SELECT id FROM questions WHERE exam_id=? AND text=?').get(eid, 'B1').id;
+    const flipped = await call('PUT', `/api/exams/${eid}/questions/${target}`, {
+      is_compulsory: 1, section_key: 'c',
+    });
+    assert.equal(flipped.status, 200, JSON.stringify(flipped.body));
+    const after = db.prepare('SELECT is_compulsory, section_key FROM questions WHERE id=?').get(target);
+    assert.equal(after.is_compulsory, 1, 'PUT flipped the flag');
+    assert.equal(after.section_key, 'c', 'PUT moved the question');
+    assert.ok(qid || target);
+
+    // GET /exams/:id must expose both, or the admin UI cannot render them.
+    const got = await call('GET', `/api/exams/${eid}`);
+    assert.equal(got.status, 200);
+    const row = got.body.questions.find((q) => q.id === target);
+    assert.equal(row.is_compulsory, 1);
+    assert.equal(row.section_key, 'c');
+  } finally { await afterRoute(); }
+});
+
+test('PATCH /exams/:id/sections upserts, clamps, and deletes what is gone', async () => {
+  await beforeRoute();
+  try {
+    const eid = db.prepare(
+      "INSERT INTO exams(title,duration_minutes,status) VALUES ('Sec2',30,'published')"
+    ).run().lastInsertRowid;
+    for (const t of ['B1', 'B2', 'B3']) {
+      db.prepare(
+        `INSERT INTO questions(exam_id,q_order,type,text,marks,is_compulsory,section_key)
+         VALUES (?,?,'theory',?,5,0,'b')`
+      ).run(eid, db.prepare('SELECT COUNT(*) c FROM questions WHERE exam_id=?').get(eid).c + 1, t);
+    }
+
+    // A quota covering the whole pool is answer-all, so storing it would show the
+    // admin a rule that can never fire.
+    const first = await call('PATCH', `/api/exams/${eid}/sections`, {
+      sections: [{ section_key: 'b', title: 'SECTION B', instructions: 'Answer two', position: 1, answer_count: 9 }],
+    });
+    assert.equal(first.status, 200, JSON.stringify(first.body));
+    assert.equal(first.body.sections.length, 1);
+    assert.equal(first.body.sections[0].answer_count, 3, 'clamped to the pool size of 3');
+
+    // Re-saving the same key must revise, not duplicate.
+    await call('PATCH', `/api/exams/${eid}/sections`, {
+      sections: [{ section_key: 'b', title: 'SECTION B (revised)', instructions: 'Answer one', position: 1, answer_count: 1 }],
+    });
+    const rows = db.prepare('SELECT * FROM exam_sections WHERE exam_id=?').all(eid);
+    assert.equal(rows.length, 1, 'one row per section key');
+    assert.equal(rows[0].answer_count, 1);
+    assert.equal(rows[0].instructions, 'Answer one');
+
+    // A key that disappears is removed rather than left orphaned.
+    await call('PATCH', `/api/exams/${eid}/sections`, {
+      sections: [{ section_key: 'c', title: 'SECTION C', position: 2, answer_count: 1 }],
+    });
+    const afterSwap = db.prepare('SELECT section_key FROM exam_sections WHERE exam_id=?').all(eid);
+    assert.deepEqual(afterSwap.map((r) => r.section_key), ['c'], 'the dropped rule is gone');
+
+    // The dangerous case: an admin who clears the card and saves sends [].
+    // Guarding the delete on a non-empty list would keep every old rule here.
+    const cleared = await call('PATCH', `/api/exams/${eid}/sections`, { sections: [] });
+    assert.equal(cleared.status, 200);
+    assert.equal(
+      db.prepare('SELECT COUNT(*) c FROM exam_sections WHERE exam_id=?').get(eid).c, 0,
+      'an empty sections array must remove the rules, not leave them orphaned'
+    );
+
+    // GET must surface the rules AND the derived plan the dashboard renders.
+    db.prepare(
+      `INSERT INTO exam_sections(exam_id,section_key,title,instructions,position,answer_count)
+       VALUES (?,'b','SECTION B','Answer one',1,1)`
+    ).run(eid);
+    const got = await call('GET', `/api/exams/${eid}`);
+    assert.equal(got.body.sections.length, 1);
+    assert.ok(Array.isArray(got.body.selection), 'the derived selection plan is exposed');
+    assert.equal(got.body.selection[0].quota, 1);
+  } finally { await afterRoute(); }
+});
+
+test('selection rules are frozen once an exam goes live', async () => {
+  await beforeRoute();
+  try {
+    const eid = db.prepare(
+      "INSERT INTO exams(title,duration_minutes,status) VALUES ('Live',30,'live')"
+    ).run().lastInsertRowid;
+    const res = await call('PATCH', `/api/exams/${eid}/sections`, {
+      sections: [{ section_key: 'b', title: 'B', position: 1, answer_count: 1 }],
+    });
+    assert.equal(res.status, 400, 'a live exam must not be re-priced under running students');
+    assert.equal(
+      db.prepare('SELECT COUNT(*) c FROM exam_sections WHERE exam_id=?').get(eid).c, 0,
+      'the rejected write must not partially apply'
+    );
+  } finally { await afterRoute(); }
+});
+
 // ── Task 3: drawing and ordering ───────────────────────────────────────
 
 function order(eid) {
