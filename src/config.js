@@ -5,7 +5,10 @@ const crypto = require('crypto');
 const root = path.resolve(__dirname, '..');
 
 function valid(v) {
-  return !!v && !/your_|example|changeme|^$/.test(v);
+  if (!v || typeof v !== 'string') return false;
+  const s = v.trim();
+  // Case-insensitive: 'YOUR_API_KEY' or 'Example' were previously accepted as real.
+  return s !== '' && !/your_|example|changeme/i.test(s);
 }
 
 const adminPassword = (() => {

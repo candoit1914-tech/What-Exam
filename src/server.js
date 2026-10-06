@@ -8,6 +8,8 @@ const results = require('./services/results');
 const auth = require('./auth');
 
 const app = express();
+// Don't advertise the stack in every response header.
+app.disable('x-powered-by');
 
 function originAllowed(origin) {
   if (config.corsOrigins.includes(origin)) return true;
@@ -40,7 +42,7 @@ app.use((req, res, next) => {
 // for x-hub-signature-256 HMAC verification.
 app.use('/webhook/whatsapp', webhook);
 
-app.use(express.json());
+app.use(express.json({ limit: '2mb' }));
 app.use('/api', api);
 app.get('/report/:sessionId/attachment', (req, res) => {
   if (!auth.verifyReportToken(req.query.token, req.params.sessionId)) {

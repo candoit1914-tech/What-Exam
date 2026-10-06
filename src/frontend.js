@@ -3,6 +3,7 @@ const express = require('express');
 const config = require('./config');
 
 const app = express();
+app.disable('x-powered-by');
 
 app.get('/config.js', (req, res) => {
   res.type('application/javascript');

@@ -21,13 +21,18 @@ router.get('/', (req, res) => {
     console.error('[webhook] WHATSAPP_VERIFY_TOKEN not configured — refusing verification');
     return res.status(403).send('Verification failed');
   }
-  if (mode === 'subscribe' && token === config.whatsapp.verifyToken) {
+  const tokenOk = (() => {
+    const a = Buffer.from(String(token ?? ''));
+    const b = Buffer.from(String(config.whatsapp.verifyToken));
+    return a.length === b.length && crypto.timingSafeEqual(a, b);
+  })();
+  if (mode === 'subscribe' && tokenOk) {
     return res.status(200).send(challenge);
   }
   res.status(403).send('Verification failed');
 });
 
-router.post('/', express.raw({ type: () => true }), async (req, res) => {
+router.post('/', express.raw({ type: () => true, limit: '1mb' }), async (req, res) => {
   if (!config.whatsapp.appSecret) {
     console.error('[webhook] WHATSAPP_APP_SECRET not configured — rejecting unsigned webhook');
     return res.status(403).send('Webhook signature verification unavailable');
