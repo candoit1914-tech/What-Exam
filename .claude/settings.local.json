@@ -1,0 +1,34 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx create-video@latest advert --package-manager=npm)",
+      "Bash(npm install *)",
+      "Bash(node -e \"const p = require\\('./node_modules/remotion/package.json'\\); console.log\\('remotion:', p.version\\);\")",
+      "Bash(npx remotion *)",
+      "Bash(tasklist)",
+      "Bash(npx tsc *)",
+      "Bash(node -e \"require\\('./node_modules/remotion/dist/cjs/index.js'\\)\")",
+      "Bash(node -e \"const { bundle } = require\\('@remotion/bundler'\\); console.log\\('bundler loaded'\\);\")",
+      "Bash(node node_modules/@remotion/cli/dist/index.js render WhatExamAdvert out/advert.mp4 --frames=0-5)",
+      "Bash(node -e ' *)",
+      "Bash(node --test test/regression.test.js)",
+      "Bash(xargs grep -l \"remotion\")",
+      "Bash(npm ls *)",
+      "Bash(node *)",
+      "Bash(taskkill /F /IM \"remotion.exe\")",
+      "Bash(taskkill /F /IM \"chrome.exe\")",
+      "Bash(wmic path *)",
+      "Bash(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader)",
+      "Bash(pip install *)",
+      "Bash(python *)",
+      "Bash(ffprobe -v quiet -print_format json -show_format -show_streams out/advert.mp4)",
+      "Bash(ffmpeg -i out/advert.mp4 -vf \"scale=3840:2160:flags=lanczos\" -c:v libx264 -crf 18 -preset slow -c:a copy -y out/advert-4k.mp4)",
+      "Bash(where ffmpeg *)",
+      "Bash(ls /c/ffmpeg*/bin/ffmpeg.exe)",
+      "Bash(winget install *)",
+      "Bash(npm exec *)",
+      "Skill(update-config)",
+      "Skill(update-config:*)"
+    ]
+  }
+}
