@@ -151,6 +151,21 @@ const config = {
     timeoutMs: parseInt(process.env.XAI_TIMEOUT_MS || '0', 10),
   },
 
+  // Paystack — consulted only for exams the admin created as PAID. A free exam
+  // never reads this block, so leaving the key blank costs nothing until an
+  // admin actually prices a paper (the send route says so out loud if they do).
+  paystack: {
+    secretKey: valid(process.env.PAYSTACK_SECRET_KEY) ? process.env.PAYSTACK_SECRET_KEY.trim() : '',
+    publicKey: valid(process.env.PAYSTACK_PUBLIC_KEY) ? process.env.PAYSTACK_PUBLIC_KEY.trim() : '',
+    baseUrl: (process.env.PAYSTACK_BASE_URL || 'https://api.paystack.co').replace(/\/$/, ''),
+    // GHS is what a Ghanaian Paystack account settles in, and the amount sent to
+    // the gateway is in pesewas — which is why exams.price_amount is an integer.
+    currency: (process.env.PAYSTACK_CURRENCY || 'GHS').toUpperCase(),
+    // Where the browser lands after checkout. Optional: blank leaves the student
+    // on Paystack's own success page.
+    callbackUrl: (process.env.PAYSTACK_CALLBACK_URL || '').replace(/\/$/, ''),
+  },
+
   exam: {
     passPercentage: parseFloat(process.env.PASS_PERCENTAGE || '50'),
     defaultDurationMinutes: parseInt(process.env.DEFAULT_DURATION_MINUTES || '30', 10),

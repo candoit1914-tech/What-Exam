@@ -41,6 +41,9 @@ app.use((req, res, next) => {
 // Webhook must be mounted BEFORE express.json() so the raw body is intact
 // for x-hub-signature-256 HMAC verification.
 app.use('/webhook/whatsapp', webhook);
+// Paystack signs the raw bytes too (x-paystack-signature, HMAC-SHA512), so it
+// goes in front of json parsing for exactly the same reason.
+app.use('/webhook/paystack', require('./routes/paystackWebhook'));
 
 app.use(express.json({ limit: '2mb' }));
 app.use('/api', api);
@@ -74,13 +77,17 @@ const API_GROUPS = [
   ]],
   ['Exams', [
     ['GET', '/api/exams', 'List exams'],
-    ['POST', '/api/exams', 'Create an exam'],
-    ['GET', '/api/exams/:id', 'Exam detail (questions, recipients, results)'],
+    ['POST', '/api/exams', 'Create an exam (pricing: free|paid, amount in GHS)'],
+    ['GET', '/api/exams/:id', 'Exam detail (questions, recipients, results, payments)'],
     ['PATCH', '/api/exams/:id', 'Update exam meta'],
     ['DELETE', '/api/exams/:id', 'Delete an exam'],
     ['POST', '/api/exams/:id/publish', 'Publish (make live)'],
     ['POST', '/api/exams/:id/end', 'End a live exam'],
     ['POST', '/api/exams/:id/archive', 'Archive an exam'],
+  ]],
+  ['Payments', [
+    ['GET', '/api/exams/:id/payments', 'Payment attempts for a paid exam'],
+    ['POST', '/webhook/paystack', 'Paystack charge notifications (signed, raw body)'],
   ]],
   ['Recipients & Delivery', [
     ['POST', '/api/exams/:id/recipients', 'Add recipient phones'],
