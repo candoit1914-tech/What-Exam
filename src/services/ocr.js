@@ -3,24 +3,34 @@ const path = require('path');
 const config = require('../config');
 
 let worker = null;
+let workerPromise = null;
 
 /**
  * Get or create a Tesseract.js worker for OCR.
  * Reuses the same worker across calls (language data stays loaded).
+ * The in-flight creation promise is cached so two concurrent first calls can't
+ * each spawn (and leak) their own worker.
  */
 async function getWorker() {
   if (worker) return worker;
+  if (workerPromise) return workerPromise;
   const Tesseract = require('tesseract.js');
   console.log('[ocr] Starting Tesseract.js worker...');
-  worker = await Tesseract.createWorker('eng', 1, {
+  workerPromise = Tesseract.createWorker('eng', 1, {
     logger: (m) => {
       if (m.status === 'recognizing text') {
         // silent during recognition
       }
     },
+  }).then((w) => {
+    worker = w;
+    console.log('[ocr] Tesseract.js worker ready');
+    return w;
+  }).catch((err) => {
+    workerPromise = null; // allow retry after a failed startup
+    throw err;
   });
-  console.log('[ocr] Tesseract.js worker ready');
-  return worker;
+  return workerPromise;
 }
 
 /**
@@ -29,7 +39,13 @@ async function getWorker() {
  */
 async function readPhotoAnswer(imagePath, questionText = '') {
   const uploadsDir = config.uploadsDir;
-  const fullPath = path.isAbsolute(imagePath) ? imagePath : path.join(uploadsDir, imagePath);
+  // Confine to the uploads directory — an image path containing ../ (or an
+  // absolute path elsewhere) must never reach the OCR pipeline.
+  const root = path.resolve(uploadsDir);
+  const fullPath = path.resolve(root, imagePath);
+  if (fullPath !== root && !fullPath.startsWith(root + path.sep)) {
+    throw new Error(`Image path outside uploads directory: ${imagePath}`);
+  }
 
   if (!fs.existsSync(fullPath)) {
     throw new Error(`Image file not found: ${imagePath}`);

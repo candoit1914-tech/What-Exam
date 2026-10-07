@@ -37,7 +37,11 @@ async function readPhotoAnswer(imagePath, questionText) {
   if (!client) throw new Error('Puter.js initialization failed');
 
   const uploadsDir = config.uploadsDir;
-  const fullPath = path.isAbsolute(imagePath) ? imagePath : path.join(uploadsDir, imagePath);
+  const root = path.resolve(uploadsDir);
+  const fullPath = path.resolve(root, imagePath);
+  if (fullPath !== root && !fullPath.startsWith(root + path.sep)) {
+    throw new Error(`Image path outside uploads directory: ${imagePath}`);
+  }
   if (!fs.existsSync(fullPath)) throw new Error(`Image not found: ${imagePath}`);
 
   const imageBuffer = fs.readFileSync(fullPath);
