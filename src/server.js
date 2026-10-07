@@ -260,8 +260,10 @@ if (require.main === module) {
     // Fail any import left mid-flight by a previous process (crash/redeploy)
     // so stale jobs can never hang the dashboard poll or block new uploads.
     require('./services/pdfImport').recoverStaleJobs();
-    // Finalize sessions left in_progress past their deadline by a crash or
+    // Release sessions a crashed process left claimed by finalize(), then
+    // finalize sessions left in_progress past their deadline by a crash or
     // redeploy — each is closed and reported exactly like timer expiry.
+    require('./services/exam').recoverInterruptedFinalizes();
     await require('./services/exam').finalizeStaleSessions();
     // Start periodic background cleanup so expired sessions are finalized
     // automatically instead of only on server restart.

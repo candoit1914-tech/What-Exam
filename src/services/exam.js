@@ -192,12 +192,19 @@ function addRecipients(examId, entries) {
 
 // ── Sessions ───────────────────────────────────────────────────────────
 
+/**
+ * The student's live attempt, including one that finalize() has claimed but not
+ * yet closed. 'finalizing' MUST be in this list: without it a student who
+ * messages while their results are being computed looks session-less, and
+ * maybeStartSession hands them a brand-new attempt while their grade is still
+ * in the air.
+ */
 function getActiveSession(studentId) {
   return db
     .prepare(
       `SELECT s.*, e.title AS exam_title, e.duration_minutes, e.pass_percentage
        FROM sessions s JOIN exams e ON e.id = s.exam_id
-       WHERE s.student_id = ? AND s.status = 'in_progress'`
+       WHERE s.student_id = ? AND s.status IN ('in_progress','finalizing')`
     )
     .get(studentId);
 }
@@ -679,9 +686,18 @@ function buildQuestionBubbles(exam, question, sequence, index, session) {
   return bubbles;
 }
 
+function safeParseOptions(raw) {
+  try {
+    const parsed = JSON.parse(raw || '[]');
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
 /** Answer-options message for objective questions (sent right after the question). */
 function formatOptions(exam, session, question) {
-  const options = JSON.parse(question.options || '[]');
+  const options = safeParseOptions(question.options);
   const body = options.map((o) => `${o.key}. ${o.text}`).join('\n');
   return (
     `${body}\n\n` +
@@ -748,7 +764,7 @@ function resolveObjectiveLetter(question, body, meta = {}) {
   }
   const letter = marking.normalizeAnswer(body).replace(/\.$/, '');
   if (/^[A-D]$/.test(letter)) return letter;
-  const options = JSON.parse(question.options || '[]');
+  const options = safeParseOptions(question.options);
   const hit = options.find((o) => marking.normalizeAnswer(o.text) === marking.normalizeAnswer(body));
   return hit ? hit.key : null;
 }
@@ -872,7 +888,7 @@ async function sendQuestionTo(session, student, qOrder = null) {
   // the timer — nothing omitted.
   const parts = [questionBubble];
   if (question.type === 'objective') {
-    const options = JSON.parse(question.options || '[]');
+    const options = safeParseOptions(question.options);
     parts.push(options.map((o) => `${o.key}. ${o.text}`).join('\n'));
   }
   if (question.type === 'theory' && question.follow_ups) {
@@ -1022,6 +1038,14 @@ async function handleInbound(phone, body, meta = {}) {
     return { started: true, ok: started.ok, reason: started.reason };
   }
 
+  // Results are on the way: finalize() has claimed this session. Recording an
+  // answer now would race the drain/mark/compute flow, and dropping through to
+  // maybeStartSession would start a fresh attempt. The message is swallowed —
+  // the result message is the reply the student gets.
+  if (session.status === 'finalizing') {
+    return { started: false, ok: true, reason: 'finalizing' };
+  }
+
   // An approved template invites a reply; it does not open the service
   // window. Deliver Q1 on that first reply instead of grading the greeting.
   const invited = db.prepare("SELECT id FROM message_outbox WHERE session_id=? AND kind='intro' AND state='sent'").get(session.id);
@@ -1041,9 +1065,20 @@ async function handleInbound(phone, body, meta = {}) {
   // starter is never greeted by a countdown that already ran down (e.g. the
   // 59:57 → 6:47 jump from sending hours after the admin pressed Send).
   //
-  // A student still choosing has no answers yet, but their clock is already
-  // running — restarting it on every tap would make the selection cost no time.
-  if (sessionHasNoAnswers(session.id) && session.selection_state !== 'selecting') {
+  // A student still choosing has no answers either, but their clock is already
+  // running — restarting it would hand the selection back as free time (the
+  // tap-tap-CONFIRM dance and the first reply after it would each reset the
+  // countdown). Two states say "this student has already been through a
+  // selector":
+  //   'selecting'          — the selector is open right now;
+  //   non-empty selection_section — a selector opened at least once; applySelection
+  //     deliberately keeps the section after the commit, so it stays set.
+  // selection_state alone is not enough: it returns to '' on commit, which is
+  // indistinguishable from a session that never chose anything.
+  // Anything else — a legacy bulk-sent session whose clock already ran down,
+  // a student who has only been reading question 1 — may re-arm the clock.
+  const choosing = session.selection_state === 'selecting' || !!String(session.selection_section || '');
+  if (sessionHasNoAnswers(session.id) && !choosing) {
     // Store as ISO 8601 with 'Z' suffix for consistent UTC parsing in deadline().
     const now = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
     db.prepare(
@@ -1109,6 +1144,16 @@ async function maybeStartSession(student) {
     }
     await sendQuestionTo(existing, student);
     return { ok: true, reason: 'resumed' };
+  }
+  if (existing && existing.status === 'finalizing') {
+    // Results are being computed for this attempt. Starting a new one here
+    // would leave the student with a second paper while the first one's grade
+    // is still in the air — the message is acknowledged and nothing else.
+    await wa.sendText(
+      student.phone,
+      `Your *${exam.title}* results are being prepared — they will arrive in a moment.`
+    );
+    return { ok: true, reason: 'finalizing' };
   }
   if (existing && existing.status === 'completed') {
     const r = results.computeForSession(existing.id);
@@ -1193,6 +1238,31 @@ async function processAnswer(session, student, body, meta = {}) {
       } else {
         await finalize(fresh, student, 'completed');
       }
+    } else if (!res || !res.handled) {
+      // selection.handleReply could not parse this as a selection (missing plan or
+      // exhausted quota). Leaving selection_state set would brick the session: every
+      // later reply re-enters this branch. Clear it and treat the message as an
+      // answer (or a no-op that re-delivers the current question).
+      console.warn(`[exam] selection unhandled for session ${session.id}; clearing selection_state`);
+      // '' rather than NULL: the column is NOT NULL DEFAULT ''. selection_section
+      // is kept on purpose — it is the record that this student has already
+      // engaged with a selector, which is what stops handleInbound from handing
+      // them a fresh clock for a message the selector swallowed.
+      db.prepare(`UPDATE sessions SET selection_state = '' WHERE id = ?`).run(session.id);
+      session = { ...session, selection_state: '' };
+      const exam2 = db.prepare('SELECT * FROM exams WHERE id = ?').get(session.exam_id);
+      const question2 = getSessionQuestion(session.id, session.current_q_order);
+      if (exam2 && question2) {
+        const next2 = await handleAnswer(exam2, session, student, question2, body, meta);
+        if (next2 !== false) {
+          const nq2 = nextInSequence(session, question2);
+          if (nq2) await advanceAndSend(session, student, nq2);
+          else await finalize(session, student, 'completed');
+        } else {
+          await sendQuestionTo(session, student);
+        }
+      }
+      return;
     }
     return;
   }
@@ -1233,7 +1303,30 @@ async function processAnswer(session, student, body, meta = {}) {
     return;
   }
 
-  const next = await handleAnswer(exam, session, student, question, body, meta);
+  let next;
+  try {
+    next = await handleAnswer(exam, session, student, question, body, meta);
+  } catch (err) {
+    // A duplicate webhook delivery or double-tap races the check above and hits
+    // the unique answers index — treat it exactly like the already-answered path
+    // instead of crashing the inbound handler.
+    if (/UNIQUE constraint failed/i.test(String(err && err.message))) {
+      let nq = nextInSequence(session, question);
+      while (
+        nq &&
+        db.prepare('SELECT id FROM answers WHERE session_id = ? AND question_id = ?').get(session.id, nq.id)
+      ) {
+        nq = nextInSequence(session, nq);
+      }
+      if (nq) {
+        await advanceAndSend(session, student, nq);
+      } else {
+        await finalize(session, student, 'completed');
+      }
+      return;
+    }
+    throw err;
+  }
   if (next === false) {
     // Invalid input — re-send the question so the student can try again.
     await sendQuestionTo(session, student);
@@ -1273,7 +1366,7 @@ async function handleAnswer(exam, session, student, question, body, meta = {}) {
     // — never pending admin review. drainSession() guarantees this finishes
     // before the exam is finalized.
     if (!marking.resolveCorrectKey(question)) {
-      const options = JSON.parse(question.options || '[]');
+      const options = safeParseOptions(question.options);
       db.prepare(
         `INSERT INTO answers (session_id, question_id, q_order, answer_text, is_correct, marks_awarded, max_marks, marked_by, ai_feedback, needs_review, marked_at)
          VALUES (?,?,?,?,?,?,?,?,?,?,datetime('now'))`
@@ -1297,27 +1390,40 @@ async function handleAnswer(exam, session, student, question, body, meta = {}) {
         const key = options[idx] ? String(options[idx].key || '').toUpperCase() : null;
 
         if (key && idx >= 0) {
-          if (question._pool) {
-            db.prepare('UPDATE question_pool SET correct_answer = ? WHERE id = ?').run(key, question.id);
-          } else {
-            db.prepare('UPDATE questions SET correct_answer = ? WHERE id = ?').run(key, question.id);
+          // Another student may have already resolved this question's key while we
+          // were waiting on the AI — don't overwrite (and possibly disagree with)
+          // the stored one.
+          const existing = question._pool
+            ? db.prepare('SELECT correct_answer FROM question_pool WHERE id = ?').get(question.id)
+            : db.prepare('SELECT correct_answer FROM questions WHERE id = ?').get(question.id);
+          const stored = existing ? String(existing.correct_answer || '').trim() : '';
+          if (!stored) {
+            if (question._pool) {
+              db.prepare('UPDATE question_pool SET correct_answer = ? WHERE id = ?').run(key, question.id);
+            } else {
+              db.prepare('UPDATE questions SET correct_answer = ? WHERE id = ?').run(key, question.id);
+            }
+          }
+          // Grade this student against the key that is actually stored.
+          const gradeKey = stored || key;
+          if (!question._pool) {
             db.prepare(
               `INSERT INTO marking_schemes (question_id, type, scheme) VALUES (?, 'objective', ?)
                ON CONFLICT(question_id) DO UPDATE SET scheme=excluded.scheme, updated_at=datetime('now')`
             ).run(question.id, JSON.stringify({
               type: 'objective',
-              correct_answer: key,
+              correct_answer: gradeKey,
               marks: question.marks,
               explanation: resolved?.explanation || '',
             }));
           }
-          const result = marking.markObjective({ ...question, correct_answer: key }, letter);
+          const result = marking.markObjective({ ...question, correct_answer: gradeKey }, letter);
           db.prepare(
             `UPDATE answers SET is_correct=?, marks_awarded=?, marked_by='ai', ai_feedback=?, needs_review=0, marked_at=datetime('now')
              WHERE session_id=? AND question_id=?`
           ).run(
             result.isCorrect ? 1 : 0, result.marksAwarded,
-            `Answer key determined by the AI examiner: ${key}.`,
+            `Answer key determined by the AI examiner: ${gradeKey}.`,
             session.id, question.id
           );
         } else {
@@ -1665,7 +1771,13 @@ async function markAllPendingTheory(sessionId) {
 }
 
 async function finalize(session, student, reason = 'completed') {
-  if (session.status !== 'in_progress') return;
+  // Atomically claim the session so two concurrent finalizers (timer cleanup +
+  // inbound message, duplicate webhook delivery) cannot both run the drain/mark/
+  // send flow and deliver duplicate results and certificates.
+  const claimed = db.prepare(
+    `UPDATE sessions SET status = 'finalizing' WHERE id = ? AND status = 'in_progress'`
+  ).run(session.id);
+  if (claimed.changes === 0) return;
   await drainSession(session.id); // background AI work must finish before results are computed
   await markAllPendingTheory(session.id);
   const result = results.computeForSession(session.id);
@@ -1684,15 +1796,19 @@ async function finalize(session, student, reason = 'completed') {
     }
   }
 
+  if (!resultSent) {
+    // Restore the previous in_progress state so the cleanup cycle retries this
+    // session instead of leaving the student with no grade message and a dead end.
+    console.error(`[exam] FAILED to send results to ${student.phone} after 3 attempts. Session restored to in_progress for retry.`);
+    db.prepare(`UPDATE sessions SET status = 'in_progress' WHERE id = ? AND status = 'finalizing'`).run(session.id);
+    return;
+  }
+
   // NOW mark the session as ended/expired — after results have been sent.
   db.prepare(
     `UPDATE sessions SET status = ?, ended_at = datetime('now'), final_score = ?, final_percentage = ?, passed = ?
      WHERE id = ?`
   ).run(reason, result.score, result.percentage, result.passed ? 1 : 0, session.id);
-
-  if (!resultSent) {
-    console.error(`[exam] FAILED to send results to ${student.phone} after 3 attempts. Session marked ${reason} but results were NOT delivered.`);
-  }
 
   if (config.exam.sendCertificates) {
     try {
@@ -1712,6 +1828,23 @@ async function finalize(session, student, reason = 'completed') {
       console.error(`Certificate send failed for ${student.phone}:`, err.message);
     }
   }
+}
+
+/**
+ * Release finalize() claims left behind by a crash or redeploy.
+ *
+ * finalize() claims a session by flipping in_progress → finalizing so a second
+ * finalizer cannot race it. If the process dies between that claim and the
+ * closing UPDATE, the session is stranded: the cleanup only scans in_progress,
+ * the dashboard counts it as neither active nor finished, and the student never
+ * gets a grade. Called once at startup, before anything can be finalizing.
+ */
+function recoverInterruptedFinalizes() {
+  const info = db.prepare(`UPDATE sessions SET status = 'in_progress' WHERE status = 'finalizing'`).run();
+  if (info.changes) {
+    console.log(`[recover] released ${info.changes} session(s) left claimed by an interrupted finalize`);
+  }
+  return info.changes;
 }
 
 // ── Admin: end an exam ─────────────────────────────────────────────────
@@ -2042,6 +2175,7 @@ module.exports = {
   handleAnswer,
   finalize,
   finalizeStaleSessions,
+  recoverInterruptedFinalizes,
   endExam,
   sendExamToRecipients,
   resendExamToRecipients,
