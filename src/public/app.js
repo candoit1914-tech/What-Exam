@@ -551,7 +551,7 @@ async function renderExams() {
         <thead><tr><th>Title</th><th>Subject</th><th>Status</th><th>Questions</th><th>Marks</th><th>Students</th><th>Created</th><th></th></tr></thead>
         <tbody>
           ${exams.map((e) => `<tr>
-            <td><a href="#/exams/${e.id}">${esc(e.title)}</a></td>
+            <td><a href="#/exams/${e.id}">${esc(e.title)}</a> ${priceTag(e)}</td>
             <td>${esc(e.subject) || '—'}</td>
             <td>${badge(e.status)}</td>
             <td>${e.question_count}</td>
@@ -566,16 +566,62 @@ async function renderExams() {
   observeReveals();
 }
 
+// ── Free vs paid (the admin's choice when creating a paper) ─────────
+// Shared by the New Exam and Edit Exam modals so the two can never drift.
+
+function pricingFieldsHTML(prefix, exam = {}) {
+  const paid = exam.pricing === 'paid';
+  const ghs = exam.price_amount ? exam.price_amount / 100 : '';
+  return `
+    <div class="field"><label>Exam type</label>
+      <select id="${prefix}_pricing">
+        <option value="free" ${paid ? '' : 'selected'}>Free — students take it at no cost</option>
+        <option value="paid" ${paid ? 'selected' : ''}>Paid — students pay before the paper opens</option>
+      </select>
+    </div>
+    <div class="field" id="${prefix}_price_wrap" style="display:${paid ? 'block' : 'none'}">
+      <label>Price (GHS)</label>
+      <input type="number" id="${prefix}_amount" min="1" step="0.01" value="${ghs}" placeholder="e.g. 10">
+    </div>`;
+}
+
+/** Show the price box only when Paid is selected. Call right after openModal. */
+function wirePricingFields(prefix) {
+  const sel = document.querySelector(`#${prefix}_pricing`);
+  const wrap = document.querySelector(`#${prefix}_price_wrap`);
+  if (!sel || !wrap) return;
+  const sync = () => { wrap.style.display = sel.value === 'paid' ? 'block' : 'none'; };
+  sel.addEventListener('change', sync);
+  sync();
+}
+
+/** What goes in the request body: `amount` is GHS major units, the server stores pesewas. */
+function pricingPayload(prefix) {
+  const sel = document.querySelector(`#${prefix}_pricing`);
+  if (!sel) return {};
+  if (sel.value !== 'paid') return { pricing: 'free' };
+  return { pricing: 'paid', amount: document.querySelector(`#${prefix}_amount`).value };
+}
+
+/** GHS 10 — the label used on the list, the header and the payments table. */
+function priceTag(exam) {
+  if (!exam || exam.pricing !== 'paid') return '';
+  const v = (Number(exam.price_amount) || 0) / 100;
+  return `<span class="badge" title="Paid exam — students pay on WhatsApp first">💰 GHS ${Number.isInteger(v) ? v : v.toFixed(2)}</span>`;
+}
+
 async function createExam() {
   const bodyHTML = `
     <div class="field"><label>Title</label><input type="text" id="ne_title" placeholder="e.g. End of Term Science Exam"></div>
     <div class="field"><label>Subject</label><input type="text" id="ne_subject" placeholder="e.g. Integrated Science"></div>
     <div class="field"><label>Duration (minutes)</label><input type="number" id="ne_duration" value="30"></div>
     <div class="field"><label>Pass mark (%)</label><input type="number" id="ne_pass" value="50"></div>
+    ${pricingFieldsHTML('ne')}
     <div class="modal-actions" style="margin-top:18px">
       <button id="ne_save" class="btn btn-primary">Create Exam</button>
     </div>`;
   await openModal('New Exam', bodyHTML);
+  wirePricingFields('ne');
   const btn = document.querySelector('#ne_save');
   if (!btn) return;
   btn.addEventListener('click', async () => {
@@ -584,6 +630,7 @@ async function createExam() {
       subject: document.querySelector('#ne_subject').value,
       duration_minutes: document.querySelector('#ne_duration').value,
       pass_percentage: document.querySelector('#ne_pass').value,
+      ...pricingPayload('ne'),
     };
     try {
       const { id } = await api('/api/exams', { method: 'POST', body });
@@ -612,7 +659,7 @@ async function renderExam(id) {
     <div class="spread">
       <div>
         <h1>${esc(exam.title)}</h1>
-        <p class="muted" style="margin-top:4px">${esc(exam.subject)} · ${exam.question_count} questions · ${exam.total_marks} marks · ${exam.duration_minutes} min · pass ${exam.pass_percentage}% · ${badge(exam.status)}</p>
+        <p class="muted" style="margin-top:4px">${esc(exam.subject)} · ${exam.question_count} questions · ${exam.total_marks} marks · ${exam.duration_minutes} min · pass ${exam.pass_percentage}% · ${badge(exam.status)} ${priceTag(exam)}</p>
       </div>
       <div class="row">
         ${exam.status === 'draft' ? `<button class="btn btn-primary" onclick="publishExam(${exam.id})">Publish</button>` : ''}
@@ -628,6 +675,7 @@ async function renderExam(id) {
       <button class="tab ${examState.tab === 'recipients' ? 'active' : ''}" onclick="setTab('recipients')">Recipients (${recipients.length})</button>
       <button class="tab ${examState.tab === 'results' ? 'active' : ''}" onclick="setTab('results')">Results (${results.length})</button>
       <button class="tab ${examState.tab === 'participants' ? 'active' : ''}" onclick="setTab('participants')">Participants</button>
+      ${exam.pricing === 'paid' ? `<button class="tab ${examState.tab === 'payments' ? 'active' : ''}" onclick="setTab('payments')">Payments (${(examState.data.payments || []).length})</button>` : ''}
     </div>
     <div id="tabbody"></div>`;
   renderTab();
@@ -911,7 +959,51 @@ async function renderTab() {
     // still surface the same failure to the admin, because there it is the whole
     // point of the click.
     loadWatermark().catch(() => {});
+  } else if (tab === 'payments') {
+    // Only reachable on a paid paper (the tab does not render otherwise), so
+    // this branch is invisible to every free exam.
+    const rows = examState.data.payments || [];
+    const paidRows = rows.filter((p) => p.status === 'paid');
+    const collected = paidRows.reduce((sum, p) => sum + (Number(p.amount) || 0), 0) / 100;
+    bodyEl.innerHTML = `
+      <div class="card" style="margin-top:14px">
+        <div class="spread">
+          <div>
+            <h3 style="margin-bottom:2px">PAY<span class="gr">MENTS</span></h3>
+            <p class="muted qmeta">Checkout links sent for this paper. Each paper opens the moment Paystack confirms its charge.</p>
+          </div>
+          <button class="btn btn-ghost" onclick="refreshPayments(${id})">↻ Refresh</button>
+        </div>
+        <div class="row" style="margin-top:12px;gap:16px;flex-wrap:wrap">
+          <div><b>${paidRows.length}</b> <span class="muted">Paid</span></div>
+          <div><b>${rows.length - paidRows.length}</b> <span class="muted">Pending / failed</span></div>
+          <div><b>GHS ${collected.toFixed(2)}</b> <span class="muted">Collected</span></div>
+        </div>
+      </div>
+      ${rows.length === 0
+        ? `<div class="empty-state">${I.empty}<p>No payment link has gone out yet — press Send on this exam.</p></div>`
+        : `<div class="card table-card"><table>
+            <thead><tr><th>Student</th><th>Phone</th><th>Amount</th><th>Status</th><th>Channel</th><th>Reference</th><th>Paid</th></tr></thead>
+            <tbody>${rows.map((p) => `<tr>
+              <td>${esc(p.student_name || '—')}</td>
+              <td>${esc(p.phone || '—')}</td>
+              <td>GHS ${((Number(p.amount) || 0) / 100).toFixed(2)}</td>
+              <td>${badge(p.status)}</td>
+              <td class="muted">${esc(p.channel || '—')}</td>
+              <td class="muted">${esc(p.reference || '—')}</td>
+              <td class="muted">${esc(p.paid_at || '—')}</td>
+            </tr>`).join('')}</tbody>
+          </table></div>`}`;
   }
+}
+
+/** Re-read the payment attempts without re-rendering the whole exam page. */
+async function refreshPayments(id) {
+  try {
+    const data = await api(`/api/exams/${id}/payments`);
+    examState.data.payments = data.payments || [];
+    renderTab();
+  } catch (e) { toast(e.message, true); }
 }
 
 // Fetch a roster asset (the print page) with the admin token, returning the
@@ -2056,10 +2148,12 @@ async function editExamMeta(id) {
     <div class="field"><label>Description</label><textarea id="em_desc">${esc(exam.description)}</textarea></div>
     <div class="field"><label>Duration (minutes)</label><input type="number" id="em_dur" value="${exam.duration_minutes}"></div>
     <div class="field"><label>Pass mark (%)</label><input type="number" id="em_pass" value="${exam.pass_percentage}"></div>
+    ${pricingFieldsHTML('em', exam)}
     ${selectionSummaryHTML()}
     <div class="modal-actions" style="margin-top:18px"><button id="em_save" class="btn btn-primary">Save</button></div>
   `);
   if (!div) return;
+  wirePricingFields('em');
   document.querySelector('#em_save').addEventListener('click', async () => {
     const body = {
       title: document.querySelector('#em_title').value,
@@ -2067,6 +2161,7 @@ async function editExamMeta(id) {
       description: document.querySelector('#em_desc').value,
       duration_minutes: document.querySelector('#em_dur').value,
       pass_percentage: document.querySelector('#em_pass').value,
+      ...pricingPayload('em'),
     };
     await api(`/api/exams/${id}`, { method: 'PATCH', body });
     invalidateCache('/api/exams');
