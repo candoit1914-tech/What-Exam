@@ -2,7 +2,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { checkConfig, statusOf } = require('../src/services/configCheck');
-const FULL = { ADMIN_PASSWORD:'pw-private', WHATSAPP_APP_SECRET:'app-private', WHATSAPP_ACCESS_TOKEN:'token-private', WHATSAPP_PHONE_NUMBER_ID:'123456789', WHATSAPP_VERIFY_TOKEN:'verify-private', WHATSAPP_TEMPLATE_NAME:'exam_invitation', AI_API_KEY:'ai-private', CORS_ORIGIN:'https://admin.school.org' };
+const FULL = { ADMIN_PASSWORD:'pw-private', WHATSAPP_APP_SECRET:'app-private', WHATSAPP_ACCESS_TOKEN:'token-private', WHATSAPP_PHONE_NUMBER_ID:'123456789', WHATSAPP_VERIFY_TOKEN:'verify-private', WHATSAPP_TEMPLATE_NAME:'exam_invitation', AI_API_KEY:'ai-private', CORS_ORIGIN:'https://admin.school.org', WHATSAPP_PAYMENT_TEMPLATE_NAME:'exam_payment', WHATSAPP_PAID_START_TEMPLATE_NAME:'exam_paid_start', PAYSTACK_SECRET_KEY:'sk_test-private' };
 const cfg = { appUrl:'https://exam.school.org', admin:{isGenerated:false} };
 const find = (r,k) => r.items.find(i=>i.key===k);
 test('classifies absent and placeholder values',()=>{
