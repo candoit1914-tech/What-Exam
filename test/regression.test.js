@@ -939,6 +939,142 @@ test('handleInbound does not restart the clock once a student has answered', asy
   }
 });
 
+test('a student who already chose their questions does not get a fresh clock back', async () => {
+  const db = require('../src/db');
+  const wa = require('../src/services/whatsapp');
+  db.exec('BEGIN');
+  try {
+    const examId = db
+      .prepare("INSERT INTO exams (title, subject, duration_minutes, status) VALUES (?,?,?,'published')")
+      .run('__timer_select_exam__', 'Test', 60).lastInsertRowid;
+    const opts = JSON.stringify([
+      { key: 'A', text: 'Kumasi' },
+      { key: 'B', text: 'Accra' },
+      { key: 'C', text: 'Tamale' },
+      { key: 'D', text: 'Cape Coast' },
+    ]);
+    db.prepare("INSERT INTO questions (exam_id, q_order, type, text, options, correct_answer, marks) VALUES (?,1,'objective','Q1?',?,?,1)").run(examId, opts, 'B');
+    db.prepare("INSERT INTO questions (exam_id, q_order, type, text, options, correct_answer, marks) VALUES (?,2,'objective','Q2?',?,?,1)").run(examId, opts, 'C');
+    const phone = '__timer_select_phone__' + Date.now();
+    const studentId = db
+      .prepare('INSERT INTO students (phone) VALUES (?)')
+      .run(phone).lastInsertRowid;
+    // The clock armed on first engagement 50 minutes ago; the student then spent
+    // that time in the selector and committed — selection_state went back to ''
+    // but selection_section is kept (applySelection never clears it).
+    const sessionId = db
+      .prepare("INSERT INTO sessions (exam_id, student_id, started_at, last_active_at, selection_state, selection_section) VALUES (?,?,datetime('now','-50 minutes'),datetime('now','-50 minutes'),'','b')")
+      .run(examId, studentId).lastInsertRowid;
+
+    const real = wa.sendText;
+    wa.sendText = async () => ({ ok: true });
+    try {
+      await exam.handleInbound(phone, 'B', {});
+    } finally {
+      wa.sendText = real;
+    }
+
+    const s = db.prepare('SELECT * FROM sessions WHERE id = ?').get(sessionId);
+    const started = new Date(s.started_at).getTime();
+    assert.ok(Date.now() - started > 9 * 60000, 'the selection must not be handed back as free time');
+    const row = db.prepare('SELECT * FROM answers WHERE session_id = ?').get(sessionId);
+    assert.ok(row, 'the answer was still recorded');
+    assert.equal(row.is_correct, 1, 'answered B correctly on the original clock');
+  } finally {
+    db.exec('ROLLBACK');
+  }
+});
+
+test('a session claimed by finalize swallows inbound traffic instead of starting a new attempt', async () => {
+  const db = require('../src/db');
+  db.exec('BEGIN');
+  try {
+    const examId = db
+      .prepare("INSERT INTO exams (title, subject, duration_minutes, status) VALUES (?,?,?,'published')")
+      .run('__finalizing_exam__', 'Test', 60).lastInsertRowid;
+    const opts = JSON.stringify([{ key: 'A', text: 'One' }, { key: 'B', text: 'Two' }]);
+    db.prepare("INSERT INTO questions (exam_id, q_order, type, text, options, correct_answer, marks) VALUES (?,1,'objective','Q1?',?,?,1)").run(examId, opts, 'A');
+    const phone = '__finalizing_phone__' + Date.now();
+    const studentId = db
+      .prepare('INSERT INTO students (phone) VALUES (?)')
+      .run(phone).lastInsertRowid;
+    const sessionId = db
+      .prepare("INSERT INTO sessions (exam_id, student_id, started_at, last_active_at) VALUES (?,?,datetime('now','-10 minutes'),datetime('now','-10 minutes'))")
+      .run(examId, studentId).lastInsertRowid;
+    db.prepare(`UPDATE sessions SET status = 'finalizing' WHERE id = ?`).run(sessionId);
+
+    // The claim must still look like the student's live attempt, or the reply
+    // below would take the "no active session" path and issue a second paper.
+    const active = exam.getActiveSession(studentId);
+    assert.equal(active.id, sessionId, 'a claimed session is still the active one');
+
+    const res = await exam.handleInbound(phone, 'B', {});
+    assert.equal(res.reason, 'finalizing', 'the message is acknowledged and dropped');
+
+    const s = db.prepare('SELECT * FROM sessions WHERE id = ?').get(sessionId);
+    assert.equal(s.status, 'finalizing', 'the claim is untouched by the inbound message');
+    assert.equal(
+      db.prepare('SELECT COUNT(*) c FROM sessions WHERE student_id = ?').get(studentId).c,
+      1,
+      'no second attempt was created mid-finalize'
+    );
+    assert.equal(
+      db.prepare('SELECT COUNT(*) c FROM answers WHERE session_id = ?').get(sessionId).c,
+      0,
+      'no answer was recorded against a session being graded'
+    );
+
+    // A crash between the claim and the closing UPDATE is recovered at boot.
+    assert.ok(exam.recoverInterruptedFinalizes() >= 1, 'the stranded claim is released');
+    assert.equal(exam.getActiveSession(studentId).status, 'in_progress', 'cleaned up and retryable');
+    assert.equal(exam.recoverInterruptedFinalizes(), 0, 'and it is a no-op the second time');
+  } finally {
+    db.exec('ROLLBACK');
+  }
+});
+
+test('an unreadable selection reply clears the selector instead of bricking the session', async () => {
+  const db = require('../src/db');
+  const wa = require('../src/services/whatsapp');
+  db.exec('BEGIN');
+  try {
+    const examId = db
+      .prepare("INSERT INTO exams (title, subject, duration_minutes, status) VALUES (?,?,?,'published')")
+      .run('__selector_stuck_exam__', 'Test', 60).lastInsertRowid;
+    const opts = JSON.stringify([{ key: 'A', text: 'One' }, { key: 'B', text: 'Two' }]);
+    db.prepare("INSERT INTO questions (exam_id, q_order, type, text, options, correct_answer, marks) VALUES (?,1,'objective','Q1?',?,?,1)").run(examId, opts, 'B');
+    const phone = '__selector_stuck_phone__' + Date.now();
+    const studentId = db
+      .prepare('INSERT INTO students (phone) VALUES (?)')
+      .run(phone).lastInsertRowid;
+    const sessionId = db
+      .prepare("INSERT INTO sessions (exam_id, student_id, started_at, last_active_at) VALUES (?,?,datetime('now'),datetime('now'))")
+      .run(examId, studentId).lastInsertRowid;
+    // A selector is open for a section the paper no longer has a plan for, so
+    // selection.handleReply answers {handled:false} and used to leave
+    // selection_state set forever — every later reply re-entered the branch.
+    db.prepare(`UPDATE sessions SET selection_state = 'selecting', selection_section = 'b' WHERE id = ?`).run(sessionId);
+
+    const real = wa.sendText;
+    wa.sendText = async () => ({ ok: true });
+    try {
+      const session = exam.getActiveSession(studentId);
+      await exam.processAnswer(session, { id: studentId, phone }, 'B', {});
+    } finally {
+      wa.sendText = real;
+    }
+
+    const s = db.prepare('SELECT * FROM sessions WHERE id = ?').get(sessionId);
+    assert.equal(s.selection_state, '', 'the stuck selector is released (and never written as NULL)');
+    assert.equal(s.selection_section, 'b', 'the section is kept — it records that the selector opened');
+    const row = db.prepare('SELECT * FROM answers WHERE session_id = ?').get(sessionId);
+    assert.ok(row, 'the reply was graded as the answer it was');
+    assert.equal(row.is_correct, 1, 'answered B correctly');
+  } finally {
+    db.exec('ROLLBACK');
+  }
+});
+
 test('processAnswer advances a pool-drawn session without throwing on the next question', async () => {
   const db = require('../src/db');
   const wa = require('../src/services/whatsapp');
