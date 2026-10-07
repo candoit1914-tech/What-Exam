@@ -21,12 +21,20 @@ const delay = (ms) => new Promise((r) => setTimeout(r, ms));
  * indefinitely, so AbortController alone cannot be relied on to unblock a
  * stuck AI call. Racing the promise against a timer guarantees a hanging
  * endpoint can never stall a job forever.
+ *
+ * `onTimeout`, when given, fires as soon as the timer wins — the race only
+ * abandons the caller's await, so the caller uses it to abort the request and
+ * release the socket instead of leaving it open for a full TCP timeout.
  */
-function withHardTimeout(promise, ms) {
+function withHardTimeout(promise, ms, onTimeout) {
   if (!ms || ms <= 0) return promise;
   let timer;
   const timeout = new Promise((_, reject) => {
     timer = setTimeout(() => {
+      // Fire the abort hook too: the race rejects the caller's await, but the
+      // underlying fetch would otherwise keep its socket open for the full TCP
+      // timeout.
+      try { if (onTimeout) onTimeout(); } catch { /* ignore */ }
       const e = new AIError(`AI request timed out after ${Math.round(ms / 1000)}s.`);
       e.name = 'AIError';
       reject(e);
@@ -76,25 +84,32 @@ function buildChatBody({ model, messages, temperature, maxTokens, reasoningEffor
 
 /**
  * POST one chat request to an OpenAI-compatible endpoint and parse the JSON
- * content from the response. Retries transient failures with backoff; a hard
- * timeout surfaces immediately (never retried) so a hanging endpoint can never
- * stall a job forever.
+ * content from the response. Exactly one attempt — no retry or backoff here;
+ * callers that want those use callEndpoint (a separate function, not a wrapper
+ * around this one). A hard timeout surfaces immediately so a hanging endpoint
+ * can never stall a job forever.
  */
 async function callEndpointRaw({ baseUrl, apiKey, model, messages, temperature, maxTokens, timeoutMs, reasoningEffort }) {
   const body = buildChatBody({ model, messages, temperature, maxTokens, reasoningEffort });
+  const controller = new AbortController();
   const res = await withHardTimeout(
     fetch(`${baseUrl}/chat/completions`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
       body: JSON.stringify(body),
+      signal: controller.signal,
     }),
-    timeoutMs
+    timeoutMs,
+    () => controller.abort()
   );
   if (!res.ok) {
     const text = await res.text().catch(() => '');
     throw new AIError(`AI request failed (${res.status}): ${text.slice(0, 300)}`);
   }
-  const data = await res.json();
+  // A 200 with a non-JSON body (an HTML error page, or an empty body from a
+  // proxy) must fail as an AIError like every other provider failure above —
+  // a raw SyntaxError would surface to callers as if the app itself were broken.
+  const data = await res.json().catch(() => { throw new AIError('AI returned a non-JSON response'); });
   // Gemini wraps errors in a 200 OK as an array: [{error: {code: 429, ...}}]
   if (Array.isArray(data) && data[0]?.error) {
     const e = data[0].error;
@@ -144,6 +159,7 @@ async function callEndpoint({ baseUrl, apiKey, model, messages, temperature, max
   let attempt = 0;
   while (attempt <= maxRetries) {
     try {
+      const controller = new AbortController();
       const res = await withHardTimeout(
         fetch(`${baseUrl}/chat/completions`, {
           method: 'POST',
@@ -152,8 +168,10 @@ async function callEndpoint({ baseUrl, apiKey, model, messages, temperature, max
             Authorization: `Bearer ${apiKey}`,
           },
           body: JSON.stringify(body),
+          signal: controller.signal,
         }),
-        timeoutMs
+        timeoutMs,
+        () => controller.abort()
       );
 
       // Handle 429 rate-limit with exponential backoff + retry
@@ -205,7 +223,7 @@ async function callEndpoint({ baseUrl, apiKey, model, messages, temperature, max
         throw new AIError(`AI request failed (${res.status}): ${text.slice(0, 300)}`);
       }
 
-      const data = await res.json();
+      const data = await res.json().catch(() => { throw new AIError('AI returned a non-JSON response'); });
       // Gemini wraps errors in a 200 OK as an array: [{error: {code: 429, ...}}]
       if (Array.isArray(data) && data[0]?.error) {
         const e = data[0].error;
@@ -386,8 +404,9 @@ async function chatJSON(messages, { temperature = 0.4, maxRetries = 2, timeoutMs
       baseUrl: config.claude.baseUrl,
       apiKey: config.claude.apiKey,
       model: config.claude.model || config.ai.model,
-      timeoutMs: config.claude.timeoutMs || effectiveTimeout,
       ...common,
+      // Per-provider override wins; note spread order — common would clobber it.
+      timeoutMs: config.claude.timeoutMs || effectiveTimeout,
     });
 
   const tertiary = () =>
@@ -395,8 +414,8 @@ async function chatJSON(messages, { temperature = 0.4, maxRetries = 2, timeoutMs
       baseUrl: config.xai.baseUrl,
       apiKey: config.xai.apiKey,
       model: config.xai.model,
-      timeoutMs: config.xai.timeoutMs || effectiveTimeout,
       ...common,
+      timeoutMs: config.xai.timeoutMs || effectiveTimeout,
     });
 
   // Ordered list of candidates: the primary first, then fallbacks. They are
@@ -2573,7 +2592,16 @@ async function readPhotoAnswer(imagePath, questionText) {
   const pathMod = require('path');
   const uploadsDir = require('../config').uploadsDir;
 
-  const fullPath = pathMod.isAbsolute(imagePath) ? imagePath : pathMod.join(uploadsDir, imagePath);
+  const fullPath = (() => {
+    // Confine reads to the uploads directory — reject absolute paths elsewhere
+    // and any ../ escape in a relative name.
+    const root = pathMod.resolve(uploadsDir);
+    const resolved = pathMod.resolve(root, imagePath);
+    if (resolved !== root && !resolved.startsWith(root + pathMod.sep)) {
+      throw new AIError(`Image path outside uploads directory: ${imagePath}`);
+    }
+    return resolved;
+  })();
   if (!fs.existsSync(fullPath)) {
     throw new AIError(`Image file not found: ${imagePath}`);
   }
@@ -2730,13 +2758,16 @@ RULES:
       formData.append('response_format', 'text');
       formData.append('prompt', questionText);
 
+      const controller = new AbortController();
       const res = await withHardTimeout(
         fetch(`${config.aiTranscribe.baseUrl}/audio/transcriptions`, {
           method: 'POST',
           headers: { Authorization: `Bearer ${config.aiTranscribe.apiKey}` },
           body: formData,
+          signal: controller.signal,
         }),
-        effectiveTimeout
+        effectiveTimeout,
+        () => controller.abort()
       );
 
       if (res.ok) {
@@ -2789,19 +2820,22 @@ RULES:
           }],
           generationConfig: { temperature: 0.1, maxOutputTokens: 2048 },
         };
+        const controller = new AbortController();
         const res = await withHardTimeout(
           fetch(nativeUrl, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'x-goog-api-key': p.apiKey },
             body: JSON.stringify(body),
+            signal: controller.signal,
           }),
           effectiveTimeout,
+          () => controller.abort(),
         );
         if (!res.ok) {
           const errText = await res.text().catch(() => '');
           throw new AIError(`Gemini audio API failed (${res.status}): ${errText.slice(0, 200)}`);
         }
-        const data = await res.json();
+        const data = await res.json().catch(() => { throw new AIError('Gemini returned a non-JSON response'); });
         const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
         if (!text || text === '[inaudible]') {
           throw new AIError('Audio transcription returned empty or inaudible');
