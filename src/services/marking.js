@@ -118,11 +118,18 @@ function resolveCorrectKey(question) {
   if (/^[A-D]$/.test(exact)) return exact;
 
   const ot = (o) => normalizeAnswer(o && o.text);
-  const byText = opts.find((o) => {
+  // Exact match first — substring credit only when unambiguous, so stored key
+  // "Yes" can never be awarded to whichever option merely contains "yes" first.
+  const exactMatch = opts.find((o) => {
     const t = ot(o);
-    return !!t && (t === exact || t.includes(exact) || exact.includes(t));
+    return !!t && t === exact;
   });
-  if (byText) return String(byText.key || '').toUpperCase();
+  if (exactMatch) return String(exactMatch.key || '').toUpperCase();
+  const partial = opts.filter((o) => {
+    const t = ot(o);
+    return !!t && (t.includes(exact) || exact.includes(t));
+  });
+  if (partial.length === 1) return String(partial[0].key || '').toUpperCase();
 
   const lead =
     String(raw).match(/^(?:option\s*)?\(?([A-Da-d])\)?$/i) ||
@@ -145,11 +152,17 @@ function resolveStudentLetter(question, raw) {
   const ans = normalizeAnswer(raw).replace(/\.$/, '');
   if (/^[A-D]$/.test(ans)) return ans;
   const opts = parseOptions(question);
-  const hit = opts.find((o) => {
+  const exactHit = opts.find((o) => {
     const t = normalizeAnswer(o && o.text);
-    return !!t && (t === ans || t.includes(ans) || ans.includes(t));
+    return !!t && t === ans;
   });
-  return hit ? String(hit.key || '').toUpperCase() : null;
+  if (exactHit) return String(exactHit.key || '').toUpperCase();
+  const partialHits = opts.filter((o) => {
+    const t = normalizeAnswer(o && o.text);
+    return !!t && (t.includes(ans) || ans.includes(t));
+  });
+  // Substring credit only when unambiguous — never the first option in list order.
+  return partialHits.length === 1 ? String(partialHits[0].key || '').toUpperCase() : null;
 }
 
 /** Instant objective marking. Accepts "B", "b", "B." or the full option text. */
