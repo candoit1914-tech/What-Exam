@@ -686,7 +686,13 @@ function setTab(tab) {
   renderExam(examState.id);
 }
 
-async /** <summary>for a rule row, using the resolved pool the server reported. */
+// Sync on purpose: callers interpolate this straight into an HTML template, so
+// `async` here would render "[object Promise]". The stray `async` this line
+// used to carry was parsed as its own statement (`async` / newline /
+// `function`) and threw ReferenceError while the script loaded, freezing
+// everything after it — every `const` below stayed in the temporal dead zone,
+// which is how the Recipients tab ended up rendering nothing.
+/** <summary>for a rule row, using the resolved pool the server reported. */
 function selectionRulesCardHTML(examId, sections, selection) {
   const rows = SelectionUI.ruleRows(sections, selection);
   if (!rows.length) {
