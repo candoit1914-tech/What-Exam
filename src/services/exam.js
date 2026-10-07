@@ -12,6 +12,9 @@ const outbox = require('./outbox');
 // selection.js requires only ../db, so this edge is not circular. Never require
 // ./exam back from selection.js — exam is the caller, not the callee.
 const selection = require('./selection');
+// The Paystack paywall. payments.js requires ./exam back only lazily, inside
+// unlock(), so this edge is safe at require time too.
+const payments = require('./payments');
 const { stripSourceWatermarks } = require('./textClean');
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -1046,6 +1049,19 @@ async function handleInbound(phone, body, meta = {}) {
     return { started: false, ok: true, reason: 'finalizing' };
   }
 
+  // A paid paper stays locked until Paystack says the money landed. This runs
+  // before the invite shortcut below, which would otherwise arm the clock and
+  // hand over question 1 on the student's first "hello". A student already
+  // part-way through (started_at set) is never blocked.
+  if (!session.started_at) {
+    const examRow = db.prepare('SELECT * FROM exams WHERE id = ?').get(session.exam_id);
+    const gate = await payments.ensurePaid(examRow, student, session);
+    if (!gate.paid) {
+      await payments.tryDeliverLink(student, examRow);
+      return { started: false, ok: false, reason: 'payment_required' };
+    }
+  }
+
   // An approved template invites a reply; it does not open the service
   // window. Deliver Q1 on that first reply instead of grading the greeting.
   const invited = db.prepare("SELECT id FROM message_outbox WHERE session_id=? AND kind='intro' AND state='sent'").get(session.id);
@@ -1130,6 +1146,18 @@ async function maybeStartSession(student) {
 
   const exam = candidates[0];
   const existing = latestSession(exam.id, student.id);
+
+  // The paywall, before anything at all is delivered. An unpaid student gets
+  // the checkout link and no paper; a student already part-way through the
+  // attempt (started_at set) is never blocked, so an admin pricing a live
+  // paper mid-run cannot strand the people already writing it.
+  if (!existing || !existing.started_at) {
+    const gate = await payments.ensurePaid(exam, student, existing);
+    if (!gate.paid) {
+      await payments.tryDeliverLink(student, exam);
+      return { ok: false, reason: 'payment_required' };
+    }
+  }
 
   if (existing && existing.status === 'in_progress') {
     const questionCount =
@@ -2003,6 +2031,13 @@ async function sendIntro(session, student, exam, count, template, { force = fals
     }
     outbox.markSent(entry.id);
     recordAcceptance(session);
+    // A paid paper sends its checkout link right behind the invite, in its own
+    // try so a gateway hiccup cannot mark the invite failed — and the link is
+    // re-sent on every reply until the student pays, so nothing is lost. A free
+    // exam never enters this branch, so its invite is untouched.
+    if (payments.isPaidExam(exam)) {
+      await payments.tryDeliverLink(student, exam);
+    }
   } catch (error) {
     outbox.markFailed(entry.id, error, Math.max(1, config.exam.sendRetries));
     throw error;
@@ -2171,6 +2206,9 @@ module.exports = {
   createSession,
   recoverQueuedSends,
   handleInbound,
+  // Exported for the paywall: payments.unlock() opens the paper from the
+  // webhook, which runs outside any inbound message.
+  maybeStartSession,
   processAnswer,
   handleAnswer,
   finalize,
