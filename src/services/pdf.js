@@ -38,7 +38,7 @@ function loadPdfjs() {
 
 function openDoc(buffer) {
   const { getDocument } = loadPdfjs();
-  return getDocument({
+  const task = getDocument({
     data: new Uint8Array(buffer),
     useSystemFonts: true,
     standardFontDataUrl: path.join(
@@ -47,7 +47,15 @@ function openDoc(buffer) {
       path.sep
     ),
     isEvalSupported: false,
-  }).promise;
+  });
+  return task.promise.then((doc) => {
+    // destroy() lives on the loading task, not the document proxy — expose it
+    // on the doc so callers can release the worker's worker thread and memory.
+    if (typeof doc.destroy !== 'function') {
+      doc.destroy = typeof task.destroy === 'function' ? () => task.destroy() : () => Promise.resolve();
+    }
+    return doc;
+  });
 }
 
 async function extractText(buffer) {
@@ -61,14 +69,20 @@ async function extractText(buffer) {
 async function renderPageToBuffer(buffer, pageNum, scale = 2) {
   const { createCanvas } = require('@napi-rs/canvas');
   const doc = await openDoc(buffer);
-  const page = await doc.getPage(pageNum);
-  const vp = page.getViewport({ scale });
-  const canvas = createCanvas(Math.ceil(vp.width), Math.ceil(vp.height));
-  const ctx = canvas.getContext('2d');
-  // Use replayPageOps to render the page (vector + raster, skips text glyphs)
-  const full = await replayPageOps(page, page.getViewport({ scale: 1 }));
-  ctx.drawImage(full, 0, 0, canvas.width, canvas.height);
-  return canvas.toBuffer('image/png');
+  try {
+    const page = await doc.getPage(pageNum);
+    const vp = page.getViewport({ scale });
+    const canvas = createCanvas(Math.ceil(vp.width), Math.ceil(vp.height));
+    const ctx = canvas.getContext('2d');
+    // Use replayPageOps to render the page (vector + raster, skips text glyphs).
+    // Render at the requested scale, not scale 1 — otherwise the canvas is just
+    // an upscaled blur of a scale-1 raster.
+    const full = await replayPageOps(page, vp);
+    ctx.drawImage(full, 0, 0, canvas.width, canvas.height);
+    return canvas.toBuffer('image/png');
+  } finally {
+    await doc.destroy().catch(() => {});
+  }
 }
 
 /**
@@ -96,10 +110,18 @@ async function ocrPageBuffer(pageBuffer) {
 async function ocrDocument(buffer) {
   const { createCanvas } = require('@napi-rs/canvas');
   const doc = await openDoc(buffer);
-  const Tesseract = require('tesseract.js');
-  const worker = await Tesseract.createWorker('eng', 1, {
-    logger: () => {},
-  });
+  // Nothing below may throw before the worker exists without handing the
+  // document back first — the main try/finally only covers the loop.
+  let worker;
+  try {
+    const Tesseract = require('tesseract.js');
+    worker = await Tesseract.createWorker('eng', 1, {
+      logger: () => {},
+    });
+  } catch (err) {
+    await doc.destroy().catch(() => {});
+    throw err;
+  }
 
   const textLines = [];
   const images = [];
@@ -240,7 +262,12 @@ async function ocrDocument(buffer) {
       images.push(q);
     }
   } finally {
-    await worker.terminate();
+    try {
+      await worker.terminate();
+    } finally {
+      // Nested so a throwing terminate() can never skip the document release.
+      await doc.destroy().catch(() => {});
+    }
   }
 
   return { textLines, images, rowsByPage, mathExprs: [] };
@@ -770,7 +797,18 @@ const VECTOR_TEXT_BOX_MAX_H = 60;
  * `kind`/`rasterId` used by the renderers.
  */
 async function analyzeDocument(buffer) {
+  // One document, one release. The body reads from the doc through every early
+  // return (OCR fallback included), so the destroy belongs on the wrapper —
+  // not sprinkled after each return, where a thrown page read would skip it.
   const doc = await openDoc(buffer);
+  try {
+    return await analyzeDocumentWithDoc(doc, buffer);
+  } finally {
+    await doc.destroy().catch(() => {});
+  }
+}
+
+async function analyzeDocumentWithDoc(doc, buffer) {
   const pageData = [];
   let mathBase = 0;
   for (let p = 1; p <= doc.numPages; p++) {
@@ -1074,41 +1112,45 @@ function rgbaFromPixels(img) {
 async function renderImage(buffer, image, outPath) {
   const { createCanvas } = require('@napi-rs/canvas');
   const doc = await openDoc(buffer);
-  const page = await doc.getPage(image.page);
-  const vp = page.getViewport({ scale: 1 });
-  await page.render({ canvasContext: noopCanvasContext(), viewport: vp }).promise.catch(() => {});
-  let img = null;
-  if (image.rasterId) {
-    try { img = page.objs.get(String(image.rasterId)); } catch { img = null; }
-  }
-  // An unrelated decoded bitmap (for example a logo) is never a valid
-  // substitute for the requested raster. Use the page crop below instead.
-  const cw = Math.max(1, Math.round((image.w || 1) * 2));
-  const ch = Math.max(1, Math.round((image.h || 1) * 2));
-  const out = createCanvas(cw, ch);
-  const octx = out.getContext('2d');
-  const rgba = img && img.width ? rgbaFromPixels(img) : null;
-  if (rgba) {
-    const src = createCanvas(img.width, img.height);
-    const sctx = src.getContext('2d');
-    const id = sctx.createImageData(img.width, img.height);
-    id.data.set(rgba);
-    sctx.putImageData(id, 0, 0);
-    octx.drawImage(src, 0, 0, cw, ch);
-  } else {
-    // Raster not in page.objs (scanned PDF) — fall back to replayPageOps
-    // which renders the full page vector+raster ops, then crop to the figure box.
-    try {
-      const full = await replayPageOps(page, vp);
-      const pad = 4;
-      octx.drawImage(full, image.x - pad, image.y - pad, image.w + pad * 2, image.h + pad * 2, 0, 0, cw, ch);
-    } catch (err) {
-      console.warn('[pdf] image render failed', { page: image.page });
-      throw err;
+  try {
+    const page = await doc.getPage(image.page);
+    const vp = page.getViewport({ scale: 1 });
+    await page.render({ canvasContext: noopCanvasContext(), viewport: vp }).promise.catch(() => {});
+    let img = null;
+    if (image.rasterId) {
+      try { img = page.objs.get(String(image.rasterId)); } catch { img = null; }
     }
+    // An unrelated decoded bitmap (for example a logo) is never a valid
+    // substitute for the requested raster. Use the page crop below instead.
+    const cw = Math.max(1, Math.round((image.w || 1) * 2));
+    const ch = Math.max(1, Math.round((image.h || 1) * 2));
+    const out = createCanvas(cw, ch);
+    const octx = out.getContext('2d');
+    const rgba = img && img.width ? rgbaFromPixels(img) : null;
+    if (rgba) {
+      const src = createCanvas(img.width, img.height);
+      const sctx = src.getContext('2d');
+      const id = sctx.createImageData(img.width, img.height);
+      id.data.set(rgba);
+      sctx.putImageData(id, 0, 0);
+      octx.drawImage(src, 0, 0, cw, ch);
+    } else {
+      // Raster not in page.objs (scanned PDF) — fall back to replayPageOps
+      // which renders the full page vector+raster ops, then crop to the figure box.
+      try {
+        const full = await replayPageOps(page, vp);
+        const pad = 4;
+        octx.drawImage(full, image.x - pad, image.y - pad, image.w + pad * 2, image.h + pad * 2, 0, 0, cw, ch);
+      } catch (err) {
+        console.warn('[pdf] image render failed', { page: image.page });
+        throw err;
+      }
+    }
+    fs.writeFileSync(outPath, out.toBuffer('image/png'));
+    return outPath;
+  } finally {
+    await doc.destroy().catch(() => {});
   }
-  fs.writeFileSync(outPath, out.toBuffer('image/png'));
-  return outPath;
 }
 
 // Convert pdfjs color args ([r,g,b] 0..1 or gray or cmyk) to a css color
@@ -1278,17 +1320,23 @@ async function replayPageOps(page, vp) {
 async function renderVectorRegion(buffer, image, outPath) {
   const { createCanvas } = require('@napi-rs/canvas');
   const doc = await openDoc(buffer);
-  const page = await doc.getPage(image.page);
-  const vp = page.getViewport({ scale: 1 });
-  const full = await replayPageOps(page, vp);
-  const pad = 4;
-  const cw = Math.max(1, Math.round((image.w + pad * 2) * 2));
-  const ch = Math.max(1, Math.round((image.h + pad * 2) * 2));
-  const out = createCanvas(cw, ch);
-  const octx = out.getContext('2d');
-  octx.drawImage(full, image.x - pad, image.y - pad, image.w + pad * 2, image.h + pad * 2, 0, 0, cw, ch);
-  fs.writeFileSync(outPath, out.toBuffer('image/png'));
-  return outPath;
+  try {
+    const page = await doc.getPage(image.page);
+    const vp = page.getViewport({ scale: 1 });
+    const full = await replayPageOps(page, vp);
+    const pad = 4;
+    const cw = Math.max(1, Math.round((image.w + pad * 2) * 2));
+    const ch = Math.max(1, Math.round((image.h + pad * 2) * 2));
+    const out = createCanvas(cw, ch);
+    const octx = out.getContext('2d');
+    octx.drawImage(full, image.x - pad, image.y - pad, image.w + pad * 2, image.h + pad * 2, 0, 0, cw, ch);
+    fs.writeFileSync(outPath, out.toBuffer('image/png'));
+    return outPath;
+  } finally {
+    // finally, not a trailing call: a getPage/replay failure must still hand
+    // the worker thread back instead of leaking one PDF at a time.
+    await doc.destroy().catch(() => {});
+  }
 }
 
 /**
@@ -1305,28 +1353,32 @@ async function renderMathRegion(buffer, expr, outPath, scale = 4, pageCache) {
   const { createCanvas } = require('@napi-rs/canvas');
   if (!globalThis.Path2D) globalThis.Path2D = require('@napi-rs/canvas').Path2D;
   const doc = await openDoc(buffer);
-  const page = await doc.getPage(expr.page);
-  const vp = page.getViewport({ scale });
-  const cw = Math.max(1, Math.round(expr.w * scale));
-  const ch = Math.max(1, Math.round(expr.h * scale));
-  const out = createCanvas(cw, ch);
-  const octx = out.getContext('2d');
   try {
-    let canvas = pageCache && pageCache.get(expr.page);
-    if (!canvas) {
-      canvas = createCanvas(Math.ceil(vp.width), Math.ceil(vp.height));
-      const ctx = canvas.getContext('2d');
-      await page.render({ canvasContext: ctx, viewport: vp }).promise;
-      if (pageCache) pageCache.set(expr.page, canvas);
+    const page = await doc.getPage(expr.page);
+    const vp = page.getViewport({ scale });
+    const cw = Math.max(1, Math.round(expr.w * scale));
+    const ch = Math.max(1, Math.round(expr.h * scale));
+    const out = createCanvas(cw, ch);
+    const octx = out.getContext('2d');
+    try {
+      let canvas = pageCache && pageCache.get(expr.page);
+      if (!canvas) {
+        canvas = createCanvas(Math.ceil(vp.width), Math.ceil(vp.height));
+        const ctx = canvas.getContext('2d');
+        await page.render({ canvasContext: ctx, viewport: vp }).promise;
+        if (pageCache) pageCache.set(expr.page, canvas);
+      }
+      octx.drawImage(canvas, expr.x * scale, expr.y * scale, cw, ch, 0, 0, cw, ch);
+    } catch (err) {
+      console.warn('[pdf] math region render failed', { page: expr.page });
+      throw err;
     }
-    octx.drawImage(canvas, expr.x * scale, expr.y * scale, cw, ch, 0, 0, cw, ch);
-  } catch (err) {
-    console.warn('[pdf] math region render failed', { page: expr.page });
-    throw err;
+    diagnoseRender(out, expr.page, 'math');
+    fs.writeFileSync(outPath, out.toBuffer('image/png'));
+    return outPath;
+  } finally {
+    await doc.destroy().catch(() => {});
   }
-  diagnoseRender(out, expr.page, 'math');
-  fs.writeFileSync(outPath, out.toBuffer('image/png'));
-  return outPath;
 }
 
 function saveUpload(buffer, originalName) {
