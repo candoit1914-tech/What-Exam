@@ -221,7 +221,8 @@ function reportHTML(sessionId) {
 
       let body = '';
       if (a.type === 'objective') {
-        const opts = JSON.parse(a.options || '[]');
+        let opts = [];
+        try { opts = JSON.parse(a.options || '[]'); } catch { opts = []; }
         const optPills = opts
           .map((o) => {
             const key = String(o.key || '');
@@ -250,7 +251,8 @@ function reportHTML(sessionId) {
           </div>`;
         if (a.explanation) body += `<p class="expl">${esc(a.explanation)}</p>`;
       } else {
-        const sch = a.scheme ? JSON.parse(a.scheme) : null;
+        let sch = null;
+        try { sch = a.scheme ? JSON.parse(a.scheme) : null; } catch { sch = null; }
         const keyPts = sch?.key_points || [];
         body = `<div class="theory-block">
           <div class="theory-meta">
@@ -409,7 +411,9 @@ function esc(s) {
   return String(s == null ? '' : s)
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
 // esc() handles HTML text nodes. OOXML is a different grammar: an unescaped
