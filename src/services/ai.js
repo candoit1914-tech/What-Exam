@@ -1011,19 +1011,30 @@ function selectDiagramType(questionText) {
  */
 async function generateQuestions({ subject, topics, count, objectiveCount, theoryCount, types, difficulty, instructions, poolSize, avoid = [] }) {
   const typeList = Array.isArray(types) && types.length ? types : ['objective', 'theory'];
+  const hasObjective = typeList.includes('objective');
   const hasTheory = typeList.includes('theory');
 
   // Explicit per-type counts win (the admin can choose them); otherwise fall
   // back to the legacy even split of `count` across the selected types.
-  let objN = objectiveCount != null
-    ? Math.max(1, Math.round(Number(objectiveCount) || 0))
-    : Math.max(1, Math.round(count / typeList.length));
-  let theoN = theoryCount != null
-    ? Math.max(0, Math.round(Number(theoryCount) || 0))
-    : hasTheory
-      ? Math.max(0, count - objN)
-      : 0;
-  if (objN === 0 && theoN > 0) { objN = 1; theoN = Math.max(0, theoN - 1); }
+  //
+  // A type the admin did NOT select stays at zero. `Math.max(1, ...)` used to
+  // force one objective question into a theory-only paper, and because the
+  // caller sliced the result flat back down to the requested total, that stray
+  // objective displaced a real one: "5 theory questions" came back as 1
+  // objective + 4 theory.
+  let objN = !hasObjective
+    ? 0
+    : objectiveCount != null
+      ? Math.max(0, Math.round(Number(objectiveCount) || 0))
+      : Math.max(1, Math.round(count / typeList.length));
+  let theoN = !hasTheory
+    ? 0
+    : theoryCount != null
+      ? Math.max(0, Math.round(Number(theoryCount) || 0))
+      : Math.max(0, count - objN);
+  // Never build an empty paper: a legacy count-only call still has to produce
+  // something even when no type resolved.
+  if (objN + theoN === 0) objN = 1;
   const total = objN + theoN;
 
   const target = Math.min(Math.max(parseInt(poolSize) || total, total), 150);
@@ -1039,6 +1050,16 @@ async function generateQuestions({ subject, topics, count, objectiveCount, theor
   // When a type is not requested (count=0), its per-batch count must be 0.
   // Math.max(1, ...) would force at least 1 question of the wrong type.
   const perBatchObjective = objN > 0 ? Math.max(1, Math.round(objN * ratio)) : 0;
+
+  // Per-type bookkeeping for the whole run: the paper is exactly `objN`
+  // objective and `theoN` theory questions, never "about total".
+  const countOf = (arr, type) =>
+    arr.reduce((n, q) => n + ((q.type === 'theory' ? 'theory' : 'objective') === type ? 1 : 0), 0);
+  const shortfall = (active, rest) => ({
+    obj: Math.max(0, objN - countOf(active, 'objective')),
+    theo: Math.max(0, theoN - countOf(active, 'theory')),
+    pool: Math.max(0, target - total - rest.length),
+  });
 
   // ── Build the avoid list from current exam + global history ──────────
   // Merge caller-provided `avoid` (existing questions in this exam) with
@@ -1188,18 +1209,18 @@ ${avoidBlock}`);
     return parts.join('\n\n');
   };
 
-  const user = (batchTotal) => {
+  const user = (pObj, pTheo) => {
     const lines = [
       `Subject: ${subject || 'General'}`,
       topics ? `Topics: ${topics}` : 'Topics: general',
       instructions ? `Additional instructions: ${instructions}` : '',
     ];
-    if (perBatchObjective > 0 && perBatchTheory > 0) {
-      lines.push(`Generate EXACTLY ${perBatchObjective} objective questions and EXACTLY ${perBatchTheory} theory questions. Return them all in one JSON array.`);
-    } else if (perBatchObjective > 0) {
-      lines.push(`Generate EXACTLY ${perBatchObjective} objective (multiple choice) questions. DO NOT generate any theory questions. Return them in one JSON array.`);
+    if (pObj > 0 && pTheo > 0) {
+      lines.push(`Generate EXACTLY ${pObj} objective questions and EXACTLY ${pTheo} theory questions. Return them all in one JSON array.`);
+    } else if (pObj > 0) {
+      lines.push(`Generate EXACTLY ${pObj} objective (multiple choice) questions. DO NOT generate any theory questions. Return them in one JSON array.`);
     } else {
-      lines.push(`Generate EXACTLY ${perBatchTheory} theory (open-ended) questions. DO NOT generate any objective questions. Return them in one JSON array.`);
+      lines.push(`Generate EXACTLY ${pTheo} theory (open-ended) questions. DO NOT generate any objective questions. Return them in one JSON array.`);
     }
     return lines.filter(Boolean).join('\n');
   };
@@ -1213,12 +1234,49 @@ ${avoidBlock}`);
   // If the first pass produces too few unique questions (because many hit
   // the avoid list), retry with a fresh spin and stricter dedup guidance.
   const MAX_RETRIES = 2;
+  const TOP_UP_ROUNDS = 2;
   let finalActive = [];
   let finalRest = [];
 
+  // Dedupe a raw batch against the questions already used, then fill the paper
+  // PER TYPE.
+  //
+  // The old fill was a flat `slice(0, needed)`, which took whatever came back
+  // in whatever order: a provider asked for 40 objective + 5 theory that
+  // answered 43 + 2 produced a 43/2 paper. It had the right total and every
+  // per-type count wrong - "nothing less, nothing more" only holds per type,
+  // since that is how the admin asks for it. A type the paper already has
+  // enough of now overflows into the pool instead of displacing the type that
+  // is still missing.
+  const absorb = (rawBatch, label) => {
+    const combinedAvoid = [...allAvoid, ...finalActive.map((q) => q.text), ...finalRest.map((q) => q.text)];
+    const uniqueBatch = deduplicateAgainstHistory(rawBatch, combinedAvoid, 0.65);
+    console.log(`[generate] ${label}: ${uniqueBatch.length} survived history dedup`);
+
+    const bucket = { objective: [], theory: [] };
+    for (const q of uniqueBatch) bucket[q.type === 'theory' ? 'theory' : 'objective'].push(q);
+    const roomObj = Math.max(0, objN - countOf(finalActive, 'objective'));
+    const roomTheo = Math.max(0, theoN - countOf(finalActive, 'theory'));
+    finalActive.push(...bucket.objective.splice(0, roomObj), ...bucket.theory.splice(0, roomTheo));
+
+    const leftovers = bucket.objective.concat(bucket.theory);
+    const poolRoom = Math.max(0, target - total - finalRest.length);
+    finalRest.push(...leftovers.slice(0, poolRoom));
+
+    // Filter rest against active to avoid paraphrases in pool
+    const filteredRest = [];
+    for (const q of finalRest) {
+      const dupActive = finalActive.some((a) => textSimilarity(a.text, q.text) > 0.8);
+      const dupRest = filteredRest.some((p) => textSimilarity(p.text, q.text) > 0.8);
+      if (!dupActive && !dupRest) filteredRest.push(q);
+    }
+    finalRest = filteredRest;
+  };
+
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     if (attempt > 0) {
-      console.log(`[generate] retry attempt ${attempt}: need ${total - finalActive.length} more unique questions`);
+      const left = shortfall(finalActive, finalRest);
+      console.log(`[generate] retry attempt ${attempt}: need ${left.obj} objective + ${left.theo} theory more unique questions`);
     }
 
     // Re-roll spin on retry so the AI gets a different creative angle
@@ -1231,7 +1289,7 @@ ${avoidBlock}`);
       chatJSON(
         [
           { role: 'system', content: system(perBatchObjective, perBatchTheory, retryVariety).replace(spin, currentSpin) },
-          { role: 'user', content: user(batchSize) },
+          { role: 'user', content: user(perBatchObjective, perBatchTheory) },
         ],
         { temperature: 0.95, maxRetries: 2, maxTokens: 16384 }
       )
@@ -1275,32 +1333,54 @@ ${avoidBlock}`);
     }
     console.log(`[generate] attempt ${attempt}: collected ${batchAll.length} raw unique questions`);
 
-    // Deduplicate against full history + already-accepted questions
-    const combinedAvoid = [...allAvoid, ...finalActive.map((q) => q.text), ...finalRest.map((q) => q.text)];
-    const uniqueBatch = deduplicateAgainstHistory(batchAll, combinedAvoid, 0.65);
-    console.log(`[generate] attempt ${attempt}: ${uniqueBatch.length} survived history dedup`);
+    absorb(batchAll, `attempt ${attempt}`);
 
-    // Split into active (main set) and rest (pool extras)
-    const needed = total - finalActive.length;
-    finalActive.push(...uniqueBatch.slice(0, needed));
-    finalRest.push(...uniqueBatch.slice(needed));
-
-    // Filter rest against active to avoid paraphrases in pool
-    const filteredRest = [];
-    for (const q of finalRest) {
-      const dupActive = finalActive.some((a) => textSimilarity(a.text, q.text) > 0.8);
-      const dupRest = filteredRest.some((p) => textSimilarity(p.text, q.text) > 0.8);
-      if (!dupActive && !dupRest) filteredRest.push(q);
-    }
-    finalRest = filteredRest;
-
-    // If we have enough, stop retrying
-    if (finalActive.length >= total) break;
+    // Stop once the paper is exactly right and the pool is topped up. Because
+    // absorb() caps each type at its own quota, length >= total is only
+    // reachable when BOTH quotas are met — a lopsided batch can no longer
+    // satisfy it.
+    const left = shortfall(finalActive, finalRest);
+    if (left.obj + left.theo + left.pool === 0) break;
   }
 
-  // If still short after retries, log what we have (partial is better than nothing)
-  if (finalActive.length < total) {
-    console.warn(`[generate] WARNING: only ${finalActive.length}/${total} unique questions after ${MAX_RETRIES + 1} attempts`);
+  // ── Top-up rounds ────────────────────────────────────────────────────
+  // The batch plan above is fixed for the whole pass, so re-running it asks
+  // for ten more of whatever the first pass over-delivered and never for the
+  // type that came up short. These rounds ask for the exact shortfall alone —
+  // a handful of questions, one cheap batch — which is what turns "about 40"
+  // into exactly 40.
+  for (let round = 1; round <= TOP_UP_ROUNDS; round++) {
+    const missing = shortfall(finalActive, finalRest);
+    if (missing.obj + missing.theo <= 0) break;
+    console.log(`[generate] top-up ${round}: still missing ${missing.obj} objective + ${missing.theo} theory`);
+    const topUpVariety = variety
+      + '\n- IMPORTANT: this is a top-up round for a paper that is almost complete. Produce ONLY the questions asked for, with brand new contexts, names, numbers and scenarios.';
+    try {
+      const answer = await chatJSON(
+        [
+          { role: 'system', content: system(missing.obj, missing.theo, topUpVariety) },
+          { role: 'user', content: user(missing.obj, missing.theo) },
+        ],
+        { temperature: 0.95, maxRetries: 2, maxTokens: 16384 }
+      );
+      absorb(Array.isArray(answer) ? answer : (answer && answer.questions) || [], `top-up ${round}`);
+    } catch (err) {
+      console.error(`[generate] top-up ${round} failed:`, err.message);
+    }
+  }
+
+  // ── Exactness guarantee ──────────────────────────────────────────────
+  // The dashboard promises exactly N objective and exactly M theory questions.
+  // Silently returning 43/2 for a 40/5 paper rewrites that promise behind the
+  // admin's back, so fail loudly instead: the generate route turns this into a
+  // 502 that names the shortfall, and nothing gets inserted.
+  const stillShort = shortfall(finalActive, finalRest);
+  if (stillShort.obj + stillShort.theo > 0) {
+    throw new Error(
+      `the AI returned ${countOf(finalActive, 'objective')} of ${objN} objective and `
+      + `${countOf(finalActive, 'theory')} of ${theoN} theory questions after ${MAX_RETRIES + 1} passes `
+      + `and ${TOP_UP_ROUNDS} top-up rounds. Nothing was saved — try generating again.`
+    );
   }
 
   // ── Sort and return ─────────────────────────────────────────────────

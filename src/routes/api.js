@@ -856,17 +856,23 @@ router.post('/exams/:id/generate', asyncWrap(async (req, res) => {
   const hasObjective = typeList.includes('objective');
   const hasTheory = typeList.includes('theory');
 
-  // Respect the selected types: if a type is not selected, its count must be 0
-  const objN = hasObjective
-    ? Math.min(Math.max(parseInt(objectiveCount) || 0, 0), 50)
-    : 0;
-  const theoN = hasTheory
-    ? Math.min(Math.max(parseInt(theoryCount) || 0, 0), 50)
-    : 0;
+  // Respect the selected types: if a type is not selected, its count must be 0.
+  let objN = hasObjective ? Math.min(Math.max(parseInt(objectiveCount) || 0, 0), 50) : 0;
+  let theoN = hasTheory ? Math.min(Math.max(parseInt(theoryCount) || 0, 0), 50) : 0;
+  // A caller that sends only `count` (the older shape) still gets the legacy
+  // split across the selected types rather than an empty request.
+  if (objN === 0 && theoN === 0) {
+    const legacy = Math.min(Math.max(parseInt(count) || 0, 0), 150);
+    if (legacy > 0) {
+      if (hasObjective) objN = hasTheory ? Math.max(1, Math.round(legacy / typeList.length)) : legacy;
+      if (hasTheory) theoN = legacy - objN;
+    }
+  }
+  if (objN === 0 && theoN === 0) {
+    return res.status(400).json({ error: 'Choose how many questions to generate — at least one objective or theory question.' });
+  }
   const totalFromTypes = (objN || 0) + (theoN || 0);
-  const n = totalFromTypes > 0
-    ? Math.min(Math.max(totalFromTypes, 1), 150)
-    : Math.min(Math.max(parseInt(count) || 10, 1), 50);
+  const n = Math.min(Math.max(totalFromTypes, 1), 150);
   const multiplier = pool ? Math.min(Math.max(parseInt(poolMultiplier) || 2, 2), 7) : 1;
   console.log(`[generate] exam=${exam.id} objN=${objN} theoN=${theoN} n=${n} pool=${pool} multiplier=${multiplier}`);
   const existing = db
@@ -902,8 +908,32 @@ router.post('/exams/:id/generate', asyncWrap(async (req, res) => {
     if (a.type !== b.type) return a.type === 'objective' ? -1 : 1;
     return 0;
   });
-  const active = sorted.slice(0, n);
-  const variants = pool ? sorted.slice(n) : [];
+  const active = [];
+  const variants = [];
+  // Slice PER TYPE, not flat. A flat `sorted.slice(0, n)` handed the paper the
+  // first n of whatever came back, so a lopsided response got the wrong number
+  // of objective AND theory questions while the total still looked right — and
+  // it silently skipped theory questions when the objective count was over. The
+  // quota is objN/theoN, which are already 0 for an unselected type, so this
+  // also guarantees a theory-only paper never grows a stray objective.
+  const wants = { objective: objN, theory: theoN };
+  const bucket = { objective: [], theory: [] };
+  for (const g of sorted) bucket[g.type === 'theory' ? 'theory' : 'objective'].push(g);
+  for (const type of ['objective', 'theory']) {
+    active.push(...bucket[type].splice(0, wants[type]));
+    variants.push(...(pool ? bucket[type] : []));
+  }
+
+  // Nothing LESS either: the promise is an exact count per type, so a shortfall
+  // is an error, not a shorter paper. Nothing has been inserted at this point,
+  // so the admin simply retries.
+  const madeObj = active.filter((q) => q.type === 'objective').length;
+  const madeTheo = active.length - madeObj;
+  if (madeObj !== objN || madeTheo !== theoN) {
+    return res.status(502).json({
+      error: `The AI produced ${madeObj} of ${objN} objective and ${madeTheo} of ${theoN} theory questions — nothing was saved. Try generating again.`,
+    });
+  }
 
   let nextOrder = (db.prepare('SELECT MAX(q_order) m FROM questions WHERE exam_id = ?').get(exam.id).m || 0) + 1;
   const insert = db.prepare(
