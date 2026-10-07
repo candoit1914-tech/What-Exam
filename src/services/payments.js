@@ -163,6 +163,9 @@ async function checkoutLink(exam, student) {
   const existing = pendingPayment(exam.id, student.id);
   if (existing && existing.authorization_url) return existing.authorization_url;
   const row = await createCheckout(exam, student);
+  if (!row || !row.authorization_url) {
+    throw new Error('Paystack did not return a checkout URL. Please try again.');
+  }
   return row.authorization_url;
 }
 
@@ -182,7 +185,21 @@ function linkMessage(exam, link) {
  */
 async function deliverLink(student, exam) {
   const link = await checkoutLink(exam, student);
-  await wa.sendText(student.phone, linkMessage(exam, link));
+  if (config.whatsapp.paymentTemplateName) {
+    // Free-form messages are rejected when an invite recipient has not opened
+    // a WhatsApp service window. This approved template carries the URL as a
+    // body variable, making the checkout usable for cold recipients too.
+    await wa.sendTemplate(
+      student.phone,
+      config.whatsapp.paymentTemplateName,
+      config.whatsapp.templateLanguage,
+      [exam.title, priceLabel(exam), link].map((text) => ({ type: 'text', text: String(text) }))
+    );
+  } else {
+    // Preserve the existing in-window behavior for installations that have not
+    // yet created the optional paid-payment template.
+    await wa.sendText(student.phone, linkMessage(exam, link));
+  }
   return link;
 }
 
@@ -230,11 +247,11 @@ function applyCharge({ reference, amount, currency, channel, paidAt, status = 'p
   if (!payment) return { found: false, first: false };
 
   const wanted = config.paystack.currency;
-  if (currency && String(currency).toUpperCase() !== String(wanted).toUpperCase()) {
+  if (!currency || String(currency).toUpperCase() !== String(wanted).toUpperCase()) {
     console.warn(`[pay] ${reference} paid in ${currency}, expected ${wanted} — not unlocking`);
     return { found: true, first: false, mismatched: true };
   }
-  if (Number(amount) > 0 && Number(amount) !== Number(payment.amount)) {
+  if (!Number.isFinite(Number(amount)) || Number(amount) !== Number(payment.amount)) {
     console.warn(`[pay] ${reference} paid ${amount}, expected ${payment.amount} — not unlocking`);
     return { found: true, first: false, mismatched: true };
   }

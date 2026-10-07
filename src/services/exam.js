@@ -1163,6 +1163,72 @@ async function handleInbound(phone, body, meta = {}) {
   return { started: false, ok: true, reason: 'answered' };
 }
 
+/**
+ * The first outbound message after a paid checkout may be outside WhatsApp's
+ * 24-hour service window. An approved utility template opens the paper and
+ * carries Q1 in that same message; the student's reply then opens the window
+ * for the regular question flow.
+ */
+async function sendPaidStartTemplate(session, student, exam, firstQ) {
+  const template = config.whatsapp.paidStartTemplateName;
+  if (!template) return false;
+
+  let questionText;
+  if (selection.needsChoice(session, firstQ)) {
+    selection.beginChoice(session.id, firstQ.section_key);
+    // Session space, not template space: sectionPlan reads the admin's
+    // questions, and a drawn attempt can hold a different set. The student
+    // must only ever be offered what they were actually drawn.
+    const plan = selection.sessionPlan(session.id).find((item) => item.section_key === firstQ.section_key);
+    const questions = (plan?.optional || []).map((q, i) => `${i + 1}. ${q.text}`).join('\n');
+    questionText = `Choose ${plan?.quota || 1} question(s) from this section:\n${questions}\nReply with the number(s), then CONFIRM.`;
+  } else {
+    const sequence = sessionQuestionSequence(session);
+    const index = sequence.findIndex((q) => q.id === firstQ.id);
+    const bubbles = buildQuestionBubbles(exam, firstQ, sequence, index, session);
+    let followUps = [];
+    if (firstQ.type === 'theory' && firstQ.follow_ups) {
+      try {
+        const parsed = JSON.parse(firstQ.follow_ups);
+        if (Array.isArray(parsed)) {
+          followUps = parsed.map((fu, i) => `(${String.fromCharCode(97 + i)}) ${fu.text}`);
+        }
+      } catch { /* malformed optional follow-ups must not block a paid start */ }
+    }
+    const details = [
+      ...bubbles,
+      ...(firstQ.type === 'objective'
+        ? [safeParseOptions(firstQ.options).map((o) => `${o.key}. ${o.text}`).join('\n')]
+        : []),
+      ...followUps,
+      `Time allowed: ${exam.duration_minutes} minutes.`,
+    ].filter(Boolean);
+    questionText = details.join('\n\n');
+  }
+
+  // The configured template body should say payment is confirmed, the exam
+  // starts now, and the student should answer the question below. Its three
+  // body variables are exam title, first-question payload, and duration.
+  await wa.sendTemplate(student.phone, template, config.whatsapp.templateLanguage, [
+    { type: 'text', text: String(exam.title) },
+    { type: 'text', text: questionText },
+    { type: 'text', text: String(exam.duration_minutes) },
+  ]);
+
+  if (!selection.needsChoice(session, firstQ)) {
+    const entry = outbox.enqueue({
+      sessionId: session.id,
+      questionId: firstQ.id,
+      qOrder: firstQ.q_order,
+      kind: 'question',
+      recipient: student.phone,
+    });
+    commitAdvance(session.id, firstQ.q_order, entry.id);
+  }
+  recordAcceptance(session);
+  return true;
+}
+
 async function maybeStartSession(student, preferredExamId = null) {
   const candidates = db
     .prepare(
@@ -1232,18 +1298,30 @@ async function maybeStartSession(student, preferredExamId = null) {
         `UPDATE sessions SET started_at = ?, last_active_at = datetime('now') WHERE id = ?`
       ).run(now, existing.id);
       existing = { ...existing, started_at: now };
-      await wa.sendText(student.phone, formatExamIntro(exam, questionCount, { started: true }));
-      if (existing.selection_state === 'selecting') {
-        await selection.sendSelector(student.phone, existing.id, existing.selection_section);
-        return { ok: true, reason: 'selecting' };
-      }
       const firstQ = getSessionQuestion(existing.id, existing.current_q_order)
         || firstUnansweredSelected(existing);
       if (!firstQ) {
         await finalize(existing, student, 'completed');
         return { ok: true, reason: 'completed' };
       }
-      await advanceAndSend(existing, student, firstQ);
+      try {
+        const templated = payments.isPaidExam(exam)
+          && await sendPaidStartTemplate(existing, student, exam, firstQ);
+        if (!templated) {
+          await wa.sendText(student.phone, formatExamIntro(exam, questionCount, { started: true }));
+          if (existing.selection_state === 'selecting') {
+            await selection.sendSelector(student.phone, existing.id, existing.selection_section);
+            return { ok: true, reason: 'selecting' };
+          }
+          await advanceAndSend(existing, student, firstQ);
+        }
+      } catch (err) {
+        // A failed push must remain eligible for the payment sweep to retry.
+        // Without resetting the clock, the sweep mistakes this for a delivered
+        // exam and permanently stops retrying after a WhatsApp 131047 rejection.
+        db.prepare('UPDATE sessions SET started_at=NULL WHERE id=?').run(existing.id);
+        throw err;
+      }
       return { ok: true, reason: 'started' };
     }
 

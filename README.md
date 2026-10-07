@@ -167,6 +167,18 @@ actually prices a paper.
 The exam's **Payments** tab lists every checkout: pending, paid, channel,
 reference and the total collected.
 
+For recipients who have not messaged the WhatsApp number in the last 24 hours,
+Meta only allows approved templates. To deliver a paid link before the student
+replies, configure `WHATSAPP_PAYMENT_TEMPLATE_NAME` with an approved Utility
+template whose body variables are `{{1}}` exam title, `{{2}}` price, and `{{3}}`
+the full Paystack checkout URL. To send the first question immediately after
+the payment webhook, also configure `WHATSAPP_PAID_START_TEMPLATE_NAME` with an
+approved Utility template whose body variables are `{{1}}` exam title, `{{2}}`
+the first question and its options, and `{{3}}` duration in minutes. Both use
+`WHATSAPP_TEMPLATE_LANGUAGE`. Without these templates the app still uses
+ordinary WhatsApp messages, which work only while the 24-hour service window is
+open. Meta must approve these templates before they can be sent.
+
 ## Directories
 
 ```

@@ -64,4 +64,15 @@ services:
       #                             on every deploy)
       # WHATSAPP_APP_SECRET        (Meta app secret - webhook signatures are
       #                             rejected without it)
+      # WHATSAPP_VERIFY_TOKEN      (must match the token entered in Meta)
+      # WHATSAPP_ACCESS_TOKEN      (Meta Cloud API token)
+      # WHATSAPP_PHONE_NUMBER_ID   (Meta Cloud API sending number)
       # WHATSAPP_TEMPLATE_NAME     (approved template for exam invites)
+      # WHATSAPP_PAYMENT_TEMPLATE_NAME (approved template with body vars:
+      #                             exam title, price, full Paystack URL)
+      # WHATSAPP_PAID_START_TEMPLATE_NAME (approved template with body vars:
+      #                             exam title, first question/options, duration)
+      # PAYSTACK_SECRET_KEY        (Paystack test/live key; required to create
+      #                             checkout links and verify signed webhooks)
+      # APP_URL                    (public HTTPS Render URL for report links and
+      #                             the webhook shown to operators)

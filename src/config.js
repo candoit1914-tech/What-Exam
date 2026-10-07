@@ -71,6 +71,12 @@ const config = {
       .split(',')
       .map((s) => s.trim())
       .filter(Boolean),
+    // Paid checkout links and post-payment exam starts must also work outside
+    // WhatsApp's 24-hour service window. These must be separately approved
+    // templates whose body variables match the parameter order in payments.js
+    // and exam.js respectively.
+    paymentTemplateName: (process.env.WHATSAPP_PAYMENT_TEMPLATE_NAME || '').trim(),
+    paidStartTemplateName: (process.env.WHATSAPP_PAID_START_TEMPLATE_NAME || '').trim(),
     // Gap between consecutive outbound messages to the SAME number. A
     // question arrives as several bubbles; the gap keeps a burst under
     // Meta's per-pair message window (error 131056, which drains in

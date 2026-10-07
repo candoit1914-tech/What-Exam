@@ -27,12 +27,14 @@ const wa = require('../src/services/whatsapp');
 
 const SECRET = 'sk_test_paid_exams';
 const realSendText = wa.sendText;
+const realSendTemplate = wa.sendTemplate;
 const realFetch = global.fetch;
 
 let server;
 let base;
 let token;
 let sent = [];
+let sentTemplates = [];
 let seq = 0;
 
 // ── helpers ───────────────────────────────────────────────────────────
@@ -40,6 +42,7 @@ let seq = 0;
 /** Capture everything the bot would say, so a test can read the conversation. */
 function capture() {
   sent = [];
+  sentTemplates = [];
   wa.sendText = async (phone, text) => {
     sent.push(text);
     return { messages: [{ id: 'mock' }] };
@@ -191,6 +194,7 @@ before(async () => {
 
 after(() => {
   wa.sendText = realSendText;
+  wa.sendTemplate = realSendTemplate;
   global.fetch = realFetch;
   if (server) server.close();
 });
@@ -290,6 +294,30 @@ test('a paid exam sends the invite and a checkout link behind it', async () => {
   assert.equal(payment.currency, 'GHS');
 });
 
+test('a paid checkout can be sent with an approved WhatsApp template', async () => {
+  capture();
+  paystackStub();
+  const previous = config.whatsapp.paymentTemplateName;
+  config.whatsapp.paymentTemplateName = 'paid_checkout_test';
+  wa.sendTemplate = async (phone, name, language, params) => {
+    sentTemplates.push({ phone, name, language, params });
+    return { messages: [{ id: 'mock-template' }] };
+  };
+  try {
+    const eid = makeExam({ pricing: 'paid', amount: 1000 });
+    const student = addStudent(eid);
+    await exam.sendExamToRecipients(eid);
+    const paymentTemplate = sentTemplates.find((item) => item.name === 'paid_checkout_test');
+    assert.ok(paymentTemplate, 'checkout is delivered by the approved payment template');
+    assert.deepEqual(paymentTemplate.params.map((item) => item.text).slice(0, 2), ['Paywall Paper', 'GHS 10']);
+    assert.match(paymentTemplate.params[2].text, /^https:\/\/checkout\.paystack\.com\//);
+    assert.equal(paymentTemplate.phone, student.phone);
+  } finally {
+    config.whatsapp.paymentTemplateName = previous;
+    wa.sendTemplate = realSendTemplate;
+  }
+});
+
 test('a paid exam with no secret key is refused instead of sending a dead link', async () => {
   capture();
   config.paystack.secretKey = '';
@@ -379,6 +407,42 @@ test('a signed charge webhook marks the payment and opens the paper by itself', 
   const outcome = await exam.handleInbound(student.phone, 'A');
   assert.equal(outcome.reason, 'answered', `got ${outcome.reason}`);
   assert.notEqual(outcome.reason, 'payment_required');
+});
+
+test('a paid exam can deliver its first question in an approved start template', async () => {
+  capture();
+  paystackStub();
+  const previous = config.whatsapp.paidStartTemplateName;
+  config.whatsapp.paidStartTemplateName = 'paid_exam_start_test';
+  wa.sendTemplate = async (phone, name, language, params) => {
+    sentTemplates.push({ phone, name, language, params });
+    return { messages: [{ id: 'mock-template' }] };
+  };
+  try {
+    const eid = makeExam({ pricing: 'paid', amount: 1000 });
+    const student = addStudent(eid);
+    await exam.sendExamToRecipients(eid);
+    const [payment] = paymentsFor(eid);
+    const raw = JSON.stringify({
+      event: 'charge.success',
+      data: { reference: payment.reference, amount: 1000, currency: 'GHS', channel: 'mobile_money' },
+    });
+    assert.equal((await postWebhook(raw, sign(raw))).status, 200);
+    await waitFor(
+      () => sentTemplates.some((item) => item.name === 'paid_exam_start_test'),
+      'the approved paid exam start template'
+    );
+    const start = sentTemplates.find((item) => item.name === 'paid_exam_start_test');
+    assert.equal(start.phone, student.phone);
+    assert.equal(start.params[0].text, 'Paywall Paper');
+    assert.match(start.params[1].text, /QUESTION 1/);
+    assert.match(start.params[1].text, /A\. Yes/);
+    assert.equal(start.params[2].text, '30');
+    assert.ok(sessionFor(eid, student.id).started_at);
+  } finally {
+    config.whatsapp.paidStartTemplateName = previous;
+    wa.sendTemplate = realSendTemplate;
+  }
 });
 
 test('payment arms the clock and the first answer is graded at once', async () => {
@@ -487,6 +551,23 @@ test('a webhook that pays the wrong amount does not unlock', async () => {
   const res = await postWebhook(raw, sign(raw));
   assert.equal(res.status, 200, 'Paystack is still acknowledged — we just do not act on it');
   assert.equal(db.prepare('SELECT status FROM payments WHERE reference = ?').get('ref-short').status, 'pending');
+  assert.equal(sent.length, 0);
+});
+
+test('a charge missing its amount or currency is not accepted as paid', async () => {
+  capture();
+  const eid = makeExam({ pricing: 'paid', amount: 1000 });
+  const student = addStudent(eid);
+  db.prepare(
+    `INSERT INTO payments (exam_id, student_id, reference, amount, currency, status, authorization_url)
+     VALUES (?,?,?,?, 'GHS', 'pending', 'https://checkout.paystack.com/x')`
+  ).run(eid, student.id, 'ref-incomplete', 1000);
+
+  const missingAmount = { reference: 'ref-incomplete', currency: 'GHS' };
+  const missingCurrency = { reference: 'ref-incomplete', amount: 1000 };
+  assert.equal(payments.applyCharge(missingAmount).mismatched, true);
+  assert.equal(payments.applyCharge(missingCurrency).mismatched, true);
+  assert.equal(db.prepare('SELECT status FROM payments WHERE reference=?').get('ref-incomplete').status, 'pending');
   assert.equal(sent.length, 0);
 });
 
