@@ -276,6 +276,12 @@ if (require.main === module) {
     // automatically instead of only on server restart.
     require('./services/exam').startStaleSessionCleanup();
 
+    // Settle payments the Paystack webhook never reached, and open the
+    // paper for anyone who paid but still has no attempt. Without this
+    // a lost webhook meant a paid student sat waiting forever — the
+    // sweep makes the unlock independent of the webhook arriving.
+    require('./services/payments').startPaymentSweep();
+
     // Loud, unmissable warning when storage is still on the container
     // filesystem. Render discards that on every deploy and restart, which
     // silently wipes the database - students, sessions and graded answers - and

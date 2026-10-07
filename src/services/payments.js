@@ -11,11 +11,14 @@ const wa = require('./whatsapp');
  * call site asks first, and a free paper never creates a payment row, never
  * calls the network and never sends an extra message.
  *
- * Two independent ways to learn the money arrived:
+ * Three independent ways to learn the money arrived:
  *   - the webhook (`/webhook/paystack`), which is immediate but needs a public
  *     APP_URL;
  *   - `ensurePaid`, which verifies a still-pending reference against the API on
- *     the student's next reply. A local box with no tunnel still unlocks.
+ *     the student's next reply. A local box with no tunnel still unlocks;
+ *   - the background sweep (`startPaymentSweep`), which periodically re-verifies
+ *     pending checkouts and re-opens paid papers with no attempt, so a webhook
+ *     that never left Paystack cannot strand a paying student.
  */
 
 const PROVIDER = 'paystack';
@@ -312,27 +315,204 @@ function confirmationMessage(exam) {
 /**
  * The money landed while the student was NOT messaging us: tell them and open
  * the paper. This is the webhook's path; ensurePaid covers the reply path.
+ *
+ * The two steps are deliberately independent. They used to share one try
+ * block, so when the confirmation push failed — a closed 24h window, a rate
+ * limit, a timeout — the paper was never opened and the student was left
+ * holding only a receipt. A paper someone paid for must not depend on a
+ * chat message succeeding.
  */
 async function unlock(payment, exam, student) {
   const examRow = exam || db.prepare('SELECT * FROM exams WHERE id = ?').get(payment.exam_id);
   const studentRow = student || db.prepare('SELECT * FROM students WHERE id = ?').get(payment.student_id);
-  if (!examRow || !studentRow) return;
+  if (!examRow || !studentRow) return false;
+
   try {
     await wa.sendText(studentRow.phone, confirmationMessage(examRow));
-    // Lazy require: exam.js loads this module at require time, so requiring it
-    // back at module scope would hand us a half-initialised exports object.
-    const examService = require('./exam');
+  } catch (err) {
+    console.warn(`[pay] payment confirmation to ${studentRow.phone} failed: ${err.message}`);
+  }
+
+  // Lazy require: exam.js loads this module at require time, so requiring it
+  // back at module scope would hand us a half-initialised exports object.
+  const examService = require('./exam');
+  try {
     await examService.maybeStartSession(studentRow);
   } catch (err) {
-    // The push may fail because the 24h window closed while they were paying —
-    // harmless: hasPaid is already true, so their next reply starts the paper.
-    console.error(`[pay] unlock for ${studentRow.phone} did not complete: ${err.message}`);
+    // hasPaid is already true, so the student's next reply opens the paper.
+    console.error(
+      `[pay] could not open ${examRow.title} for ${studentRow.phone}: ${err.message}. `
+      + 'Their next reply opens it; the background sweep retries the push.'
+    );
+    return false;
   }
+  // Answering — even with "no pending exams" or "already finished" —
+  // means the student was told something definitive, so the sweep has
+  // nothing left to do for this payment. Only a throw (a failed send,
+  // a redeploy mid-push) earns a retry.
+  return true;
 }
 
 /** Fire-and-forget for the webhook, which must answer Paystack quickly. */
 function unlockAsync(payment, exam, student) {
   unlock(payment, exam, student).catch((err) => console.error(`[pay] unlock failed: ${err.message}`));
+}
+
+// ── Background sweep ─────────────────────────────────────────────
+//
+// The webhook is the fast path, but it is a single point of failure:
+// the URL can be unregistered in the Paystack dashboard, a deploy can
+// land while an event is in flight, or the event can simply never
+// leave Paystack. A sweep of the payments table makes "the exam opens
+// automatically" independent of the webhook arriving at all — a paid
+// student waits at most one sweep interval, never a reply.
+
+/** Pending checkouts older than this are abandoned; verifying them is API spend. */
+const PENDING_MAX_AGE = '6 hours';
+/** How often one reference may be re-asked about, and how many times. */
+const PENDING_COOLDOWN_MS = 120_000;
+const PENDING_ATTEMPTS = 10;
+const SWEEP_BATCH = 20;
+/** A paid paper whose unlock push threw is re-pushed a few times. */
+const OPEN_ATTEMPTS = 3;
+const OPEN_MAX_AGE = '24 hours';
+/** Give the webhook's own unlock a head start before a sweep repeats it. */
+const OPEN_GRACE = '90 seconds';
+
+const pendingChecks = new Map(); // reference -> { at, attempts }
+const openRetries = new Map();   // reference -> attempts
+/** Session states with nothing left to deliver to the student. */
+const DELIVERED_EXCEPT = new Set(['completed', 'ended', 'expired', 'finalizing']);
+let sweeping = false;
+let sweepTimer = null;
+
+/**
+ * Verify every still-pending checkout and unlock anything that settled
+ * unnoticed. Never throws: a sweep that dies halfway must not take the
+ * next one down with it.
+ */
+async function verifyPendingPayments({ now = Date.now() } = {}) {
+  if (!configured() || sweeping) return { settled: 0, opened: 0 };
+  sweeping = true;
+  try {
+    const settled = await settlePendingPayments(now);
+    const opened = await openPaidPapers();
+    if (settled || opened) {
+      console.log(`[pay] sweep settled ${settled} and opened ${opened}`);
+    }
+    return { settled, opened };
+  } finally {
+    sweeping = false;
+  }
+}
+
+async function settlePendingPayments(now) {
+  const rows = db
+    .prepare(
+      `SELECT * FROM payments
+        WHERE status = 'pending' AND created_at >= datetime('now', ?)
+        ORDER BY id DESC LIMIT ?`
+    )
+    .all(`-${PENDING_MAX_AGE}`, SWEEP_BATCH);
+  let settled = 0;
+  for (const row of rows) {
+    const seen = pendingChecks.get(row.reference);
+    if (seen && (now - seen.at < PENDING_COOLDOWN_MS || seen.attempts >= PENDING_ATTEMPTS)) continue;
+    pendingChecks.set(row.reference, { at: now, attempts: (seen ? seen.attempts : 0) + 1 });
+
+    let charge;
+    try {
+      charge = await verifyReference(row.reference);
+    } catch (err) {
+      // "reference not found" is the normal answer for a checkout that
+      // was initialized but never paid; anything louder still must not
+      // stop the sweep.
+      console.warn(`[pay] sweep verify ${row.reference} failed: ${err.message}`);
+      continue;
+    }
+    if (!charge) continue; // still pending on Paystack's side
+    const outcome = applyCharge(charge);
+    if (outcome.first) {
+      console.log(`[pay] ${row.reference} settled by background verification — the webhook never arrived`);
+      settled++;
+      await unlock(outcome.payment, null, null);
+    }
+  }
+  return settled;
+}
+
+/**
+ * Open the paper for anyone who paid but still has no attempt. The
+ * webhook's unlock ran (or failed) at least OPEN_GRACE ago, so this
+ * only ever repeats work that did not stick — and only a few times,
+ * because nagging a student who deliberately has not started yet would
+ * be worse than silence.
+ */
+async function openPaidPapers() {
+  const rows = db
+    .prepare(
+      `SELECT p.*, s.phone, s.name AS student_name
+         FROM payments p JOIN students s ON s.id = p.student_id
+        WHERE p.status = 'paid'
+          AND datetime(p.paid_at) >= datetime('now', ?)
+          AND datetime(p.paid_at) <= datetime('now', ?)
+        ORDER BY p.id DESC LIMIT ?`
+    )
+    .all(`-${OPEN_MAX_AGE}`, `-${OPEN_GRACE}`, SWEEP_BATCH);
+  let opened = 0;
+  for (const row of rows) {
+    const attempts = openRetries.get(row.reference) || 0;
+    if (attempts >= OPEN_ATTEMPTS) continue;
+    // Has the paper already been delivered for this attempt? A
+    // session is created when the admin sends, with started_at NULL
+    // (the clock only starts when the student engages), so a NULL
+    // started_at on an in_progress session still needs its paper —
+    // maybeStartSession re-sends the intro and question 1 for it.
+    // Anything the student has engaged with, or that has already run
+    // its course, has nothing left to deliver.
+    const session = db
+      .prepare(
+        `SELECT status, started_at FROM sessions
+          WHERE exam_id = ? AND student_id = ?
+          ORDER BY id DESC LIMIT 1`
+      )
+      .get(row.exam_id, row.student_id);
+    if (
+      session
+      && (session.started_at || DELIVERED_EXCEPT.has(session.status))
+    ) {
+      openRetries.set(row.reference, OPEN_ATTEMPTS);
+      continue;
+    }
+    openRetries.set(row.reference, attempts + 1);
+    console.log(`[pay] opening ${row.reference} for ${row.phone} (push attempt ${attempts + 1})`);
+    if (await unlock(row, null, null)) {
+      opened++;
+      // Delivered: never re-push this payment.
+      openRetries.set(row.reference, OPEN_ATTEMPTS);
+    }
+  }
+  return opened;
+}
+
+/** Run the sweep on an interval. Safe to call more than once. */
+function startPaymentSweep(intervalMs = 60_000) {
+  if (sweepTimer) return;
+  sweepTimer = setInterval(() => {
+    verifyPendingPayments().catch((err) => {
+      console.error('[pay] payment sweep error:', err.message);
+    });
+  }, intervalMs);
+  // Don't keep the process alive just for the sweep.
+  if (sweepTimer.unref) sweepTimer.unref();
+  console.log(`[pay] payment sweep started (interval: ${intervalMs}ms)`);
+}
+
+function stopPaymentSweep() {
+  if (sweepTimer) {
+    clearInterval(sweepTimer);
+    sweepTimer = null;
+  }
 }
 
 module.exports = {
@@ -354,4 +534,7 @@ module.exports = {
   ensurePaid,
   unlock,
   unlockAsync,
+  verifyPendingPayments,
+  startPaymentSweep,
+  stopPaymentSweep,
 };

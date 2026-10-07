@@ -419,3 +419,94 @@ test('an unpaid student on a paid paper is blocked even when they skip the invit
   assert.ok(!sent.some((m) => m.includes('QUESTION 1')));
   assert.equal(sessionFor(eid, student.id), undefined, 'no session may be created for an unpaid student');
 });
+
+// ── The unlock itself ───────────────────────────────────────
+
+/** A payment row for a student who paid outside this test's sends. */
+function paidPayment(eid, sid, reference, { status = 'pending', paidAt = null } = {}) {
+  db.prepare(
+    `INSERT INTO payments
+       (exam_id, student_id, reference, amount, currency, status, authorization_url, paid_at)
+     VALUES (?,?,?,?,?,?,?,?)`
+  ).run(
+    eid, sid, reference, 1000, 'GHS', status,
+    `https://checkout.paystack.com/${reference}`,
+    paidAt
+  );
+  return db.prepare('SELECT * FROM payments WHERE reference = ?').get(reference);
+}
+
+/** sendText that fails on the first `failures` calls, then works. */
+function flakySendText(failures = 1) {
+  let left = failures;
+  wa.sendText = async (phone, text) => {
+    if (left-- > 0) throw new Error('24h window closed');
+    sent.push(text);
+    return { messages: [{ id: 'mock' }] };
+  };
+}
+
+test('a confirmation push that fails must not cost the student their paper', async () => {
+  capture();
+  const eid = makeExam({ pricing: 'paid', amount: 1000 });
+  const student = addStudent(eid);
+  const payment = paidPayment(eid, student.id, 'wx-confirm-drop');
+  payments.applyCharge({ reference: 'wx-confirm-drop', amount: 1000, currency: 'GHS' });
+
+  // WhatsApp rejects the very first push (closed window, rate limit,
+  // timeout — any of them used to abort the whole unlock).
+  flakySendText(1);
+  const opened = await payments.unlock(payment, null, null);
+
+  assert.equal(opened, true, 'the unlock reports success');
+  const session = sessionFor(eid, student.id);
+  assert.ok(session && session.started_at, 'the paper opened anyway');
+  assert.ok(sent.some((m) => m.includes('QUESTION 1')), 'and the first question went out');
+});
+
+// ── The background sweep ────────────────────────────────────
+
+test('the sweep settles a pending payment the webhook never reported', async () => {
+  capture();
+  paystackStub({ verifyStatus: 'success' });
+  const eid = makeExam({ pricing: 'paid', amount: 1000 });
+  const student = addStudent(eid);
+  paidPayment(eid, student.id, 'wx-sweep-settle');
+  assert.equal(payments.hasPaid(eid, student.id), false);
+
+  const out = await payments.verifyPendingPayments();
+
+  assert.ok(out.settled >= 1, `the pending payment was settled (settled ${out.settled})`);
+  assert.equal(payments.hasPaid(eid, student.id), true, 'the money is recorded');
+  const session = sessionFor(eid, student.id);
+  assert.ok(session && session.started_at, 'the paper opened with no webhook and no reply');
+  assert.ok(sent.some((m) => m.includes('Payment received')), 'the student is told');
+  assert.ok(sent.some((m) => m.includes('QUESTION 1')), 'and gets the paper');
+});
+
+test('the sweep re-opens the paper for a student whose unlock push failed', async () => {
+  capture();
+  // Paystack is unreachable here: this student already paid, the
+  // webhook landed, but the unlock could not open the paper.
+  const eid = makeExam({ pricing: 'paid', amount: 1000 });
+  const student = addStudent(eid);
+  const anHourAgo = new Date(Date.now() - 3600_000).toISOString();
+  paidPayment(eid, student.id, 'wx-sweep-reopen', { status: 'paid', paidAt: anHourAgo });
+  assert.equal(sessionFor(eid, student.id), undefined, 'no attempt exists yet');
+
+  const out = await payments.verifyPendingPayments();
+
+  assert.ok(out.opened >= 1, `the paid paper was pushed (opened ${out.opened})`);
+  assert.ok(sessionFor(eid, student.id).started_at, 'the paper opened');
+  assert.ok(sent.some((m) => m.includes('QUESTION 1')), 'and the questions went out');
+});
+
+test('the sweep is a no-op until a secret key is configured', async () => {
+  const saved = config.paystack.secretKey;
+  config.paystack.secretKey = '';
+  try {
+    assert.deepEqual(await payments.verifyPendingPayments(), { settled: 0, opened: 0 });
+  } finally {
+    config.paystack.secretKey = saved;
+  }
+});
