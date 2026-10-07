@@ -10,6 +10,7 @@ const pdf = require('../services/pdf');
 const pdfImport = require('../services/pdfImport');
 const examService = require('../services/exam');
 const studentsService = require('../services/students');
+const payments = require('../services/payments');
 const results = require('../services/results');
 const watermarkService = require('../services/watermark');
 const config = require('../config');
@@ -152,6 +153,10 @@ function examSummary(row) {
     pass_percentage: row.pass_percentage,
     status: row.status,
     generated_by: row.generated_by,
+    // What the admin chose when creating this paper. free is the default and
+    // behaves exactly as it always has.
+    pricing: row.pricing || 'free',
+    price_amount: row.price_amount || 0, // pesewas
     total_marks: questions.m,
     question_count: questions.c,
     sessions_total: sessions.total,
@@ -214,19 +219,44 @@ router.get('/exams', (req, res) => {
   res.json(rows.map(examSummary));
 });
 
+/**
+ * The admin's free/paid decision, read off a request body.
+ *
+ * `amount` arrives in GHS major units (what the dashboard input shows) and is
+ * stored in pesewas, because that is the integer Paystack charges and the
+ * integer `applyCharge` can compare without a rounding argument.
+ *
+ * Returns `{ fields }` (possibly empty, meaning "leave pricing alone") or
+ * `{ error }` for a paid exam with no usable amount.
+ */
+function parsePricing(body) {
+  if (!body || body.pricing === undefined || body.pricing === null || body.pricing === '') return { fields: {} };
+  if (body.pricing !== 'paid') return { fields: { pricing: 'free', price_amount: 0 } };
+  const amount = parseFloat(body.amount);
+  if (!Number.isFinite(amount) || amount <= 0) {
+    return { error: 'A paid exam needs an amount greater than 0 (in GHS).' };
+  }
+  if (amount > 100000000) return { error: 'That amount is too large to be real.' };
+  return { fields: { pricing: 'paid', price_amount: Math.round(amount * 100) } };
+}
+
 router.post('/exams', (req, res) => {
   const { title, subject, description, duration_minutes, pass_percentage } = req.body;
+  const pricing = parsePricing(req.body);
+  if (pricing.error) return res.status(400).json({ error: pricing.error });
   const info = db
     .prepare(
-      `INSERT INTO exams (title, subject, description, duration_minutes, pass_percentage, generated_by)
-       VALUES (?,?,?,?,?, 'manual')`
+      `INSERT INTO exams (title, subject, description, duration_minutes, pass_percentage, generated_by, pricing, price_amount)
+       VALUES (?,?,?,?,?, 'manual', ?, ?)`
     )
     .run(
       title || 'Untitled Exam',
       subject || '',
       description || '',
       parseInt(duration_minutes) || config.exam.defaultDurationMinutes,
-      parseFloat(pass_percentage) || config.exam.passPercentage
+      parseFloat(pass_percentage) || config.exam.passPercentage,
+      pricing.fields.pricing || 'free',
+      pricing.fields.price_amount || 0
     );
   res.json({ id: info.lastInsertRowid });
 });
@@ -262,7 +292,15 @@ router.get('/exams/:id', (req, res) => {
   res.json({
     exam: examSummary(exam), questions, recipients, results: resultsList,
     sections, selection: selection.sectionPlan(exam.id),
+    // Empty for a free exam, so the dashboard can branch on exam.pricing alone.
+    payments: payments.listFor(exam.id),
   });
+});
+
+router.get('/exams/:id/payments', (req, res) => {
+  const exam = db.prepare('SELECT * FROM exams WHERE id = ?').get(req.params.id);
+  if (!exam) return res.status(404).json({ error: 'Exam not found' });
+  res.json({ exam: examSummary(exam), payments: payments.listFor(exam.id) });
 });
 
 // ── Participant roster: screen, print ───────────────────────────────────────────
@@ -387,6 +425,12 @@ router.patch('/exams/:id', (req, res) => {
     fields.push('pass_percentage=?');
     vals.push(Number.isFinite(p) ? Math.min(Math.max(p, 0), 100) : config.exam.passPercentage);
   }
+  const pricing = parsePricing(b);
+  if (pricing.error) return res.status(400).json({ error: pricing.error });
+  for (const [sql, value] of Object.entries(pricing.fields)) {
+    fields.push(`${sql}=?`);
+    vals.push(value);
+  }
   if (!fields.length) return res.json({ ok: true });
   vals.push(exam.id);
   db.prepare(`UPDATE exams SET ${fields.join(', ')} WHERE id = ?`).run(...vals);
@@ -508,6 +552,14 @@ router.post('/exams/:id/send', asyncWrap(async (req, res) => {
   if (!exam) return res.status(404).json({ error: 'Exam not found' });
   if (exam.status !== 'live') {
     return res.status(400).json({ error: 'Publish the exam first. Only live exams can be sent to recipients.' });
+  }
+  // A paid paper must not go out with no gateway behind it: the invite would
+  // carry a dead link and every student would sit at a paywall with nothing to
+  // tap. Free exams never reach this check.
+  if (payments.isPaidExam(exam) && !payments.configured()) {
+    return res.status(400).json({
+      error: 'This exam is paid but PAYSTACK_SECRET_KEY is not set. Add the key to .env, or switch the exam back to free.',
+    });
   }
   const report = await examService.sendExamToRecipients(req.params.id);
   res.json(report);
