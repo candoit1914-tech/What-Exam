@@ -24,7 +24,13 @@ CREATE TABLE IF NOT EXISTS exams (
   created_at      TEXT NOT NULL DEFAULT (datetime('now')),
   published_at    TEXT,
   ended_at        TEXT,
-  max_attempts    INTEGER NOT NULL DEFAULT 0     -- attempts allowed per student; 0 = unlimited
+  max_attempts    INTEGER NOT NULL DEFAULT 0,    -- attempts allowed per student; 0 = unlimited
+  -- What the ADMIN decided this paper is: 'free' runs exactly as before, 'paid'
+  -- puts a Paystack paywall in front of it and students pay on WhatsApp before
+  -- the paper opens. price_amount is in pesewas (GHS x 100) so the value is an
+  -- integer the gateway can be trusted to compare with.
+  pricing         TEXT NOT NULL DEFAULT 'free',  -- free|paid
+  price_amount    INTEGER NOT NULL DEFAULT 0     -- pesewas; 0 when free
 );
 
 CREATE TABLE IF NOT EXISTS questions (
@@ -231,6 +237,29 @@ CREATE TABLE IF NOT EXISTS exam_sections (
   UNIQUE(exam_id, section_key)
 );
 CREATE INDEX IF NOT EXISTS idx_exam_sections_exam ON exam_sections(exam_id, position);
+
+-- One row per checkout offered to a student for one paper. 'pending' means the
+-- link went out and we have not been paid yet; 'paid' is what unlocks the paper.
+-- The partial unique index makes a second successful payment for the same
+-- student and exam impossible, so a replayed webhook can never double-record.
+CREATE TABLE IF NOT EXISTS payments (
+  id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  exam_id           INTEGER NOT NULL REFERENCES exams(id) ON DELETE CASCADE,
+  student_id        INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+  reference         TEXT NOT NULL UNIQUE,       -- Paystack transaction reference
+  amount            INTEGER NOT NULL DEFAULT 0, -- pesewas, as initialized
+  currency          TEXT NOT NULL DEFAULT 'GHS',
+  status            TEXT NOT NULL DEFAULT 'pending', -- pending|paid|failed
+  provider          TEXT NOT NULL DEFAULT 'paystack',
+  authorization_url TEXT NOT NULL DEFAULT '',   -- reused until the student pays
+  channel           TEXT NOT NULL DEFAULT '',   -- card|mobile_money|... after payment
+  paid_at           TEXT,
+  created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_paid ON payments(exam_id, student_id) WHERE status = 'paid';
+CREATE INDEX IF NOT EXISTS idx_payments_exam ON payments(exam_id, status);
+
 CREATE INDEX IF NOT EXISTS idx_sessions_exam ON sessions(exam_id);
 -- One live attempt per (exam, student); finished attempts accumulate freely.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_active ON sessions(exam_id, student_id) WHERE status = 'in_progress';
@@ -302,6 +331,10 @@ ensureColumn('sessions', 'selection_tentative', "TEXT NOT NULL DEFAULT ''");
 ensureColumn('sessions', 'paper_total', 'REAL NOT NULL DEFAULT 0');
 ensureColumn('session_questions', 'is_selected', 'INTEGER NOT NULL DEFAULT 1');
 ensureColumn('session_questions', 'section_key', "TEXT NOT NULL DEFAULT ''");
+// Payable papers. The defaults are what every existing exam already behaves
+// like: free, priced at nothing, so no paper suddenly starts asking for money.
+ensureColumn('exams', 'pricing', "TEXT NOT NULL DEFAULT 'free'");
+ensureColumn('exams', 'price_amount', 'INTEGER NOT NULL DEFAULT 0');
 
 // Migration: the table-level UNIQUE(exam_id, student_id) made a second attempt
 // impossible. The constraint lives in the CREATE TABLE and cannot be dropped in
