@@ -1071,7 +1071,18 @@ async function handleInbound(phone, body, meta = {}) {
     // the column holds one format rather than a mix of SQLite and JS datetimes.
     const now = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
     db.prepare('UPDATE sessions SET started_at = ? WHERE id=?').run(now, session.id);
-    await sendQuestionTo(session, student);
+    session = { ...session, started_at: now };
+    // Question 1 goes out through the normal advance path so the delivery is
+    // recorded in the outbox. A bare sendQuestionTo() leaves no trace, and
+    // this branch would then fire again on the student's next reply —
+    // swallowing their first answer and re-sending question 1 forever.
+    const firstQ = getSessionQuestion(session.id, session.current_q_order)
+      || firstUnansweredSelected(session);
+    if (!firstQ) {
+      await finalize(session, student, 'completed');
+      return { started: true, ok: true, reason: 'completed' };
+    }
+    await advanceAndSend(session, student, firstQ);
     return { started: true, ok: true, reason: 'started' };
   }
 
@@ -1115,7 +1126,7 @@ async function handleInbound(phone, body, meta = {}) {
   return { started: false, ok: true, reason: 'answered' };
 }
 
-async function maybeStartSession(student) {
+async function maybeStartSession(student, preferredExamId = null) {
   const candidates = db
     .prepare(
       `SELECT e.* FROM exams e
@@ -1144,8 +1155,16 @@ async function maybeStartSession(student) {
     return { ok: false, reason: 'no_exam' };
   }
 
-  const exam = candidates[0];
-  const existing = latestSession(exam.id, student.id);
+  // The exam that was paid for wins over "newest published": a student
+  // holding several live papers must have the paper they just paid for
+  // opened, not whichever one happens to sort first.
+  let exam = candidates[0];
+  if (preferredExamId != null) {
+    const wanted = Number(preferredExamId);
+    const match = candidates.find((c) => c.id === wanted);
+    if (match) exam = match;
+  }
+  let existing = latestSession(exam.id, student.id);
 
   // The paywall, before anything at all is delivered. An unpaid student gets
   // the checkout link and no paper; a student already part-way through the
@@ -1163,6 +1182,34 @@ async function maybeStartSession(student) {
     const questionCount =
       getSessionQuestionCount(existing.id) ||
       db.prepare('SELECT COUNT(*) c FROM questions WHERE exam_id = ?').get(exam.id).c;
+
+    // An invited-but-unstarted attempt: the state a paper sits in between
+    // "invite sent" and "the student engaged". Payment IS that engagement —
+    // the moment Paystack confirms the charge the paper opens for real:
+    // the clock is armed here and question 1 goes out through the normal
+    // advance path (recorded in the outbox, so the student's next reply is
+    // graded as an answer rather than read as another "start").
+    if (!existing.started_at) {
+      const now = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+      db.prepare(
+        `UPDATE sessions SET started_at = ?, last_active_at = datetime('now') WHERE id = ?`
+      ).run(now, existing.id);
+      existing = { ...existing, started_at: now };
+      await wa.sendText(student.phone, formatExamIntro(exam, questionCount, { started: true }));
+      if (existing.selection_state === 'selecting') {
+        await selection.sendSelector(student.phone, existing.id, existing.selection_section);
+        return { ok: true, reason: 'selecting' };
+      }
+      const firstQ = getSessionQuestion(existing.id, existing.current_q_order)
+        || firstUnansweredSelected(existing);
+      if (!firstQ) {
+        await finalize(existing, student, 'completed');
+        return { ok: true, reason: 'completed' };
+      }
+      await advanceAndSend(existing, student, firstQ);
+      return { ok: true, reason: 'started' };
+    }
+
     await wa.sendText(student.phone, formatExamIntro(exam, questionCount, { started: true }));
     // A restart can leave a selector pending with no question sent; re-render it
     // rather than pushing a question the student never chose.

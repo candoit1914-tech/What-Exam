@@ -238,6 +238,36 @@ test('a free exam sends exactly one message and books nothing', async () => {
   assert.equal(paymentsFor(eid).length, 0, 'no payment row is ever created');
 });
 
+test('a free exam grades the first answer instead of re-sending question 1', async () => {
+  capture();
+  paystackStub();
+  const eid = makeExam();
+  const student = addStudent(eid);
+  await exam.sendExamToRecipients(eid);
+  sent.length = 0;
+
+  // The first reply opens the paper and delivers question 1.
+  const opened = await exam.handleInbound(student.phone, 'hello');
+  assert.equal(opened.reason, 'started');
+  assert.ok(sent.some((m) => m.includes('QUESTION 1')));
+  sent.length = 0;
+
+  // The next reply is an ANSWER to question 1 — it must be recorded
+  // and the exam must advance, not be read as another "start".
+  const outcome = await exam.handleInbound(student.phone, 'A');
+  assert.equal(outcome.reason, 'answered', 'the answer must be graded, not swallowed as a start');
+  assert.ok(sent.some((m) => m.includes('QUESTION 2')), 'the exam advances to question 2');
+  const answer = db
+    .prepare(
+      `SELECT a.answer_text FROM answers a
+        JOIN sessions s ON s.id = a.session_id
+        WHERE s.exam_id = ? AND s.student_id = ? AND a.q_order = 1`
+    )
+    .get(eid, student.id);
+  assert.ok(answer, 'the answer is recorded');
+  assert.equal(answer.answer_text, 'A');
+});
+
 // ── paid papers ───────────────────────────────────────────────────────
 
 test('a paid exam sends the invite and a checkout link behind it', async () => {
@@ -344,10 +374,78 @@ test('a signed charge webhook marks the payment and opens the paper by itself', 
     'the confirmation and question 1'
   );
 
-  // From here the student is an ordinary student again.
+  // From here the student is an ordinary student again: their next
+  // message is an answer to question 1, not another "start".
   const outcome = await exam.handleInbound(student.phone, 'A');
-  assert.ok(['answered', 'started'].includes(outcome.reason), `got ${outcome.reason}`);
+  assert.equal(outcome.reason, 'answered', `got ${outcome.reason}`);
   assert.notEqual(outcome.reason, 'payment_required');
+});
+
+test('payment arms the clock and the first answer is graded at once', async () => {
+  capture();
+  paystackStub();
+  const eid = makeExam({ pricing: 'paid', amount: 1000 });
+  const student = addStudent(eid);
+  await exam.sendExamToRecipients(eid);
+  const [payment] = paymentsFor(eid);
+  sent.length = 0;
+
+  // The student pays; Paystack fires the webhook.
+  const raw = JSON.stringify({
+    event: 'charge.success',
+    data: {
+      reference: payment.reference,
+      amount: 1000,
+      currency: 'GHS',
+      channel: 'mobile_money',
+      paid_at: '2026-10-07T09:00:00.000Z',
+    },
+  });
+  const res = await postWebhook(raw, sign(raw));
+  assert.equal(res.status, 200);
+  await waitFor(() => sent.some((m) => m.includes('QUESTION 1')), 'the paper to open');
+
+  // The exam starts the moment payment lands: the countdown is
+  // running before the student types anything.
+  assert.ok(sessionFor(eid, student.id).started_at, 'the clock is armed by the payment');
+  sent.length = 0;
+
+  // The student's very next message is an answer, and it must be
+  // recorded — not swallowed as another "start" with question 1
+  // re-sent.
+  const outcome = await exam.handleInbound(student.phone, 'A');
+  assert.equal(outcome.reason, 'answered', `got ${outcome.reason}`);
+  assert.ok(sent.some((m) => m.includes('QUESTION 2')), 'the exam advances');
+  const answer = db
+    .prepare(
+      `SELECT a.answer_text FROM answers a
+        JOIN sessions s ON s.id = a.session_id
+        WHERE s.exam_id = ? AND s.student_id = ? AND a.q_order = 1`
+    )
+    .get(eid, student.id);
+  assert.ok(answer, 'the answer is recorded');
+  assert.equal(answer.answer_text, 'A');
+});
+
+test('unlock opens the paper that was paid for, not the newest one', async () => {
+  capture();
+  paystackStub();
+  // Two live papers, the second one newer. A student holds both.
+  const paid = makeExam({ pricing: 'paid', amount: 1000 });
+  const other = makeExam();
+  db.prepare("UPDATE exams SET published_at = datetime('now','-1 hour') WHERE id = ?").run(paid);
+  db.prepare("UPDATE exams SET published_at = datetime('now') WHERE id = ?").run(other);
+  const student = addStudent(paid);
+  db.prepare('INSERT OR IGNORE INTO exam_recipients(exam_id, student_id) VALUES (?,?)').run(other, student.id);
+
+  const payment = paidPayment(paid, student.id, 'wx-preferred-paper');
+  payments.applyCharge({ reference: 'wx-preferred-paper', amount: 1000, currency: 'GHS' });
+  await payments.unlock(payment, null, null);
+
+  const opened = sessionFor(paid, student.id);
+  assert.ok(opened && opened.started_at, 'the paid paper opened');
+  assert.equal(sessionFor(other, student.id), undefined, 'the other paper must stay shut');
+  assert.ok(sent.some((m) => m.includes('QUESTION 1')), 'and its question 1 went out');
 });
 
 test('a second copy of the same webhook does not send anything again', async () => {

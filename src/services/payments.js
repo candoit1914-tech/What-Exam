@@ -337,7 +337,9 @@ async function unlock(payment, exam, student) {
   // back at module scope would hand us a half-initialised exports object.
   const examService = require('./exam');
   try {
-    await examService.maybeStartSession(studentRow);
+    // The exam_id on the payment is the paper that was paid for — a
+    // student holding several live papers must get THAT one opened.
+    await examService.maybeStartSession(studentRow, payment.exam_id);
   } catch (err) {
     // hasPaid is already true, so the student's next reply opens the paper.
     console.error(
