@@ -432,6 +432,35 @@ function sessionQuestionSequence(session) {
 }
 
 /**
+ * Student-facing question numbers. A paper numbers its sections
+ * separately: objectives 1..N, then theory 1..M. A theory question
+ * is "theory question 1", never "question 41" — the number restarts
+ * with the section, the way the printed paper and every mark scheme
+ * refer to it, no matter what number the objectives ended on.
+ *
+ * The display number is the rank within the question's own type in
+ * presentation order, computed from the same sequence the student is
+ * walked through, so the question bubble, the selector and the
+ * result all agree. Keys are question ids (pool ids for a drawn
+ * session, template ids otherwise).
+ */
+function displayNumbersFromSequence(sequence) {
+  const counters = { objective: 0, theory: 0 };
+  const numbers = new Map();
+  for (const q of sequence) {
+    const type = q.type === 'theory' ? 'theory' : 'objective';
+    counters[type] += 1;
+    numbers.set(q.id, counters[type]);
+  }
+  return numbers;
+}
+
+/** The display-number map for a session's presented questions. */
+function questionDisplayNumbers(sessionId) {
+  return displayNumbersFromSequence(sessionQuestionSequence({ id: sessionId }));
+}
+
+/**
  * The question a session presents after `question`, in presentation order.
  * Returns null when the current question is last. If the current question is
  * not part of the sequence (should not happen), falls back to q_order + 1 so
@@ -486,7 +515,7 @@ const START_WORDS = new Set([
   'test',
 ]);
 
-function formatQuestion(exam, question, qCount, body, session) {
+function formatQuestion(exam, question, qCount, body, session, displayNumber = null) {
   // The type banner and any passage/instruction/header are sent as their own
   // bubbles by buildQuestionBubbles, so the question bubble carries just the
   // stem (optionally pre-stripped of leading section headers).
@@ -501,7 +530,11 @@ function formatQuestion(exam, question, qCount, body, session) {
       text = text + ' —';
     }
   }
-  return `*QUESTION ${question.q_order}*\n\n${text}`;
+  // The number the student sees: per-type (objectives 1..N, theory
+  // 1..M), falling back to the raw position only when no map was
+  // supplied.
+  const shown = displayNumber || question.q_order;
+  return `*QUESTION ${shown}*\n\n${text}`;
 }
 
 /** mm:ss left on the clock, computed from the session start + exam duration. */
@@ -685,7 +718,11 @@ function buildQuestionBubbles(exam, question, sequence, index, session) {
       seen.headings.add(h);
     }
   }
-  bubbles.push(formatQuestion(exam, question, sequence.length, body, session));
+  // The question is numbered within its own type, so theory
+  // question 1 is QUESTION 1 no matter how many objectives
+  // the paper carries.
+  const numbers = displayNumbersFromSequence(sequence);
+  bubbles.push(formatQuestion(exam, question, sequence.length, body, session, numbers.get(question.id)));
   return bubbles;
 }
 
@@ -1688,9 +1725,12 @@ async function handleAnswer(exam, session, student, question, body, meta = {}) {
           const det = await ai.detectAiGeneratedAnswer({ questionText: context, studentAnswer: answerText });
           if (det.ai_generated) {
             aiDetected = 1;
+            // The number the student saw on the bubble: per-type
+            // (theory question 1, not question 41).
+            const shown = questionDisplayNumbers(session.id).get(question.id) || question.q_order;
             caution =
               `⚠️ *Warning: AI-written answer detected*\n\n` +
-              `Your answer to Question ${question.q_order} looks like it was written by an AI (e.g. ChatGPT, Gemini, Claude) and copied in.\n\n` +
+              `Your answer to Question ${shown} looks like it was written by an AI (e.g. ChatGPT, Gemini, Claude) and copied in.\n\n` +
               `Copying AI answers is considered *cheating* in this exam, so this answer will earn *0 marks*.\n\n` +
               `Please answer the remaining questions yourself.`;
           }
@@ -2273,6 +2313,7 @@ module.exports = {
   topUpPool,
   nextInSequence,
   firstUnansweredSelected,
+  questionDisplayNumbers,
   deadline,
   timeRemaining,
   markAllPendingTheory,

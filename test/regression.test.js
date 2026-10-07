@@ -267,8 +267,10 @@ test('buildQuestionBubbles sends THEORY header once before theory questions', ()
   const q2 = { id: 2, q_order: 2, type: 'theory', text: 'Q2', passage: '' };
   const q3 = { id: 3, q_order: 3, type: 'theory', text: 'Q3', passage: '' };
   const seq = [q1, q2, q3];
-  assert.deepEqual(exam.buildQuestionBubbles({}, q2, seq, 1), ['Type your full answer to each question as a single message.', '*THEORY*', '*QUESTION 2*\n\nQ2']);
-  assert.deepEqual(exam.buildQuestionBubbles({}, q3, seq, 2), ['*QUESTION 3*\n\nQ3']);
+  // Numbering restarts per section: theory is 1, 2 — never the raw
+  // paper position 2, 3 the way the objectives led into it.
+  assert.deepEqual(exam.buildQuestionBubbles({}, q2, seq, 1), ['Type your full answer to each question as a single message.', '*THEORY*', '*QUESTION 1*\n\nQ2']);
+  assert.deepEqual(exam.buildQuestionBubbles({}, q3, seq, 2), ['*QUESTION 2*\n\nQ3']);
 });
 
 test('buildQuestionBubbles emits header, instructions, passage, then question', () => {

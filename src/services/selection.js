@@ -250,6 +250,63 @@ function stem(q) {
   return String(q.text || '').replace(/\s+/g, ' ').trim();
 }
 
+/**
+ * Per-type question numbers, exactly as the student sees them on each
+ * question bubble: objectives 1..N, theory 1..M.
+ *
+ * Computed locally: selection.js must not require exam.js, which loads this
+ * module. The rows are walked in sessionQuestionSequence's own order —
+ * section position, then q_order — because this map exists only for a
+ * section with a quota, and a quota exam is delivered in that order.
+ * Numbering off raw q_order instead would describe a different paper from
+ * the one the bubbles come from.
+ *
+ * A number comes back as `null` when it cannot honestly be promised. The
+ * section on show has not been committed yet, so every one of its optional
+ * questions may be dropped the moment the student replies — and a dropped
+ * question takes its number with it, moving everything behind it. From the
+ * first still-on-offer question of that section onwards the count is a
+ * guess, and callers show the question's text, which the bubble prints
+ * verbatim, instead of a number that could be wrong before it is read.
+ *
+ * Keys are question ids: pool ids, because the selector only exists for a
+ * drawn session.
+ */
+function displayNumberMap(sessionId, sectionKey) {
+  const session = db.prepare('SELECT exam_id FROM sessions WHERE id = ?').get(sessionId);
+  if (!session) return new Map();
+  const position = new Map(sectionsForExam(session.exam_id).map((s) => [s.section_key, s.position]));
+  const rows = db
+    .prepare(
+      `SELECT sq.question_id, sq.q_order, sq.section_key,
+              qp.type, qp.is_compulsory
+         FROM session_questions sq
+         JOIN question_pool qp ON qp.id = sq.question_id
+        WHERE sq.session_id = ? AND sq.is_selected <> 0`
+    )
+    .all(sessionId)
+    .sort((a, b) => {
+      const pa = position.has(a.section_key) ? position.get(a.section_key) : 9999;
+      const pb = position.has(b.section_key) ? position.get(b.section_key) : 9999;
+      return pa !== pb ? pa - pb : (a.q_order || 0) - (b.q_order || 0);
+    });
+
+  const committed = sectionCommitted(sessionId, sectionKey);
+  const counters = { objective: 0, theory: 0 };
+  const open = { objective: false, theory: false };
+  const numbers = new Map();
+  for (const r of rows) {
+    const type = r.type === 'theory' ? 'theory' : 'objective';
+    // On offer: an optional row of the still-uncommitted section the student
+    // is being asked about. It counts today and may be gone tomorrow.
+    const onOffer = !committed && r.section_key === sectionKey && Number(r.is_compulsory) === 0;
+    if (onOffer) open[type] = true;
+    counters[type] += 1;
+    numbers.set(r.question_id, open[type] ? null : counters[type]);
+  }
+  return numbers;
+}
+
 function rowTitle(q, n) {
   return (`${n}. ${stem(q)}`).slice(0, ROW_TITLE_CAP);
 }
@@ -259,11 +316,19 @@ function listing(plan) {
   return plan.optional.map((q, i) => `${i + 1}. ${stem(q).slice(0, 90)}`).join('\n');
 }
 
-function selectorBody(plan) {
+function selectorBody(plan, numbers) {
   const lines = [];
   if (plan.title) lines.push(`*${plan.title}*`, '');
   if (plan.instructions) lines.push(`${plan.instructions}`, '');
-  const locked = plan.compulsory.map((q) => `Q${q.q_order}`);
+  // The number the bubble will carry — and when that number can still move,
+  // the text the bubble will carry instead. drawnInSection returns
+  // question_id, never id, so the map is keyed on exactly that.
+  const locked = plan.compulsory.map((q) => {
+    const n = numbers ? numbers.get(q.question_id) : undefined;
+    if (n != null) return `Q${n}`;
+    const text = stem(q);
+    return `"${text.length > 60 ? `${text.slice(0, 59).trimEnd()}…` : text}"`;
+  });
   if (locked.length) {
     lines.push(`🔒 Compulsory — you will answer ${locked.join(', ')}.`);
   }
@@ -274,7 +339,7 @@ function selectorBody(plan) {
 async function sendSelector(phone, sessionId, sectionKey) {
   const plan = sessionPlan(sessionId).find((s) => s.section_key === sectionKey);
   if (!plan || plan.quota <= 0) return;
-  const body = selectorBody(plan);
+  const body = selectorBody(plan, displayNumberMap(sessionId, sectionKey));
 
   if (plan.optional.length > LIST_ROW_CAP) {
     await wa.sendText(

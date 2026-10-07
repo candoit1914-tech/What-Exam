@@ -99,6 +99,14 @@ async function sendResultMessage(sessionId, phone, reason) {
   const r = computeForSession(sessionId);
   const passMark = r.exam.pass_percentage;
 
+  // Per-type question numbers, matching the bubbles the student
+  // was sent: objectives 1..N, theory 1..M. Lazy require: exam.js
+  // loads this module at require time, so requiring it back at
+  // module scope would hand us a half-initialised exports object.
+  const examService = require('./exam');
+  const numbers = examService.questionDisplayNumbers(sessionId);
+  const shown = (questionId, fallback) => numbers.get(questionId) || fallback;
+
   let msg =
     `🏁 *Exam complete*\n\n` +
     `📝 ${r.exam.title}${r.exam.subject ? ` — ${r.exam.subject}` : ''}\n` +
@@ -109,7 +117,7 @@ async function sendResultMessage(sessionId, phone, reason) {
 
   const key = db
     .prepare(
-      `SELECT a.q_order, a.answer_text, a.is_correct,
+      `SELECT a.q_order, a.question_id, a.answer_text, a.is_correct,
               COALESCE(p.correct_answer, q.correct_answer) AS correct_answer,
               COALESCE(p.text, q.text) AS text
        FROM answers a
@@ -127,7 +135,7 @@ async function sendResultMessage(sessionId, phone, reason) {
           const yours = String(k.answer_text || '').toUpperCase();
           const right = String(k.correct_answer || '').toUpperCase();
           const mark = String(k.is_correct) === '1' || k.is_correct === 1 ? '✅' : '❌';
-          return `${k.q_order}. ${mark} ${yours} → ${right}`;
+          return `${shown(k.question_id, k.q_order)}. ${mark} ${yours} → ${right}`;
         })
         .join('\n') +
       '\n';
@@ -135,7 +143,7 @@ async function sendResultMessage(sessionId, phone, reason) {
 
   const theory = db
     .prepare(
-      `SELECT a.q_order, a.marks_awarded, a.max_marks, a.ai_detected
+      `SELECT a.q_order, a.question_id, a.marks_awarded, a.max_marks, a.ai_detected
        FROM answers a
        LEFT JOIN session_questions sq ON sq.session_id = a.session_id AND sq.q_order = a.q_order
        LEFT JOIN question_pool p ON p.id = sq.question_id
@@ -149,17 +157,17 @@ async function sendResultMessage(sessionId, phone, reason) {
       theory
         .map((t) => {
           const cheated = Number(t.ai_detected) === 1;
-          return `Q${t.q_order}. ${t.marks_awarded}/${t.max_marks}${cheated ? ' ⚠️ AI-copied' : ''}`;
+          return `Q${shown(t.question_id, t.q_order)}. ${t.marks_awarded}/${t.max_marks}${cheated ? ' ⚠️ AI-copied' : ''}`;
         })
         .join('\n') +
       '\n';
   }
 
   const cheats = db
-    .prepare('SELECT q_order FROM answers WHERE session_id = ? AND ai_detected = 1 ORDER BY q_order')
+    .prepare('SELECT a.q_order, a.question_id FROM answers a WHERE a.session_id = ? AND a.ai_detected = 1 ORDER BY a.q_order')
     .all(sessionId);
   if (cheats.length) {
-    const list = cheats.map((c) => c.q_order).join(', ');
+    const list = cheats.map((c) => shown(c.question_id, c.q_order)).join(', ');
     msg +=
       `\n⚠️ *Caution:* Your answer${cheats.length === 1 ? '' : 's'} to Q${list} looked like it was ` +
       `written by an AI (e.g. ChatGPT, Gemini, Claude) and copied in. Copying AI answers is cheating, ` +
@@ -205,6 +213,13 @@ function reportHTML(sessionId) {
   const drawn = db.prepare('SELECT COUNT(*) c FROM session_questions WHERE session_id = ?').get(sessionId).c;
   const allQuestions =
     drawn > 0 ? drawn : db.prepare('SELECT COUNT(*) c FROM questions WHERE exam_id = ?').get(exam.id).c;
+
+  // Per-type question numbers, matching the WhatsApp bubbles:
+  // objectives 1..N, theory 1..M. Lazy require: exam.js loads
+  // this module at require time, so requiring it back at module
+  // scope would hand us a half-initialised exports object.
+  const examService = require('./exam');
+  const numbers = examService.questionDisplayNumbers(sessionId);
 
   const statusLabel = {
     completed: 'Completed',
@@ -275,7 +290,7 @@ function reportHTML(sessionId) {
 
       return `<article class="q-card">
         <header class="q-head">
-          <span class="q-num">${i + 1}</span>
+          <span class="q-num">${numbers.get(a.question_id) || (i + 1)}</span>
           <span class="q-type">${a.type === 'objective' ? 'Objective' : 'Theory'}</span>
           <span class="q-type">${a.max_marks} mark${Number(a.max_marks) === 1 ? '' : 's'}</span>
           <span class="q-status ${isCorrect ? 's-pass' : 's-fail'}">${isCorrect ? 'Correct' : a.needs_review ? 'Review' : 'Incorrect'}</span>
