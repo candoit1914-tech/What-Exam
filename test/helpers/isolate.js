@@ -12,7 +12,7 @@ process.env.DB_PATH = path.join(root, 'exams.db');
 process.env.UPLOADS_DIR = path.join(root, 'uploads');
 process.env.SEED_ON_BOOT = 'false';
 for (const name of Object.keys(process.env)) {
-  if (/^(AI_|CLAUDE_|XAI_|PUTER_|WHATSAPP_)/.test(name)) delete process.env[name];
+  if (/^(AI_|CLAUDE_|XAI_|PUTER_|WHATSAPP_|PAYSTACK_)/.test(name)) delete process.env[name];
 }
 process.env.ADMIN_PASSWORD = 'isolated-test-password';
 const config = require('../../src/config');
