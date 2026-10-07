@@ -1359,19 +1359,20 @@ test('extractQuestionsFromText caps concurrent extraction blocks at BLOCK_CONCUR
   };
   try {
     // 200 numbered questions split into ~25 blocks (perBlock 8) — enough to
-    // exceed BLOCK_CONCURRENCY (3) so the cap is actually exercised. This
+    // exceed BLOCK_CONCURRENCY (4) so the cap is actually exercised. This
     // couples the test to the current cap value on purpose: it is a
     // deliberate performance tuning constant, so the test is updated when
     // the cap is tuned. It was lowered from 6 to 4 after a real upload filled
     // the account's token budget: each block asks for up to 16k output tokens,
     // so 6 in flight is ~100k tokens demanded at once and the primary returned
-    // 429 for nearly every block, dropping questions from the import. It is now
-    // 3 because the primary sits behind a shared multi-model gateway, so the
-    // provider's tolerance for simultaneous demand is not ours alone to raise.
+    // 429 for nearly every block, dropping questions from the import. It was
+    // then set to 3 behind a shared multi-model gateway, and restored to 4 —
+    // the level measured with zero 429s — with chatJSON's retry-with-backoff
+    // absorbing anything a faster endpoint does not.
     const lines = [];
     for (let i = 1; i <= 200; i++) lines.push(`${i}. Guard question ${i}?`, 'A. X', 'B. Y', 'C. Z', 'D. W');
     const out = await ai.extractQuestionsFromText(lines.join('\n'));
-    assert.equal(state.max, 3, `extraction fires no more than 3 blocks at once (saw ${state.max})`);
+    assert.equal(state.max, 4, `extraction fires no more than 4 blocks at once (saw ${state.max})`);
     assert.ok(out.length >= 1, 'capped extraction still parses questions');
   } finally {
     ai.chatJSON = orig;

@@ -71,7 +71,15 @@ const config = {
       .split(',')
       .map((s) => s.trim())
       .filter(Boolean),
-    sendIntervalMs: parseInt(process.env.WHATSAPP_SEND_INTERVAL_MS || '2000', 10),
+    // Gap between consecutive outbound messages to the SAME number. A
+    // question arrives as several bubbles; the gap keeps a burst under
+    // Meta's per-pair message window (error 131056, which drains in
+    // tens of seconds) while letting different students proceed in
+    // parallel. 600ms keeps a five-bubble question inside ~3s — fast
+    // enough that a paper does not trickle in — and the 131056
+    // backoff below still absorbs a genuine burst. Tune via
+    // WHATSAPP_SEND_INTERVAL_MS.
+    sendIntervalMs: parseInt(process.env.WHATSAPP_SEND_INTERVAL_MS || '600', 10),
   },
 
   ai: {
@@ -102,7 +110,10 @@ const config = {
     // finished in 29.5s and 8 in 29.6s, with zero 429s at either level - the
     // wall-clock is the provider's latency, not a queue. Rate limits are handled
     // by retry-with-backoff in chatJSON, which is the correct place for them.
-    generateConcurrency: parseInt(process.env.AI_GENERATE_CONCURRENCY || '6', 10),
+    // The default is 10: at or above the measured 8, so a provider with
+    // headroom collapses a paper into a single wave, and chatJSON's
+    // backoff absorbs any 429 a tighter account does see.
+    generateConcurrency: parseInt(process.env.AI_GENERATE_CONCURRENCY || '10', 10),
     vision: process.env.AI_VISION === 'true',
   },
 

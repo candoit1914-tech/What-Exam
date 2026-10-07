@@ -21,8 +21,10 @@ const MAX_WAIT_MS = 30000;
 // A question is delivered as several bubbles back-to-back, and a burst can
 // exhaust the per-pair message window (131056). Serializing per recipient with
 // a small gap keeps every burst under the limit while letting different
-// students proceed in parallel. Tune via WHATSAPP_SEND_INTERVAL_MS.
-const DEFAULT_SEND_INTERVAL_MS = 1200;
+// students proceed in parallel. 600ms: a five-bubble question lands inside
+// ~3s, and the 131056 backoff still absorbs a genuine burst. Tune via
+// WHATSAPP_SEND_INTERVAL_MS.
+const DEFAULT_SEND_INTERVAL_MS = 600;
 
 // Per-recipient pacing gates: phone -> Promise that resolves MIN interval
 // after that phone's last outbound send settled.

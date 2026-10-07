@@ -621,12 +621,11 @@ const BLOCK_MAX_CHARS = 12000;
 // Every block asks for up to BLOCK_MAX_TOKENS output, so concurrency here is
 // really a token-throughput knob: 6 blocks in flight is ~100k output tokens
 // demanded at once, which is what drove the account into 429s. Tunable via
-// AI_BLOCK_CONCURRENCY for accounts on a tighter rate limit. The default is 3
-// rather than 4 because a shared gateway fronts many accounts, so the ceiling
-// on how fast the underlying provider can absorb the demand is not ours alone
-// to raise.
+// AI_BLOCK_CONCURRENCY for accounts on a tighter rate limit. The default is
+// 4 — the level measured with zero 429s on the gateway — and chatJSON's
+// retry-with-backoff absorbs anything a faster endpoint does not.
 const DIAGRAM_CONCURRENCY = 4;
-const BLOCK_CONCURRENCY = Math.max(1, parseInt(process.env.AI_BLOCK_CONCURRENCY, 10) || 3);
+const BLOCK_CONCURRENCY = Math.max(1, parseInt(process.env.AI_BLOCK_CONCURRENCY, 10) || 4);
 
 // Workers for one question-generation run. Never exceeds the number of batches:
 // extra workers would sit idle and buy nothing. Bounded below so a bad
@@ -1312,7 +1311,6 @@ ${avoidBlock}`);
         return result;
       } catch (err) {
         console.error(`[generate] batch ${idx} failed:`, err.message);
-        await delay(1000);
         return null;
       }
     });
