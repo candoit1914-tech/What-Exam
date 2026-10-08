@@ -965,10 +965,10 @@ async function sendQuestionTo(session, student, qOrder = null) {
   }
   // Delivery has reached an optional question of a selective section: the student
   // picks from it before seeing it, so the selector replaces this question rather
-  // than arriving after it.
+  // than arriving after it. openChoice sends that selector once — a stage that is
+  // already open is never regenerated.
   if (selection.needsChoice(session, question)) {
-    selection.beginChoice(session.id, question.section_key);
-    await selection.sendSelector(student.phone, session.id, question.section_key);
+    await selection.openChoice(student.phone, session.id, question.section_key);
     return false;
   }
   const sequence = sessionQuestionSequence(session);
@@ -1060,8 +1060,7 @@ async function advanceAndSend(session, student, nextQ) {
   // alone — the commit path re-reads the sequence and lands on the first SELECTED
   // question, which is usually not nextQ at all.
   if (selection.needsChoice(session, nextQ)) {
-    selection.beginChoice(session.id, nextQ.section_key);
-    await selection.sendSelector(student.phone, session.id, nextQ.section_key);
+    await selection.openChoice(student.phone, session.id, nextQ.section_key);
     return;
   }
   const entry = outbox.enqueue({
@@ -1167,9 +1166,16 @@ async function handleInbound(phone, body, meta = {}) {
 
   // An approved template invites a reply; it does not open the service
   // window. Deliver Q1 on that first reply instead of grading the greeting.
+  //
+  // A student replying to an OPEN selector is choosing, not starting: the
+  // selector never records a question in the outbox (there is nothing owed
+  // until they pick), so `!questionSent` stays true and this branch used to
+  // re-run on every single tap — re-sending the section header and the
+  // "Choose questions" picker each time and swallowing the tap with it.
   const invited = db.prepare("SELECT id FROM message_outbox WHERE session_id=? AND kind='intro' AND state='sent'").get(session.id);
   const questionSent = db.prepare("SELECT id FROM message_outbox WHERE session_id=? AND kind='question' AND state='sent'").get(session.id);
-  if (invited && !questionSent && sessionHasNoAnswers(session.id)) {
+  const selectorOpen = session.selection_state === 'selecting';
+  if (invited && !questionSent && !selectorOpen && sessionHasNoAnswers(session.id)) {
     // Stored in the same ISO-8601-Z form as every other write to started_at, so
     // the column holds one format rather than a mix of SQLite and JS datetimes.
     const now = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
@@ -1246,8 +1252,13 @@ async function sendPaidStartTemplate(session, student, exam, firstQ) {
     // questions, and a drawn attempt can hold a different set. The student
     // must only ever be offered what they were actually drawn.
     const plan = selection.sessionPlan(session.id).find((item) => item.section_key === firstQ.section_key);
-    const questions = (plan?.optional || []).map((q, i) => `${i + 1}. ${q.text}`).join('\n');
-    questionText = `Choose ${plan?.quota || 1} question(s) from this section:\n${questions}\nReply with the number(s), then CONFIRM.`;
+    const quota = plan?.quota || 1;
+    const card = plan ? selection.selectionCard(plan, new Set()) : '';
+    questionText =
+      `${plan?.title ? `${plan.title}\n\n` : ''}` +
+      `You must choose exactly ${quota} of the ${plan?.optional.length || 0} questions below.\n` +
+      `Tap a question number to select or deselect it.\n\n${card}\n\n` +
+      `Reply with the numbers you choose, e.g. 1,3 — then CONTINUE.`;
   } else {
     const sequence = sessionQuestionSequence(session);
     const index = sequence.findIndex((q) => q.id === firstQ.id);
@@ -1472,15 +1483,14 @@ async function processAnswer(session, student, body, meta = {}) {
     const res = await selection.handleReply(session, student, body, meta);
     if (res && res.committed) {
       // The choice is committed and the paper priced. Find where we now are and
-      // deliver — handleReply never sends a question itself.
+      // deliver — handleReply never sends a question itself. advanceAndSend is
+      // used rather than a bare sendQuestionTo so the delivery lands in the
+      // outbox: without that record `questionSent` stays false and the invite
+      // branch above would hand the student question 1 again on their next reply.
       const fresh = getActiveSession(student.id) || session;
       const nextQ = firstUnansweredSelected(fresh);
-      if (nextQ) {
-        db.prepare('UPDATE sessions SET current_q_order = ? WHERE id = ?').run(nextQ.q_order, fresh.id);
-        await sendQuestionTo(fresh, student, nextQ.q_order);
-      } else {
-        await finalize(fresh, student, 'completed');
-      }
+      if (nextQ) await advanceAndSend(fresh, student, nextQ);
+      else await finalize(fresh, student, 'completed');
     } else if (!res || !res.handled) {
       // selection.handleReply could not parse this as a selection (missing plan or
       // exhausted quota). Leaving selection_state set would brick the session: every

@@ -1100,8 +1100,14 @@ test('a selective paper is walked end to end: compulsory first, then the choice'
       'the unchosen question is deselected');
     assert.equal(flags.find((r) => r.q_order === pool[2]).is_selected, 1);
 
+    // Every question on offer is named while the student is choosing — that IS
+    // the choice — so "never delivered" has to be measured from the commit on.
+    const lockAt = cap.sent.findIndex((m) => /Locked in/.test(m.text || ''));
+    assert.ok(lockAt >= 0, 'the commit is acknowledged to the student');
+    const afterChoice = cap.sent.slice(lockAt + 1)
+      .map((m) => m.text || m.body || '').join('\n');
     assert.ok(
-      !allText(cap.sent).includes(skippedText),
+      !afterChoice.includes(skippedText),
       'the unchosen question is never delivered'
     );
     assert.equal(sessionRow(sid).selection_state, '', 'the selection window closed on commit');

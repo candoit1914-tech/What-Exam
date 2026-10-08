@@ -212,15 +212,28 @@ test('the selector echoes the numbers the student typed, not the draw position',
   const session = db.prepare('SELECT * FROM sessions WHERE id = ?').get(sid);
   const student = db.prepare('SELECT * FROM students WHERE id = ?').get(session.student_id);
 
-  const sent = await capturing('sendText', () => selection.handleReply(session, student, '1,3', {}));
+  // The complete card goes out as the Continue button's message, an incomplete
+  // one as plain text — capture both so the echo is asserted on whichever the
+  // count produced, without a real gateway call in between.
+  const sent = [];
+  const originals = { sendText: wa.sendText, sendInteractiveButtons: wa.sendInteractiveButtons };
+  wa.sendText = async (...args) => { sent.push(['text', ...args]); };
+  wa.sendInteractiveButtons = async (...args) => { sent.push(['buttons', ...args]); };
+  try {
+    await selection.handleReply(session, student, '1,3', {});
+  } finally {
+    Object.assign(wa, originals);
+  }
 
   assert.equal(sent.length, 1, 'the echo is one message');
+  const echo = sent[0][2];
   assert.match(
-    sent[0][1],
-    /✓ Chosen: 1, 3 — 2 of 2/,
+    echo,
+    /☑ 1\.[\s\S]*☑ 3\./,
     'the reply protocol speaks in listing numbers, so the echo does too'
   );
-  assert.doesNotMatch(sent[0][1], /Q5|Q7/, 'a draw position the student never saw must not appear');
+  assert.match(echo, /\*Selected: 2\/2\*/, 'and it carries the live count');
+  assert.doesNotMatch(echo, /Q5|Q7/, 'a draw position the student never saw must not appear');
 });
 
 test('the report cards use the same numbers as the bubbles', () => {

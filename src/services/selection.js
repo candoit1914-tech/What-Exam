@@ -225,8 +225,16 @@ function applySelection(sessionId, sectionKey, chosenQOrders) {
 //
 // WhatsApp list messages cap at ten rows and row titles at 24 characters, so
 // a bigger pool has to arrive as numbered text. Both paths speak the same
-// protocol (taps, "2,4,5", CONFIRM) so nothing downstream branches on which
+// protocol (taps, "2,4,5", CONTINUE) so nothing downstream branches on which
 // one was used.
+//
+// The stage behaves as ONE persistent multi-select rather than a message per
+// selection: sendSelector opens it exactly once (that is what openChoice
+// guards), and every tick after it is answered by sendSelectionState — the
+// same checkbox card with a live "Selected: n/q" count, and a Continue action
+// only once the count is exact. The section header, the instructions and the
+// "Choose questions" button belong to the opening message alone; nothing that
+// happens during the selection may send them again.
 //
 // Every key below is a session q_order. The student is told "QUESTION 7", taps
 // row `sel:b:7`, and types "7" — so q_order is the only identifier that means
@@ -234,8 +242,13 @@ function applySelection(sessionId, sectionKey, chosenQOrders) {
 
 const LIST_ROW_CAP = 10;
 const ROW_TITLE_CAP = 24;
-const CONFIRM_WORDS = new Set(['confirm', 'done', 'ok', 'okay', 'yes', 'submit']);
+const TITLE_CAP = 60;
+// "continue" is what the button on the selection card says, so the word and the
+// tap have to mean the same thing.
+const CONFIRM_WORDS = new Set(['confirm', 'done', 'ok', 'okay', 'yes', 'submit', 'continue', 'start']);
 const CHANGE_WORDS = new Set(['change', 'edit', 'switch', 'back']);
+const CHECK_ON = '☑';
+const CHECK_OFF = '☐';
 
 function hasSelections(examId) {
   return sectionPlan(examId).some((s) => s.quota > 0);
@@ -244,6 +257,30 @@ function hasSelections(examId) {
 function beginChoice(sessionId, sectionKey) {
   db.prepare("UPDATE sessions SET selection_state='selecting', selection_section=? WHERE id=?")
     .run(sectionKey, sessionId);
+}
+
+/**
+ * Open the selection stage for one section and send its selector — ONCE.
+ *
+ * A stage that is already open for this section is left exactly as it is: the
+ * student sees one SECTION header and one picker, and every reply after it is a
+ * tick against that same picker rather than the whole interface being
+ * regenerated. Every delivery path that can reach an uncommitted optional
+ * question (the first send, a retry, a replay) funnels through here, so the
+ * guard has to live here rather than at the call sites.
+ *
+ * Returns true only when the selector actually went out.
+ */
+async function openChoice(phone, sessionId, sectionKey) {
+  const row = db
+    .prepare('SELECT selection_state, selection_section FROM sessions WHERE id = ?')
+    .get(sessionId);
+  const alreadyOpen =
+    !!row && row.selection_state === 'selecting' && row.selection_section === sectionKey;
+  beginChoice(sessionId, sectionKey);
+  if (alreadyOpen) return false;
+  await sendSelector(phone, sessionId, sectionKey);
+  return true;
 }
 
 function stem(q) {
@@ -307,27 +344,30 @@ function displayNumberMap(sessionId, sectionKey) {
   return numbers;
 }
 
-function rowTitle(q, n) {
-  return (`${n}. ${stem(q)}`).slice(0, ROW_TITLE_CAP);
+function rowTitle(q, n, chosen) {
+  const mark = chosen && chosen.has(q.q_order) ? CHECK_ON : CHECK_OFF;
+  return (`${mark} ${n}. ${stem(q)}`).slice(0, ROW_TITLE_CAP);
 }
 
-/** The numbered listing used by both the big-pool and the error paths. */
-function listing(plan) {
-  return plan.optional.map((q, i) => `${i + 1}. ${stem(q).slice(0, 90)}`).join('\n');
+/** `☐ 2. Define photosynthesis…` — one option line of the selection card. */
+function optionLine(chosen, n, q) {
+  const mark = chosen.has(q.q_order) ? CHECK_ON : CHECK_OFF;
+  return `${mark} ${n}. ${stem(q).slice(0, TITLE_CAP)}`;
 }
 
 /**
- * The number the student chose with: the position in the printed listing
- * (1..n), never the session q_order. The reply protocol is "reply with their
- * numbers like 1,3", so echoing a draw position the student has never seen
- * would name questions they did not pick.
+ * The whole multi-select card: every question on offer with its current tick,
+ * then the live count. This is what the student sees after every tap, and it is
+ * deliberately NOT the selector — the selector opens the stage, this only
+ * reports the state of a stage that is already open.
  */
-function listingNumber(plan, qOrder) {
-  const i = plan.optional.findIndex((q) => q.q_order === qOrder);
-  return i >= 0 ? i + 1 : qOrder;
+function selectionCard(plan, chosen) {
+  const lines = plan.optional.map((q, i) => optionLine(chosen, i + 1, q));
+  lines.push('', `*Selected: ${chosen.size}/${plan.quota}*`);
+  return lines.join('\n');
 }
 
-function selectorBody(plan, numbers) {
+function selectorBody(plan, numbers, chosen) {
   const lines = [];
   if (plan.title) lines.push(`*${plan.title}*`, '');
   if (plan.instructions) lines.push(`${plan.instructions}`, '');
@@ -344,25 +384,37 @@ function selectorBody(plan, numbers) {
     lines.push(`🔒 Compulsory — you will answer ${locked.join(', ')}.`);
   }
   lines.push(`You must choose exactly ${plan.quota} of the ${plan.optional.length} questions below.`);
+  lines.push('Tap a question number to select or deselect it.');
+  lines.push('');
+  lines.push(selectionCard(plan, chosen));
   return lines.join('\n');
 }
 
+/**
+ * The one and only SECTION header + picker for a selection stage.
+ *
+ * Everything the student does afterwards is answered with sendSelectionState,
+ * never with this: WhatsApp cannot edit a message it has already sent, so
+ * re-rendering the picker on every tap is what produced the "SECTION II /
+ * Choose questions" loop this function is guarded against (see openChoice).
+ */
 async function sendSelector(phone, sessionId, sectionKey) {
   const plan = sessionPlan(sessionId).find((s) => s.section_key === sectionKey);
   if (!plan || plan.quota <= 0) return;
-  const body = selectorBody(plan, displayNumberMap(sessionId, sectionKey));
+  const chosen = new Set(currentChoice(sessionId, sectionKey));
+  const body = selectorBody(plan, displayNumberMap(sessionId, sectionKey), chosen);
 
   if (plan.optional.length > LIST_ROW_CAP) {
     await wa.sendText(
       phone,
-      `${body}\n\n${listing(plan)}\n\nReply with the numbers you choose, e.g. 1,3 — then CONFIRM.`
+      `${body}\n\nReply with the numbers you choose, e.g. 1,3 — then CONTINUE.`
     );
     return;
   }
 
   const rows = plan.optional.map((q, i) => ({
     id: `sel:${sectionKey}:${q.q_order}`,
-    title: rowTitle(q, i + 1),
+    title: rowTitle(q, i + 1, chosen),
   }));
   try {
     await wa.sendInteractiveList(
@@ -375,15 +427,49 @@ async function sendSelector(phone, sessionId, sectionKey) {
     console.error('[selection] list message failed, using text:', err.message);
     await wa.sendText(
       phone,
-      `${body}\n\n${listing(plan)}\n\nReply with the numbers you choose, e.g. 1,3 — then CONFIRM.`
+      `${body}\n\nReply with the numbers you choose, e.g. 1,3 — then CONTINUE.`
     );
   }
 }
 
 /**
+ * The live state of an OPEN selection stage, sent after every tick.
+ *
+ * It carries the same checkboxes and the same `Selected: n/q` count as the
+ * picker, but not the section header, the instructions or the "Choose questions"
+ * button — those belong to the message that opened the stage and are never
+ * repeated. Once the count is complete the card also carries the single
+ * Continue action that lets the student through.
+ */
+async function sendSelectionState(phone, sessionId, sectionKey) {
+  const plan = sessionPlan(sessionId).find((s) => s.section_key === sectionKey);
+  if (!plan || plan.quota <= 0) return;
+  const chosen = new Set(currentChoice(sessionId, sectionKey));
+  const card = selectionCard(plan, chosen);
+
+  if (chosen.size === plan.quota) {
+    try {
+      await wa.sendInteractiveButtons(phone, card, [
+        { type: 'reply', reply: { id: 'sel:confirm', title: 'Continue' } },
+      ]);
+    } catch (err) {
+      console.error('[selection] continue button failed, using text:', err.message);
+      await wa.sendText(phone, `${card}\n\nReply *CONTINUE* to start the questions.`);
+    }
+    return;
+  }
+  await wa.sendText(
+    phone,
+    `${card}\n\nReply with a number (e.g. 3) to select or deselect it.`
+  );
+}
+
+/**
  * The q_orders a student means, from a typed reply or a list row id.
- * Returns { toggles: [q_order] } for a tap, or { set: [q_order] } for typed
- * numbers.
+ *
+ * Both shapes come back as `{ toggles }`, because a tap and a typed number are
+ * the same gesture to the student: it ticks a question, or unticks it if it was
+ * already ticked. `null` when the reply names no question on offer.
  */
 function parseChoice(text, meta, plan) {
   const byRowId = new Map(plan.optional.map((q) => [`sel:${plan.section_key}:${q.q_order}`, q.q_order]));
@@ -396,10 +482,30 @@ function parseChoice(text, meta, plan) {
   // that is what the student just read. It is only then read as a q_order, so a
   // student who types the question number they were shown still gets it right.
   const byIndex = digits.filter((n) => n >= 1 && n <= pool.length).map((n) => pool[n - 1]);
-  if (byIndex.length) return { set: [...new Set(byIndex)] };
+  if (byIndex.length) return { toggles: [...new Set(byIndex)] };
   const byOrder = digits.filter((n) => pool.includes(n));
-  if (byOrder.length) return { set: [...new Set(byOrder)] };
+  if (byOrder.length) return { toggles: [...new Set(byOrder)] };
   return null;
+}
+
+/**
+ * Tick and untick in one pass, without ever letting the count pass the quota.
+ *
+ * Removals run first, so a student who is already at the quota can swap a
+ * question for another in one reply ("2,5" drops 2 and takes 5) instead of
+ * having to empty the card before they can change their mind. Returns true when
+ * something had to be refused because the card was already full.
+ */
+function applyToggles(chosen, plan, toggles) {
+  const removals = toggles.filter((q) => chosen.has(q));
+  const additions = toggles.filter((q) => !chosen.has(q));
+  for (const q of removals) chosen.delete(q);
+  let refused = false;
+  for (const q of additions) {
+    if (chosen.size < plan.quota) chosen.add(q);
+    else refused = true;
+  }
+  return refused;
 }
 
 /** q_orders the student has provisionally ticked, without committing anything. */
@@ -469,30 +575,52 @@ async function handleReply(session, student, body, meta = {}) {
     ).run(session.id, sectionKey);
     db.prepare('UPDATE sessions SET selection_tentative = ? WHERE id = ?')
       .run(JSON.stringify(committed), session.id);
-    beginChoice(session.id, sectionKey);
-    await sendSelector(phone, session.id, sectionKey);
+    await openChoice(phone, session.id, sectionKey);
     return { handled: true, committed: false };
   }
 
   const chosen = new Set(currentChoice(session.id, sectionKey));
+  const parsed = parseChoice(body, meta, plan);
+  const digitsInRaw = /\d/.test(raw);
+  const saysConfirm = meta.replyId === 'sel:confirm' || says(CONFIRM_WORDS);
 
-  // A combined "1,3 CONFIRM" both sets the choice and commits it, so apply any
-  // numbers in the message before testing the count.
-  const digitsInRaw = raw.match(/\d+/g);
-  if (meta.replyId !== 'sel:confirm' && says(CONFIRM_WORDS) && digitsInRaw && digitsInRaw.length) {
-    const parsed = parseChoice(raw, meta, plan);
-    chosen.clear();
-    for (const q of (parsed ? parsed.set || parsed.toggles || [] : [])) chosen.add(q);
+  // Numbers in a reply are ticks, whether they came from a tap on a list row or
+  // from the keyboard: they are applied ON TOP of what is already ticked rather
+  // than replacing it, so a student builds the selection up one question at a
+  // time — and can swap one for another — without the stage ever restarting.
+  if (parsed) {
+    const refused = applyToggles(chosen, plan, parsed.toggles);
+    persistChoice(session.id, sectionKey, [...chosen]);
+    if (refused) {
+      await wa.sendText(
+        phone,
+        `That is already ${plan.quota} chosen — reply the number of one to deselect it, or CONTINUE.`
+      );
+      await sendSelectionState(phone, session.id, sectionKey);
+      return { handled: true, committed: false };
+    }
+  } else if (digitsInRaw) {
+    // Digits that name nothing on offer are a misread of the card, not a
+    // decision — say so instead of committing on a number that was never there.
+    await wa.sendText(
+      phone,
+      `I didn't catch that. Reply with the numbers from the list, e.g. *1,3*.`
+    );
+    await sendSelectionState(phone, session.id, sectionKey);
+    return { handled: true, committed: false };
   }
 
-  if (meta.replyId === 'sel:confirm' || says(CONFIRM_WORDS)) {
+  if (saysConfirm) {
+    // The card only offers Continue once the count is exact, but the word can
+    // still arrive early — refuse it with the state, never by reopening the
+    // section message the student has already been shown.
     if (chosen.size !== plan.quota) {
       await wa.sendText(
         phone,
         `You must choose exactly ${plan.quota} question${plan.quota === 1 ? '' : 's'}. ` +
-        `You have chosen ${chosen.size}. Reply with the numbers, e.g. 1,3, then CONFIRM.`
+        `You have chosen ${chosen.size}.`
       );
-      await sendSelector(phone, session.id, sectionKey);
+      await sendSelectionState(phone, session.id, sectionKey);
       return { handled: true, committed: false };
     }
     applySelection(session.id, sectionKey, [...chosen]);
@@ -503,45 +631,17 @@ async function handleReply(session, student, body, meta = {}) {
     return { handled: true, committed: true };
   }
 
-  const parsed = parseChoice(body, meta, plan);
   if (!parsed) {
     await wa.sendText(
       phone,
-      `I didn't catch that. Tap the questions you want, or reply with their numbers like *1,3*, then send CONFIRM.`
+      `I didn't catch that. Tap a question number, or reply with numbers like *1,3*.`
     );
-    await sendSelector(phone, session.id, sectionKey);
+    await sendSelectionState(phone, session.id, sectionKey);
     return { handled: true, committed: false };
   }
 
-  if (parsed.set) {
-    if (parsed.set.length > plan.quota) {
-      await wa.sendText(
-        phone,
-        `You chose ${parsed.set.length} but this section needs exactly ${plan.quota}. ` +
-        `Pick ${plan.quota}, e.g. *1,3*, then CONFIRM.`
-      );
-      return { handled: true, committed: false };
-    }
-    chosen.clear();
-    parsed.set.forEach((q) => chosen.add(q));
-  } else {
-    for (const q of parsed.toggles) {
-      if (chosen.has(q)) chosen.delete(q);
-      else if (chosen.size < plan.quota) chosen.add(q);
-      else {
-        await wa.sendText(phone, `That is already ${plan.quota} chosen — remove one first, or reply CONFIRM.`);
-        return { handled: true, committed: false };
-      }
-    }
-  }
-
-  persistChoice(session.id, sectionKey, [...chosen]);
-  await wa.sendText(
-    phone,
-    chosen.size
-      ? `✓ Chosen: ${[...chosen].map((q) => listingNumber(plan, q)).join(', ')} — ${chosen.size} of ${plan.quota}. Reply CONFIRM to lock it in.`
-      : `Cleared. Choose ${plan.quota} question${plan.quota === 1 ? '' : 's'}.`
-  );
+  // A plain tick: the answer is the updated card, never the selector again.
+  await sendSelectionState(phone, session.id, sectionKey);
   return { handled: true, committed: false };
 }
 
@@ -555,6 +655,9 @@ module.exports = {
   computePaperTotal,
   applySelection,
   beginChoice,
+  openChoice,
   sendSelector,
+  sendSelectionState,
+  selectionCard,
   handleReply,
 };
