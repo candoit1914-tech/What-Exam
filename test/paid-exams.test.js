@@ -274,7 +274,7 @@ test('a free exam grades the first answer instead of re-sending question 1', asy
 
 // ── paid papers ───────────────────────────────────────────────────────
 
-test('a paid exam sends the checkout link first, then the invite', async () => {
+test('a paid exam sends only the payment bubble, never the invite', async () => {
   capture();
   paystackStub();
   const eid = makeExam({ pricing: 'paid', amount: 1000 });
@@ -283,10 +283,14 @@ test('a paid exam sends the checkout link first, then the invite', async () => {
   const report = await exam.sendExamToRecipients(eid);
 
   assert.equal(report.sent, 1, 'still one recipient, one delivery report entry');
-  assert.equal(sent.length, 2, 'payment link first, invite second');
-  assert.match(sent[0], /checkout\.paystack\.com/, 'the first message is the Paystack link');
-  assert.ok(sent[0].includes('GHS 10'), 'the message says what it costs');
-  assert.ok(sent[1].includes('INSTRUCTIONS'), 'the invite itself is unchanged, and follows');
+  assert.equal(sent.length, 1, 'one message: the payment bubble, and nothing behind it');
+  assert.match(sent[0], /checkout\.paystack\.com/, 'the message is the Paystack link');
+  assert.ok(sent[0].includes('GHS 10'), 'and it says what it costs');
+  assert.ok(!sent.some((m) => m.includes('INSTRUCTIONS')), 'the invite must not come along');
+  assert.ok(
+    !sent.some((m) => m.includes('Reply *START*')),
+    'the student is never told to START a paper they have not paid for'
+  );
 
   const [payment] = paymentsFor(eid);
   assert.equal(payment.status, 'pending');
@@ -307,6 +311,7 @@ test('a paid checkout can be sent with an approved WhatsApp template', async () 
     const eid = makeExam({ pricing: 'paid', amount: 1000 });
     const student = addStudent(eid);
     await exam.sendExamToRecipients(eid);
+    assert.equal(sentTemplates.length, 1, 'only the payment template goes out — no invite template behind it');
     const paymentTemplate = sentTemplates.find((item) => item.name === 'paid_checkout_test');
     assert.ok(paymentTemplate, 'checkout is delivered by the approved payment template');
     assert.deepEqual(paymentTemplate.params.map((item) => item.text).slice(0, 2), ['Paywall Paper', 'GHS 10']);
@@ -329,6 +334,30 @@ test('a paid exam with no secret key is refused instead of sending a dead link',
     assert.match(res.body.error, /PAYSTACK_SECRET_KEY/);
     assert.equal(sent.length, 0, 'nothing may go out without a gateway behind it');
     assert.equal(paymentsFor(eid).length, 0);
+  } finally {
+    config.paystack.secretKey = SECRET;
+  }
+});
+
+test('a paid send whose link cannot be delivered fails loudly and leaks no invite', async () => {
+  // The API refuses a paid send with no key before anything goes out. This is
+  // the other side of the same rule: the gateway dies after the send has
+  // started, so the recipient must land in the failed column where the retry
+  // cron can find them — not in the sent column with only an apology behind it.
+  capture();
+  config.paystack.secretKey = '';
+  try {
+    const eid = makeExam({ pricing: 'paid', amount: 1000 });
+    addStudent(eid);
+
+    const report = await exam.sendExamToRecipients(eid);
+
+    assert.equal(report.sent, 0, 'nobody received anything usable');
+    assert.equal(report.failed, 1, 'and the report says so');
+    assert.ok(
+      !sent.some((m) => m.includes('INSTRUCTIONS')),
+      'the invite must not leak out behind a dead gateway'
+    );
   } finally {
     config.paystack.secretKey = SECRET;
   }

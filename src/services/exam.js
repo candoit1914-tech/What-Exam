@@ -2232,14 +2232,22 @@ async function sendIntro(session, student, exam, count, template, { force = fals
   }
   if (entry.state === 'sent') return;
   try {
-    // A paid paper leads with the checkout link: paying is the first thing the
-    // student has to do, and the approved payment template is the message a
-    // cold recipient can actually receive. tryDeliverLink never throws — it
-    // falls back to a plain apology — so a gateway hiccup cannot cost the
-    // student their invite, and the link is re-sent on every reply until they
-    // pay. A free exam never enters this branch, so its invite is untouched.
+    // A paid paper sends ONLY the checkout link. The invite is the message
+    // that tells a student to "Reply *START* to this chat to open it" — advice
+    // that is a lie while the paper sits behind a paywall, and a second bubble
+    // they cannot act on until they have paid. The link is the whole
+    // invitation; the instructions arrive with the paper the moment it opens.
+    //
+    // tryDeliverLink swallows its own gateway failures into a plain apology, so
+    // a null back means nothing usable reached the student. Throwing instead of
+    // marking the intro sent keeps the delivery report honest and lets the
+    // retry cron pick the recipient up again.
     if (payments.isPaidExam(exam)) {
-      await payments.tryDeliverLink(student, exam);
+      const link = await payments.tryDeliverLink(student, exam);
+      if (!link) throw new Error('The payment link could not be delivered.');
+      outbox.markSent(entry.id);
+      recordAcceptance(session);
+      return;
     }
     if (template) {
       const values = config.whatsapp.templateParams.length ? config.whatsapp.templateParams
