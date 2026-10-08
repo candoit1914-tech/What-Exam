@@ -308,6 +308,28 @@ ensureColumn('answers', 'answer_image', "TEXT DEFAULT ''");
 ensureColumn('jobs', 'warning', "TEXT DEFAULT ''");
 ensureColumn('questions', 'follow_ups', "TEXT DEFAULT '[]'");
 ensureColumn('question_pool', 'follow_ups', "TEXT DEFAULT '[]'");
+// The template question a pool row was copied from. question_images keys off
+// the TEMPLATE id and the two tables have independent id sequences, so a pool
+// row's own id says nothing about whose figure bubbles it should show — without
+// this the student either saw no math/figure bubbles or another question's.
+ensureColumn('question_pool', 'template_id', 'INTEGER');
+// Pool rows copied before the column existed are matched back by text, which is
+// the same rule topUpPool uses to copy them in the first place. Rows whose
+// template is gone keep NULL and fall back to the old behaviour.
+try {
+  db.exec(
+    `UPDATE question_pool
+        SET template_id = (
+              SELECT q.id FROM questions q
+               WHERE q.exam_id = question_pool.exam_id
+                 AND q.text = question_pool.text
+               ORDER BY q.q_order LIMIT 1
+            )
+      WHERE template_id IS NULL`
+  );
+} catch (err) {
+  console.error('[db] question_pool template backfill failed (continued):', err.message);
+}
 ensureColumn('sessions', 'retry_count', "INTEGER NOT NULL DEFAULT 0");
 ensureColumn('sessions', 'attempt_no', 'INTEGER NOT NULL DEFAULT 1');
 // exams has no settings blob, so the per-exam attempt cap is a plain column.

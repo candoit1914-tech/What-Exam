@@ -478,14 +478,34 @@ router.patch('/exams/:id/sections', (req, res) => {
   try {
     for (const s of incoming) {
       if (!s || !String(s.section_key || '').trim()) continue;
-      const pool = db
-        .prepare('SELECT COUNT(*) c FROM questions WHERE exam_id = ? AND section_key = ? AND is_compulsory = 0')
-        .get(exam.id, String(s.section_key).trim()).c;
+      const key = String(s.section_key).trim();
       const want = Math.max(0, parseInt(s.answer_count, 10) || 0);
+      let pool = db
+        .prepare('SELECT COUNT(*) c FROM questions WHERE exam_id = ? AND section_key = ? AND is_compulsory = 0')
+        .get(exam.id, key).c;
+      if (want > 0 && pool === 0) {
+        // A quota over an empty pool cannot fire: the quota is priced against
+        // the OPTIONAL questions, so with none flagged the rule clamps to
+        // answer-all and the student is never offered a single choice. That is
+        // the shape an imported paper ends up in when the paper's own
+        // instruction could not be read (every question keeps its compulsory
+        // default), and it is also what the card means when it says a section
+        // has "0 optionals". An admin typing a quota for it is saying this
+        // section IS a choice, so flag its questions optional and price the
+        // quota against them.
+        const total = db
+          .prepare('SELECT COUNT(*) c FROM questions WHERE exam_id = ? AND section_key = ?')
+          .get(exam.id, key).c;
+        if (total > 0) {
+          db.prepare('UPDATE questions SET is_compulsory = 0 WHERE exam_id = ? AND section_key = ?')
+            .run(exam.id, key);
+          pool = total;
+        }
+      }
       // Clamp to the real pool: a quota covering every optional question is
       // answer-all, and storing it would show the admin a rule that never fires.
       const count = Math.min(want, pool);
-      upsert.run(exam.id, String(s.section_key).trim(), String(s.title || ''),
+      upsert.run(exam.id, key, String(s.title || ''),
         String(s.instructions || ''), parseInt(s.position, 10) || 0, count);
     }
     const keep = incoming.map((s) => String(s && s.section_key || '').trim()).filter(Boolean);
@@ -937,15 +957,15 @@ router.post('/exams/:id/generate', asyncWrap(async (req, res) => {
 
   let nextOrder = (db.prepare('SELECT MAX(q_order) m FROM questions WHERE exam_id = ?').get(exam.id).m || 0) + 1;
   const insert = db.prepare(
-    `INSERT INTO questions (exam_id, q_order, type, text, passage, options, correct_answer, marks, difficulty, learning_objective, explanation, source, image)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`
+    `INSERT INTO questions (exam_id, q_order, type, text, passage, options, correct_answer, marks, difficulty, learning_objective, explanation, source, image, follow_ups)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
   );
   // The AI ingest writes the pool and the template questions separately; both must
   // carry the same selection flags, or a drawn pool and the admin's question list
   // disagree about what is compulsory.
   const insertPool = db.prepare(
-    `INSERT INTO question_pool (exam_id, type, text, passage, options, correct_answer, marks, difficulty, learning_objective, explanation, scheme_json, source, image)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`
+    `INSERT INTO question_pool (exam_id, type, text, passage, options, correct_answer, marks, difficulty, learning_objective, explanation, scheme_json, source, image, follow_ups)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
   );
   const created = [];
   for (const g of active) {
@@ -958,7 +978,8 @@ router.post('/exams/:id/generate', asyncWrap(async (req, res) => {
         g.difficulty || 'medium', g.learning_objective || '', g.explanation || '', 'ai',
         // A generated diagram is a real artefact: dropping it here left the
         // student with an unanswerable question and no error anywhere.
-        g.image || ''
+        g.image || '',
+        '[]'
       );
       created.push(info.lastInsertRowid);
       const oq = db.prepare('SELECT * FROM questions WHERE id = ?').get(info.lastInsertRowid);
@@ -975,7 +996,11 @@ router.post('/exams/:id/generate', asyncWrap(async (req, res) => {
       const info = insert.run(
         exam.id, nextOrder, 'theory', g.text, g.passage || '', null, null,
         parseFloat(g.marks) || 5, g.difficulty || 'medium', g.learning_objective || '', '', 'ai',
-        g.image || ''
+        g.image || '',
+        // The follow-ups generated alongside the diagram — the parts the figure
+        // is there to be read for. They were built, logged and then dropped
+        // here, so the chat showed the picture with nothing to answer under it.
+        JSON.stringify(ai.normalizeFollowUps(g.follow_ups))
       );
       created.push(info.lastInsertRowid);
       const q = db.prepare('SELECT * FROM questions WHERE id = ?').get(info.lastInsertRowid);
@@ -1002,7 +1027,8 @@ router.post('/exams/:id/generate', asyncWrap(async (req, res) => {
           parseFloat(g.marks) || 1, g.difficulty || 'medium', g.learning_objective || '', g.explanation || '',
           JSON.stringify({ type: 'objective', correct_answer: correct || null, marks: parseFloat(g.marks) || 1, explanation: g.explanation || '' }),
           'ai',
-          g.image || ''
+          g.image || '',
+          '[]'
         );
     } else {
         insertPool.run(
@@ -1017,7 +1043,8 @@ router.post('/exams/:id/generate', asyncWrap(async (req, res) => {
             grammar_marks: g.grammar_marks || 0,
           }),
           'ai',
-          g.image || ''
+          g.image || '',
+          JSON.stringify(ai.normalizeFollowUps(g.follow_ups))
         );
     }
   }

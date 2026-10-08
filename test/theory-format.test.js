@@ -82,13 +82,27 @@ const answerCount = (sid) =>
 
 // ── layout ────────────────────────────────────────────────────────────
 
-test('sub-questions are spread out under the main question', () => {
+test('sub-questions are spread out under the main question, numbered 1a, 1b', () => {
+  assert.equal(
+    exam.formatSubQuestions({ type: 'theory', follow_ups: JSON.stringify(SUBS) }, 1),
+    '*Sub-questions:*\n\n' +
+      '*1a)* Define evaporation.\nMarks: 2\n\n' +
+      '*1b)* Name two sources of water.\nMarks: 3',
+    'each sub-question in its own block, carrying the number it belongs to'
+  );
+});
+
+test('a part without a number on hand is lettered on its own', () => {
+  // A caller that has no display number (a report, a preview) still gets the
+  // limbs apart and lettered; only the parent number is missing.
   assert.equal(
     exam.formatSubQuestions({ type: 'theory', follow_ups: JSON.stringify(SUBS) }),
-    '*Sub-questions:*\n\n' +
-      '*(a)* Define evaporation.\nMarks: 2\n\n' +
-      '*(b)* Name two sources of water.\nMarks: 3',
-    'each sub-question in its own block, one blank line above it'
+    '*Sub-questions:*\n\n*a)* Define evaporation.\nMarks: 2\n\n*b)* Name two sources of water.\nMarks: 3'
+  );
+  assert.equal(
+    exam.formatSubQuestions({ type: 'theory', follow_ups: JSON.stringify(SUBS) }, 7),
+    '*Sub-questions:*\n\n*7a)* Define evaporation.\nMarks: 2\n\n*7b)* Name two sources of water.\nMarks: 3',
+    'the number is the question the parts belong to, not the count of parts'
   );
 });
 
@@ -104,7 +118,7 @@ test('a question with no sub-questions produces nothing to insert', () => {
   assert.equal(exam.formatSubQuestions(null), '');
 });
 
-test('sub-questions letter from (a) with no gaps and no undefined marks', () => {
+test('sub-questions letter from 1a with no gaps and no undefined marks', () => {
   const out = exam.formatSubQuestions({
     type: 'theory',
     follow_ups: JSON.stringify([
@@ -112,11 +126,11 @@ test('sub-questions letter from (a) with no gaps and no undefined marks', () => 
       { text: 'Define condensation.' }, // no marks value on this row
       { text: 'Name a cloud form.', marks: 0 },
     ]),
-  });
+  }, 1);
 
-  assert.ok(out.includes('*(a)* Define condensation.'), 'the first real sub-question is (a)');
-  assert.ok(out.includes('*(b)* Name a cloud form.'), 'the next is (b), not (c)');
-  assert.doesNotMatch(out, /\*\(c\)\*/, 'the dropped entry leaves no gap behind it');
+  assert.ok(out.includes('*1a)* Define condensation.'), 'the first real sub-question is 1a');
+  assert.ok(out.includes('*1b)* Name a cloud form.'), 'the next is 1b, not 1c');
+  assert.doesNotMatch(out, /\*1c\)\*/, 'the dropped entry leaves no gap behind it');
   assert.doesNotMatch(out, /Marks: undefined/, 'a missing mark value is never printed as undefined');
   assert.doesNotMatch(out, /Marks: 0/, 'a zero mark value is not shown either');
 });
@@ -135,8 +149,13 @@ test('the question arrives numbered, spaced, with the timer last', async () => {
     'a blank line separates the main question from the first sub-question'
   );
   assert.ok(
-    message.includes('*(a)* Define evaporation.\nMarks: 2\n\n*(b)* Name two sources of water.\nMarks: 3'),
-    'the sub-questions are vertical, one block each'
+    message.includes('*1a)* Define evaporation.\nMarks: 2\n\n*1b)* Name two sources of water.\nMarks: 3'),
+    'the sub-questions are vertical, one block each, numbered under question 1'
+  );
+  assert.doesNotMatch(
+    message,
+    /\*QUESTION 2\*/,
+    'a sub-question is part of question 1, never a question of its own'
   );
   assert.match(
     message,

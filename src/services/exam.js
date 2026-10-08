@@ -334,8 +334,8 @@ function topUpPool(examId, currentPool, target) {
   const inPool = new Set(currentPool.map((r) => String(r.text || '').trim()));
   const templates = db.prepare('SELECT * FROM questions WHERE exam_id = ? ORDER BY q_order').all(examId);
   const insertPool = db.prepare(
-    `INSERT INTO question_pool (exam_id, type, text, passage, options, correct_answer, marks, difficulty, learning_objective, explanation, scheme_json, source, image, is_compulsory, section_key)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+    `INSERT INTO question_pool (exam_id, type, text, passage, options, correct_answer, marks, difficulty, learning_objective, explanation, scheme_json, source, image, is_compulsory, section_key, follow_ups, template_id)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
   );
   let added = 0;
   for (const t of templates) {
@@ -347,7 +347,12 @@ function topUpPool(examId, currentPool, target) {
       examId, t.type, t.text, t.passage || '', t.options || null, t.correct_answer || null,
       t.marks, t.difficulty || 'medium', t.learning_objective || '', t.explanation || '',
       scheme ? scheme.scheme : '', t.source || 'manual', t.image || '',
-      t.is_compulsory == null ? 1 : t.is_compulsory, t.section_key || ''
+      t.is_compulsory == null ? 1 : t.is_compulsory, t.section_key || '',
+      JSON.stringify(ai.normalizeFollowUps(t.follow_ups)),
+      // Point back at the row this was copied from rather than copying its
+      // question_images: the two tables' ids are independent, so a copy can
+      // land on an id another question already owns.
+      t.id
     );
     inPool.add(text);
     added++;
@@ -556,10 +561,16 @@ function formatQuestion(exam, question, qCount, body, session, displayNumber = n
  * continuation of (a)'s marks line; spaced, each one is a separate thing to
  * answer under the same question number.
  *
+ * Each part carries the NUMBER it belongs to — `1a)`, `1b)`, `1c)` — because a
+ * sub-question is not a question of its own: it is part of question 1. The
+ * number comes from the caller (the same display number the QUESTION header
+ * uses), so the bubble can never label a part "2a" under a bubble headed
+ * "QUESTION 1".
+ *
  * Returns '' when there is nothing to show, so a caller can treat it as just
  * another part of the message.
  */
-function formatSubQuestions(question) {
+function formatSubQuestions(question, displayNumber = null) {
   if (!question || String(question.type) !== 'theory') return '';
   let followUps;
   try {
@@ -570,14 +581,15 @@ function formatSubQuestions(question) {
   }
   if (!Array.isArray(followUps)) return '';
 
+  const number = displayNumber == null || displayNumber === '' ? '' : String(displayNumber);
   const blocks = [];
   for (const fu of followUps) {
     const text = fu ? String(fu.text || '').trim() : '';
     if (!text) continue;
     const marks = fu && Number.isFinite(Number(fu.marks)) && Number(fu.marks) > 0 ? `\nMarks: ${fu.marks}` : '';
     // Lettered from the kept blocks, so a malformed entry cannot leave a gap
-    // in the student's (a), (b), (c).
-    blocks.push(`*(${String.fromCharCode(97 + blocks.length)})* ${text}${marks}`);
+    // in the student's 1a, 1b, 1c.
+    blocks.push(`*${number}${String.fromCharCode(97 + blocks.length)})* ${text}${marks}`);
   }
   if (!blocks.length) return '';
   return `*Sub-questions:*\n\n${blocks.join('\n\n')}`;
@@ -988,9 +1000,14 @@ async function sendQuestionTo(session, student, qOrder = null) {
   // the figure first, then the full question that refers to it. Math
   // expressions imported from PDFs are stored in question_images (position
   // order); fall back to the legacy single questions.image for everything else.
+  //
+  // question_images hangs off the TEMPLATE question, and a drawn attempt reads
+  // a pool row whose own id comes from a different table's sequence — so the
+  // template it was copied from is the id whose bubbles it must show.
+  const imageOwnerId = question.template_id || question.id;
   const mathImages = db
     .prepare('SELECT image FROM question_images WHERE question_id = ? ORDER BY position')
-    .all(question.id);
+    .all(imageOwnerId);
   if (mathImages.length) {
     for (const row of mathImages) {
       await wa.sendImage(student.phone, path.join(config.uploadsDir, row.image)).catch((err) => {
@@ -1010,7 +1027,7 @@ async function sendQuestionTo(session, student, qOrder = null) {
     const options = safeParseOptions(question.options);
     parts.push(options.map((o) => `${o.key}. ${o.text}`).join('\n'));
   }
-  const subQuestions = formatSubQuestions(question);
+  const subQuestions = formatSubQuestions(question, displayNumbersFromSequence(sequence).get(question.id));
   if (subQuestions) parts.push(subQuestions);
 
   // Place the timer BELOW the answer options so students see the question,
@@ -1265,7 +1282,7 @@ async function sendPaidStartTemplate(session, student, exam, firstQ) {
     const bubbles = buildQuestionBubbles(exam, firstQ, sequence, index, session);
     // The same vertical, spaced layout the ordinary question message uses, so
     // a paper opened through the payment template reads like any other paper.
-    const subQuestions = formatSubQuestions(firstQ);
+    const subQuestions = formatSubQuestions(firstQ, displayNumbersFromSequence(sequence).get(firstQ.id));
     const details = [
       ...bubbles,
       ...(firstQ.type === 'objective'

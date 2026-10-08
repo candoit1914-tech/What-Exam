@@ -7,6 +7,22 @@ const config = require('../config');
 // ── Marking scheme generation ──────────────────────────────────────────
 
 /**
+ * The question the examiner has to read: the stem plus its parts.
+ *
+ * A theory question with (a), (b), (c) under it is ONE question to the student
+ * — they answer all of it in one message — so a scheme built from the stem
+ * alone cannot mark what they wrote. The parts are lettered here the way the
+ * chat letters them, under the number that carries them.
+ */
+function questionTextWithParts(question) {
+  const stem = String((question && question.text) || '');
+  const parts = ai.normalizeFollowUps(question && question.follow_ups);
+  if (!parts.length) return stem;
+  const limbs = parts.map((fu, i) => `${String.fromCharCode(97 + i)}) ${fu.text}`);
+  return [stem, ...limbs].filter(Boolean).join('\n');
+}
+
+/**
  * Build a marking scheme for a question. Objective schemes are derived
  * automatically from the stored correct answer. Theory schemes are
  * AI-generated when they do not already exist.
@@ -30,7 +46,7 @@ async function buildMarkingScheme(question) {
     if (ai.aiConfigured()) {
       try {
         generated = await ai.generateTheoryScheme({
-          text: question.text,
+          text: questionTextWithParts(question),
           marks: question.marks,
           difficulty: question.difficulty,
         });
@@ -211,7 +227,7 @@ async function markTheoryAnswer(question, studentAnswer, scheme) {
 
   try {
     const result = await ai.markTheory({
-      questionText: question.text,
+      questionText: questionTextWithParts(question),
       modelAnswer: sch?.model_answer || '',
       keyPoints: sch?.key_points || [],
       rubric: sch?.rubric || [],
@@ -503,6 +519,7 @@ function recomputeExamTotal(examId) {
 
 module.exports = {
   buildMarkingScheme,
+  questionTextWithParts,
   getScheme,
   schemeHasContent,
   normalizeAnswer,

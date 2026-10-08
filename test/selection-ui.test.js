@@ -68,6 +68,34 @@ test('sections from both sources merge without duplicating a key', () => {
   assert.deepEqual(rows.map((r) => r.section_key), ['section-b', 'section-c', 'section-d']);
 });
 
+test('a section that exists only on the questions gets a row, so a quota can be typed', () => {
+  // An import can save the grouping while failing to read the paper's own
+  // instruction, leaving no exam_sections row at all. With no row the card has
+  // no input, and the choice the paper clearly offers can never be set — which
+  // is how a section ends up with nothing to select from in the chat.
+  const rows = ui.ruleRows([], [], [
+    { section_key: 'section-b', is_compulsory: 1 },
+    { section_key: 'section-b', is_compulsory: 0 },
+    { section_key: 'section-b', is_compulsory: 0 },
+    { section_key: '', is_compulsory: 1 },
+  ]);
+  assert.equal(rows.length, 1, 'the section is listed from its questions alone');
+  assert.equal(rows[0].section_key, 'section-b', 'a question with no section does not invent one');
+  assert.equal(rows[0].pool, 2, 'the pool is what the server will clamp the quota against');
+  assert.equal(rows[0].compulsory, 1);
+  assert.equal(rows[0].answer_count, 0, 'and it starts at answer-all until a quota is typed');
+});
+
+test('the resolved plan still wins over the raw questions for a known key', () => {
+  const rows = ui.ruleRows(
+    [{ section_key: 'section-b', title: 'SECTION B', answer_count: 2 }],
+    [PLAN],
+    [{ section_key: 'section-b', is_compulsory: 1 }] // stale list, all compulsory
+  );
+  assert.equal(rows[0].pool, 3, 'the plan carries the server\u2019s resolved pool, not a re-count');
+  assert.equal(rows[0].answer_count, 2);
+});
+
 test('the row hint states the ceiling so the quota is never a surprise', () => {
   const [row] = ui.ruleRows([], [PLAN]);
   assert.equal(ui.rowHint(row), '3 optionals · 1 compulsory');
@@ -159,6 +187,16 @@ test('the exam page renders a selection-rules card and a save path', () => {
   assert.match(app, /function saveSelectionRules/);
   assert.match(app, /\/api\/exams\/\$\{examId\}\/sections/);
   assert.match(app, /selectionRulesCardHTML\(id,/, 'the card is rendered in the questions tab');
+  assert.match(
+    app,
+    /selectionRulesCardHTML\(id, examState\.data\.sections \|\| \[\], examState\.data\.selection \|\| \[\], examState\.data\.questions \|\| \[\]\)/,
+    'the questions are passed in: a section with no stored rule has no row without them'
+  );
+  assert.match(
+    app,
+    /max="\$\{r\.pool \|\| \(r\.pool \+ r\.compulsory\)\}"/,
+    'a section whose questions are all compulsory still accepts a quota — saving it is what makes them optional'
+  );
 });
 
 test('a compulsory question is badged in the list', () => {

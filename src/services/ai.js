@@ -1627,6 +1627,9 @@ Theory:
   "section": "SECTION B",  // the section heading this question sits under, verbatim; "" if the paper has no sections
   "compulsory": false,     // true ONLY if the paper forces this exact question
   "text": "stem",
+  "follow_ups": [          // the numbered question's OWN parts — (a), (b), (c) or (i), (ii) — with the label removed from text
+    { "text": "part text", "marks": 2 }
+  ],
   "passage": "",     // full passage/context this question is based on, else ""
   "marks": 5,
   "difficulty": "easy|medium|hard",
@@ -1640,6 +1643,7 @@ Theory:
 
 Rules:
 - Preserve each question's original number from the paper in the "number" field (as an integer, e.g. "number": 1) and DROP the number from the text. Keep any instruction that is part of the question stem (e.g. "Read the passage below and answer questions 1 to 5.") inside text when it belongs to a single question, otherwise it stays as context.
+- SUB-QUESTIONS: the parts of a numbered question — "(a) …", "(b) …", "(c) …" or "(i) …", "(ii) …" — are NOT questions of their own and must NEVER be returned as separate entries with their own "number". Put them in the parent question's "follow_ups" array, with the letter or roman label removed from each text, keeping every mark allocation. Only a question with no numbered question above it (a comprehension passage's lettered questions) is an entry of its own.
 - If the document contains an answer key (e.g. "Answers: 1-B, 2-C" or similar), use it to fill correct_answer (the option LETTER) AND correct_index (the 0-based position of that option in the options array you return).
 - If options are numbered 1-4 with possible answers, infer the letter as A-D.
 - KEEP the options in the exact order and with the exact letters they have on the paper.
@@ -1914,7 +1918,11 @@ Rules:
     q.passage = stripMarkers(q.passage);
     if (Array.isArray(q.options)) q.options = q.options.map((o) => (typeof o === 'string' ? stripMarkers(o) : o));
   }
-  return all;
+  // Fold "(a) / (b) / (c)" limbs back under the question that carries their
+  // number, so they are delivered as 1a, 1b, 1c in one bubble instead of
+  // being numbered 2, 3, 4 as questions of their own. Last, so every figure
+  // has already been attached to the entry that holds it and travels up.
+  return mergeSubQuestions(all);
 }
 
 // A numbered question line, e.g. "1. What is..." or "12) State...". Also
@@ -1924,6 +1932,144 @@ Rules:
 // not match.
 const QUESTION_START =
   /^\s*(?:\d{1,3}\s*[.)](?:\s+\S|\s*$)|\(\s*[a-j]\s*\)(?:\s+\S|\s*$))/;
+
+// ── Sub-questions ───────────────────────────────────────────────────────
+//
+// A paper spreads one numbered question over parts — "(a) Define…", "(b)
+// Explain…", or "(i)…", "(ii)…". The extractor is asked for one entry per
+// QUESTION, and the splitter counts every lettered line as a question start
+// (QUESTION_START), so a model that follows the paper literally hands back
+// each part as its own entry. Left alone, WhatsApp numbers them 1, 2, 3 and
+// the student answers one limb per message — which is what "don't give the
+// sub-questions their own question numbers" is about.
+//
+// The parts belong to the number that carries them, so they are folded back
+// into that question here as `follow_ups` and later printed as 1a, 1b, 1c in
+// the parent's own bubble.
+
+// "(a) Define…" / "a) Define…" / "a. Define…" — the label must be closed by a
+// paren or a separator, so prose that merely starts with a letter ("a
+// phenomenon", "acid rain") never reads as a part.
+const LETTER_PART = /^\s*(?:\(\s*)?([a-hA-H])(?:\s*\)|[.:-])\s*(?=\S)/;
+// Roman limbs are matched apart from letters: "i" would otherwise read as the
+// letter i and "(ii)" would not match at all.
+const ROMAN_PART = /^\s*\(\s*(i{1,3}|iv|v)\s*\)\s*[.:-]?\s*(?=\S)/i;
+const ROMANS = ['i', 'ii', 'iii', 'iv', 'v', 'vi', 'vii', 'viii', 'ix', 'x'];
+
+/** The part label a follow-up of this kind carries next, or null when the run is done. */
+function nextSubLabel(kind, label) {
+  if (kind === 'letter') {
+    const next = String(label).toLowerCase().charCodeAt(0) + 1;
+    return next <= 'h'.charCodeAt(0) ? String.fromCharCode(next) : null;
+  }
+  const i = ROMANS.indexOf(String(label).toLowerCase());
+  return i >= 0 && i + 1 < ROMANS.length ? ROMANS[i + 1] : null;
+}
+
+/** `{kind, label, rest}` when the text opens with a part label, else null. */
+function subLabelOf(text) {
+  const s = String(text || '');
+  const letter = s.match(LETTER_PART);
+  if (letter) return { kind: 'letter', label: letter[1].toLowerCase(), rest: s.slice(letter[0].length).trim() };
+  const roman = s.match(ROMAN_PART);
+  if (roman) return { kind: 'roman', label: roman[1].toLowerCase(), rest: s.slice(roman[0].length).trim() };
+  return null;
+}
+
+/** `follow_ups` in whatever shape it arrived, as a clean array. Never throws. */
+function normalizeFollowUps(raw) {
+  let value = raw;
+  if (typeof value === 'string') {
+    if (!value.trim()) return [];
+    try {
+      value = JSON.parse(value);
+    } catch {
+      return [];
+    }
+  }
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((fu) => ({
+      text: String((fu && fu.text) || '').trim(),
+      marks: Number(fu && fu.marks) > 0 ? Number(fu.marks) : 0,
+      difficulty: String((fu && fu.difficulty) || 'medium'),
+    }))
+    .filter((fu) => fu.text);
+}
+
+/**
+ * Fold a question's parts back under the question that carries their number.
+ *
+ * Two signals, because models disagree about how to hand the parts over:
+ *   1. the label run — the parent's next part is "(a)" then "(b)" then "(c)";
+ *   2. the printed number — an entry the model re-issued under its parent's
+ *      own number is that question's part even when it dropped the label.
+ *
+ * Only a numbered, label-free THEORY stem opens a run, so a passage's own
+ * lettered comprehension questions (which have no numbered question above
+ * them) are never collapsed into one another.
+ */
+function mergeSubQuestions(list) {
+  const out = [];
+  let parent = null;   // the question currently accepting parts
+  let stage = null;    // null = closed, 'first' = any label, else {kind, label}
+
+  const accepts = (q, part) => {
+    if (!parent || parent.type !== 'theory' || q.type !== 'theory') return false;
+    if (stage === 'first') return !!part;
+    if (!stage || !part) return false;
+    return stage.kind === part.kind && stage.label === part.label;
+  };
+
+  const sameNumber = (q) => {
+    if (!parent || parent.type !== 'theory' || q.type !== 'theory') return false;
+    const a = Number(parent.number);
+    const b = Number(q.number);
+    if (!a || !b || a !== b) return false;
+    const sec = (x) => String((x && x.section) || '').trim();
+    return sec(q) === sec(parent);
+  };
+
+  for (const q of Array.isArray(list) ? list : []) {
+    if (!q || typeof q !== 'object') {
+      out.push(q);
+      parent = null;
+      stage = null;
+      continue;
+    }
+    const part = subLabelOf(q.text);
+    if ((part && accepts(q, part)) || (!part && sameNumber(q))) {
+      const parts = normalizeFollowUps(parent.follow_ups);
+      parts.push({
+        text: part ? part.rest : String(q.text || '').trim(),
+        marks: Number(q.marks) > 0 ? Number(q.marks) : 0,
+        difficulty: String(q.difficulty || 'medium'),
+      });
+      parent.follow_ups = parts;
+      // The parts are read against the figure — a photo or diagram the model
+      // handed to one of them travels up with the group, or the student is
+      // asked to answer a question they cannot see.
+      if (!parent.image && q.image) parent.image = q.image;
+      if (parent.markerIndex == null && q.markerIndex != null) parent.markerIndex = q.markerIndex;
+      if (part && stage === 'first') stage = { kind: part.kind, label: nextSubLabel(part.kind, part.label) };
+      else if (part && stage) stage = { kind: stage.kind, label: nextSubLabel(stage.kind, stage.label) };
+      if (stage && stage.label == null) stage = null; // ran past the last letter/roman
+      // Its marks belong to the question now: a student answers the parts in
+      // one message, so the question has to be worth what its parts add up to.
+      const partsTotal = parts.reduce((sum, fu) => sum + (Number(fu.marks) || 0), 0);
+      if (partsTotal > (Number(parent.marks) || 0)) parent.marks = partsTotal;
+      continue;
+    }
+
+    out.push(q);
+    // A label-free theory stem may open a run of parts; a question that is
+    // itself lettered is a part of something that was never seen, so it stays
+    // a question of its own (comprehension (a)–(f) with no number above them).
+    parent = q.type === 'theory' && !part ? q : null;
+    stage = parent ? 'first' : null;
+  }
+  return out;
+}
 
 // An answer-option line, e.g. "A. Accra", "B) Gold", "(C) Yes". Requires a
 // real separator after the letter so a prose word like "Accra" or "Cape
@@ -2983,6 +3129,8 @@ module.exports = {
   logGeneratedQuestions,
   deduplicateAgainstHistory,
   extractQuestionsFromText,
+  mergeSubQuestions,
+  normalizeFollowUps,
   answerObjectiveQuestions,
   resolveObjectiveAnswer,
   verifyObjectiveAnswers,

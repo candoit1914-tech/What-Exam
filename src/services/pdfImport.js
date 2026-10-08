@@ -323,8 +323,8 @@ async function startJob(jobId, buffer, opts = {}) {
     let nextOrder =
       (db.prepare('SELECT MAX(q_order) m FROM questions WHERE exam_id = ?').get(job.exam_id).m || 0) + 1;
     const insert = db.prepare(
-      `INSERT INTO questions (exam_id, q_order, type, text, passage, options, correct_answer, marks, difficulty, learning_objective, explanation, source, image, section_key, source_number)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+      `INSERT INTO questions (exam_id, q_order, type, text, passage, options, correct_answer, marks, difficulty, learning_objective, explanation, source, image, section_key, source_number, follow_ups)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
     );
 
     // Reading-comprehension papers share one passage across a run of
@@ -387,7 +387,7 @@ async function startJob(jobId, buffer, opts = {}) {
         const info = insert.run(
           job.exam_id, nextOrder, 'objective', g.text, passage, JSON.stringify(opts),
           correct, marks, g.difficulty || 'medium', g.learning_objective || '', explanation, 'pdf', imageFile,
-          slugOf(g.section), Number(g.number) || 0
+          slugOf(g.section), Number(g.number) || 0, '[]'
         );
         created.push(info.lastInsertRowid);
         savedRows.push(info.lastInsertRowid);
@@ -405,7 +405,12 @@ async function startJob(jobId, buffer, opts = {}) {
         const info = insert.run(
           job.exam_id, nextOrder, 'theory', g.text, passage, null, null,
           parseFloat(g.marks) || 5, g.difficulty || 'medium', g.learning_objective || '', '', 'pdf', imageFile,
-          slugOf(g.section), Number(g.number) || 0
+          slugOf(g.section), Number(g.number) || 0,
+          // The limbs the extractor folded back under this number (1a, 1b…).
+          // They are what the chat prints under the stem and what the marking
+          // scheme is built from, so dropping them here would leave a
+          // question the student cannot fully answer or be marked on.
+          JSON.stringify(ai.normalizeFollowUps(g.follow_ups))
         );
         const q = db.prepare('SELECT * FROM questions WHERE id = ?').get(info.lastInsertRowid);
         created.push(q.id);
@@ -513,32 +518,96 @@ function slugOf(section) {
 }
 
 /**
- * Read the "answer any N of M" limit out of the section instruction the extractor
- * preserved on the first question of each section. The instruction text lands in
- * `passage` (see the SECTION INSTRUCTIONS prompt rule), so the count has to be
- * recovered from there; anything not recognised is simply left at 0, which means
+ * The one section a paper with no headings is given, so its "answer any N"
+ * limit has a key to be stored under — exam_sections points at a key, and a
+ * missing key is how a limit silently became answer-all.
+ */
+const PAPER_SECTION_KEY = 'paper';
+
+/**
+ * Read "how many of these must be answered" out of a section instruction.
+ *
+ * The extractor keeps those instructions in `passage` (see the SECTION
+ * INSTRUCTIONS prompt rule), so the count has to be recovered from prose —
+ * there is no structured field. Real papers word it every way there is:
+ * "Answer any THREE questions", "Answer 2 questions", "Answer only three of
+ * the five questions", "Answer 3 out of 5", "Attempt ONE question", "Choose
+ * TWO questions to answer". Anything not recognised returns 0, which means
  * answer-all and therefore no rule.
  */
+function answerCountFrom(raw) {
+  const text = String(raw || '');
+  const words = {
+    one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10,
+    eleven: 11, twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15, twenty: 20,
+  };
+  const toNum = (value) => (/^\d+$/.test(value) ? parseInt(value, 10) : words[String(value).toLowerCase()] || 0);
+  // `all` / `any` / `only` / `the` / `a` are filler, never a count, and a word
+  // that is not in the map must not be read as a number.
+  const patterns = [
+    // "Answer any 3 of the 5 questions", "Answer 3 out of 5 questions",
+    // "Answer TWO of the FIVE questions" — the count asked for comes first.
+    /\b(?:answer|attempt|choose|select|pick)\b[^.?!]{0,40}?\b(\d{1,2}|[a-z]+)(?:\s*\(\d+\))?\s+(?:out\s+of|of)\s+(?:the\s+)?\b(?:\d{1,2}|[a-z]+)\b/i,
+    // "Answer only THREE questions", "Answer 2 questions", "Attempt ONE question".
+    /\b(?:answer|attempt|choose|select|pick)\s+(?:all\s+|any\s+|only\s+|the\s+|a\s+)?(\d{1,2}|[a-z]+)(?:\s*\(\d+\))?\s+questions?\b/i,
+    // The count without a verb in front of it: "3 of the 5 questions".
+    /\b(\d{1,2})\s+(?:out\s+of|of)\s+(?:the\s+)?(?:\d{1,2})\s+questions?\b/i,
+  ];
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (!match) continue;
+    const count = toNum(match[1]);
+    if (count > 0) return count;
+  }
+  return 0;
+}
+
+/**
+ * Build the per-section rule facts from the extraction's own questions.
+ *
+ * Sections are keyed on the heading the model returned verbatim. A paper with
+ * NO headings at all still carries its limit on the first question, so that
+ * case is returned under the empty key instead of being dropped — dropping it
+ * is what left a headingless paper with no way to ever offer a choice.
+ */
 function buildSectionMeta(questions) {
+  const list = Array.isArray(questions) ? questions : [];
   const meta = {};
-  for (const q of Array.isArray(questions) ? questions : []) {
+  const anySection = list.some((q) => String((q && q.section) || '').trim());
+
+  const factsFor = (q) => ({
+    title: String((q && q.section) || '').trim(),
+    instructions: String((q && q.instructions) || ''),
+    answer_count: answerCountFrom(`${(q && q.instructions) || ''} ${(q && q.passage) || ''}`),
+  });
+
+  if (!anySection) {
+    const entries = list.filter(Boolean).map(factsFor);
+    if (entries.length) {
+      // The instruction may sit on any question, and only one that states a
+      // count matters; the first is kept when none does.
+      meta[''] = entries.find((e) => e.answer_count > 0) || entries[0];
+    }
+    return meta;
+  }
+
+  for (const q of list) {
     const section = String((q && q.section) || '').trim();
-    if (!section || meta[section]) continue;
-    const text = `${q.instructions || ''} ${q.passage || ''}`;
-    // "Answer any TWO questions", "Answer TWO (2) questions", "Answer 2 questions".
-    const words = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
-    // "Answer all FOUR", "Answer any TWO", "Answer 2" — `all`/`any` is filler, not
-    // a count, and a word here must not be read as a digit.
-    const byWord = text.match(/answer\s+(?:all\s+|any\s+)?(\w+)(?:\s*\(\d+\))?\s+(?:of\s+(?:the\s+)?\w+\s+)?questions?/i);
-    const byDigit = text.match(/answer\s+(?:any\s+)?(\d+)\s+(?:of\s+(?:the\s+)?\w+\s+)?questions?/i);
-    let count = 0;
-    if (byDigit) count = parseInt(byDigit[1], 10);
-    else if (byWord && words[String(byWord[1]).toLowerCase()]) count = words[String(byWord[1]).toLowerCase()];
-    meta[section] = {
-      title: section,
-      instructions: String(q.instructions || ''),
-      answer_count: count,
-    };
+    if (!section) continue;
+    const facts = factsFor(q);
+    const prev = meta[section];
+    // The first question of a section carries its instructions, but extraction
+    // sometimes hangs them on a later one: keep the first's wording, and take
+    // the count from whichever question actually states one.
+    if (!prev) {
+      meta[section] = facts;
+    } else if (prev.answer_count === 0 && facts.answer_count > 0) {
+      meta[section] = {
+        title: prev.title,
+        instructions: facts.instructions || prev.instructions,
+        answer_count: facts.answer_count,
+      };
+    }
   }
   return meta;
 }
@@ -582,12 +651,32 @@ function applySelectionRules(examId, questions, savedQuestions, sectionMeta = {}
     if (!groups.has(section)) groups.set(section, []);
     groups.get(section).push(q);
   }
+  // A paper with no headings at all still states its limit — "Answer any
+  // THREE questions" sits on the first question. Without a key for
+  // exam_sections to point at, that limit could never be stored and the paper
+  // silently answered every question instead of offering a choice, so those
+  // questions are given one shared section.
+  const paperMeta = sectionMeta[''] || sectionMeta[PAPER_SECTION_KEY];
+  if (!groups.size && paperMeta && Math.max(0, parseInt(paperMeta.answer_count, 10) || 0) > 0) {
+    groups.set(PAPER_SECTION_KEY, list);
+  }
 
   db.exec('BEGIN');
   try {
     let position = 0;
     for (const [section, members] of groups) {
-      const key = slugOf(section);
+      const isPaper = section === PAPER_SECTION_KEY;
+      const key = isPaper ? PAPER_SECTION_KEY : slugOf(section);
+      if (isPaper) {
+        // Retag the rows so the rule, the drawn snapshot and the selector all
+        // speak about the same section.
+        db.prepare(
+          "UPDATE questions SET section_key = ? WHERE exam_id = ? AND (section_key IS NULL OR section_key = '')"
+        ).run(key, examId);
+        for (const row of saved) {
+          if (!String(row.section_key || '').trim()) row.section_key = key;
+        }
+      }
       const inSection = saved.filter((q) => String(q.section_key || '') === key);
 
       // Compulsory questions in this section, matched on the printed number.
@@ -609,7 +698,9 @@ function applySelectionRules(examId, questions, savedQuestions, sectionMeta = {}
       const setFlag = db.prepare('UPDATE questions SET is_compulsory = ? WHERE id = ?');
       for (const q of inSection) setFlag.run(forcedIds.has(q.id) ? 1 : 0, q.id);
 
-      const meta = sectionMeta[section] || sectionMeta[key] || {};
+      const meta = isPaper
+        ? paperMeta
+        : (sectionMeta[section] || sectionMeta[key] || {});
       const pool = inSection.length - forcedIds.size;
       const want = Math.max(0, parseInt(meta.answer_count, 10) || 0);
       const count = Math.min(want, pool);
@@ -626,7 +717,7 @@ function applySelectionRules(examId, questions, savedQuestions, sectionMeta = {}
            position=excluded.position, answer_count=excluded.answer_count`
       ).run(
         examId, key,
-        String(meta.title || section),
+        String(meta.title || (isPaper ? 'Paper' : section)),
         String(meta.instructions || ''),
         position++, count
       );
@@ -657,6 +748,8 @@ module.exports = {
   storeMathImages,
   describeExtractionFailure,
   slugOf,
+  PAPER_SECTION_KEY,
+  answerCountFrom,
   buildSectionMeta,
   applySelectionRules,
 };

@@ -13,7 +13,13 @@
   // questions yet (admin set it up first), and questions can carry a section_key
   // with no rule at all (imported grouping, still answer-all). Dropping either
   // group would hide a section the admin needs to see.
-  function ruleRows(sections, selection) {
+  //
+  // `questions` is the third source and the one that makes a rule writable: an
+  // import whose "Answer any N" instruction could not be read saves the
+  // grouping but no exam_sections row, and a section with no row has no input
+  // on this card — so the quota that would finally offer the choice could never
+  // be typed in.
+  function ruleRows(sections, selection, questions) {
     var byKey = {};
     (selection || []).forEach(function (s) { byKey[s.section_key] = s; });
     var stored = {};
@@ -21,12 +27,28 @@
     var keys = [];
     (sections || []).forEach(function (s) { if (keys.indexOf(s.section_key) < 0) keys.push(s.section_key); });
     (selection || []).forEach(function (s) { if (keys.indexOf(s.section_key) < 0) keys.push(s.section_key); });
+    (questions || []).forEach(function (q) {
+      var k = String((q && q.section_key) || '').trim();
+      if (k && keys.indexOf(k) < 0) keys.push(k);
+    });
 
     return keys.map(function (key) {
       var plan = byKey[key] || {};
       var sec = stored[key] || {};
       var optional = plan.optional || [];
       var compulsory = plan.compulsory || [];
+      if (!byKey[key]) {
+        // No resolved plan for this key yet: the pool is what the questions
+        // say right now, which is exactly what the server will clamp against
+        // when the quota is saved.
+        optional = [];
+        compulsory = [];
+        (questions || []).forEach(function (q) {
+          if (String((q && q.section_key) || '').trim() !== key) return;
+          if (Number(q.is_compulsory) === 0) optional.push(q);
+          else compulsory.push(q);
+        });
+      }
       return {
         section_key: key,
         title: sec.title || plan.title || key,

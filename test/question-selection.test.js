@@ -903,6 +903,43 @@ test('PATCH /exams/:id/sections upserts, clamps, and deletes what is gone', asyn
   } finally { await afterRoute(); }
 });
 
+test('a quota saved for a section with nothing optional makes it a choice', async () => {
+  await beforeRoute();
+  try {
+    const eid = db.prepare(
+      "INSERT INTO exams(title,duration_minutes,status) VALUES ('Sec3',30,'published')"
+    ).run().lastInsertRowid;
+    // The shape an import leaves behind when the paper's own instruction could
+    // not be read: every question keeps the compulsory default, so a rule
+    // saved over them would clamp to 0 and the student would never be offered
+    // a single question to choose.
+    for (const t of ['C1', 'C2', 'C3', 'C4']) {
+      db.prepare(
+        `INSERT INTO questions(exam_id,q_order,type,text,marks,is_compulsory,section_key)
+         VALUES (?,?,'theory',?,5,1,'c')`
+      ).run(eid, db.prepare('SELECT COUNT(*) c FROM questions WHERE exam_id=?').get(eid).c + 1, t);
+    }
+
+    const patched = await call('PATCH', `/api/exams/${eid}/sections`, {
+      sections: [{ section_key: 'c', title: 'SECTION C', position: 1, answer_count: 2 }],
+    });
+    assert.equal(patched.status, 200, JSON.stringify(patched.body));
+    assert.equal(
+      patched.body.sections[0].answer_count, 2,
+      'the typed quota survives instead of collapsing to answer-all'
+    );
+
+    const optional = db
+      .prepare('SELECT COUNT(*) c FROM questions WHERE exam_id = ? AND is_compulsory = 0')
+      .get(eid).c;
+    assert.equal(optional, 4, 'the quota means nothing until its questions are optional');
+
+    const got = await call('GET', `/api/exams/${eid}`);
+    assert.equal(got.body.selection[0].quota, 2, 'the plan the dashboard renders carries the live quota');
+    assert.equal(got.body.selection[0].optional.length, 4, 'and every question it may offer');
+  } finally { await afterRoute(); }
+});
+
 test('selection rules are frozen once an exam goes live', async () => {
   await beforeRoute();
   try {
@@ -985,6 +1022,14 @@ test('topUpPool copies the selection columns into the pool', () => {
   assert.equal(pooled.length, 1);
   assert.equal(pooled[0].is_compulsory, 0, 'the pool copy must keep compulsory = 0');
   assert.equal(pooled[0].section_key, 'b');
+  // The limbs live on the template only, so a draw that did not carry them
+  // over would silently deliver the stem with no sub-questions at all.
+  assert.equal(pooled[0].follow_ups, '[]', 'an empty limb list is copied as an empty list');
+  const templated = db.prepare('SELECT id FROM questions WHERE exam_id=?').get(eid);
+  assert.equal(
+    pooled[0].template_id, templated.id,
+    'the pool row points back at its template: figure bubbles hang off that id'
+  );
 });
 
 test('nextInSequence steps over a question the student deselected', () => {

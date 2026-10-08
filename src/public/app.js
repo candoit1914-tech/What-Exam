@@ -693,8 +693,8 @@ function setTab(tab) {
 // everything after it — every `const` below stayed in the temporal dead zone,
 // which is how the Recipients tab ended up rendering nothing.
 /** <summary>for a rule row, using the resolved pool the server reported. */
-function selectionRulesCardHTML(examId, sections, selection) {
-  const rows = SelectionUI.ruleRows(sections, selection);
+function selectionRulesCardHTML(examId, sections, selection, questions) {
+  const rows = SelectionUI.ruleRows(sections, selection, questions);
   if (!rows.length) {
     return `<div class="card" style="margin-top:14px">
       <h3 style="margin-bottom:4px">SELECTION <span class="gr">RULES</span></h3>
@@ -712,7 +712,7 @@ function selectionRulesCardHTML(examId, sections, selection) {
       <div class="field" style="flex:2;min-width:220px"><label>Paper instruction</label>
         <input type="text" data-sinst="${esc(r.section_key)}" value="${esc(r.instructions)}" ${editable ? '' : 'disabled'}></div>
       <div class="field" style="width:120px"><label>Answer any</label>
-        <input type="number" data-scount="${esc(r.section_key)}" min="0" max="${r.pool}" value="${r.answer_count}" ${editable ? '' : 'disabled'}></div>
+        <input type="number" data-scount="${esc(r.section_key)}" min="0" max="${r.pool || (r.pool + r.compulsory)}" value="${r.answer_count}" ${editable ? '' : 'disabled'}></div>
       <div class="muted" style="padding-bottom:10px">of ${SelectionUI.rowHint(r)}</div>
     </div>`).join('')}
     ${editable ? `<div class="row" style="margin-top:14px">
@@ -757,7 +757,7 @@ async function renderTab() {
         <button class="btn btn-ghost" onclick="aiGenerateForm(${id})">${I.spark} AI Generate</button>
         <button class="btn btn-ghost" onclick="pdfUploadForm(${id})">${I.doc} Upload PDF</button>
       </div>
-      ${selectionRulesCardHTML(id, examState.data.sections || [], examState.data.selection || [])}
+      ${selectionRulesCardHTML(id, examState.data.sections || [], examState.data.selection || [], examState.data.questions || [])}
       ${questions.length === 0 ? `<div class="empty-state">${I.empty}<p>No questions yet. Add manually, generate with AI, or upload a PDF.</p></div>` : ''}
       ${questions.map((q, i) => {
         const prev = i > 0 ? questions[i - 1] : null;
@@ -1286,7 +1286,8 @@ function questionFormHTML(q, id) {
     </div>
     <div class="field" id="qf_theory_marks"><label>Marks</label><input type="number" id="qf_marks" value="${q?.marks || (type === 'theory' ? 5 : 1)}" step="0.5"></div>
     <div class="field"><label>Section (paper grouping)</label>
-      <select id="qf_section">${sectionSelectHTML(q?.section_key || '')}</select>
+      <input list="qf_sections" id="qf_section" value="${esc(q?.section_key || '')}" placeholder="— none —">
+      <datalist id="qf_sections">${sectionSelectHTML(q?.section_key || '')}</datalist>
       <p class="muted qmeta">Questions sharing a section are grouped when the paper asks the student to choose.</p>
     </div>
     <div class="field">
@@ -1382,7 +1383,8 @@ async function addQuestionForm(id) {
     <div class="field"><label>Marks</label><input type="number" id="qf_marks" value="1" step="0.5"></div>
     <div class="field"><label>Difficulty</label><select id="qf_diff"><option>easy</option><option selected>medium</option><option>hard</option></select></div>
     <div class="field"><label>Section (paper grouping)</label>
-      <select id="qf_section">${sectionSelectHTML('')}</select>
+      <input list="qf_sections" id="qf_section" value="" placeholder="— none —">
+      <datalist id="qf_sections">${sectionSelectHTML('')}</datalist>
       <p class="muted qmeta">Questions sharing a section are grouped when the paper asks the student to choose.</p>
     </div>
     <div class="field">
