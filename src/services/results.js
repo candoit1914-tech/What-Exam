@@ -200,6 +200,7 @@ function reportHTML(sessionId) {
               COALESCE(p.correct_answer, q.correct_answer) AS correct_answer,
               COALESCE(p.explanation, q.explanation) AS explanation,
               COALESCE(p.image, q.image) AS image,
+              COALESCE(p.template_id, a.question_id) AS owner,
               COALESCE(p.scheme_json, m.scheme) AS scheme
        FROM answers a
        LEFT JOIN session_questions sq ON sq.session_id = a.session_id AND sq.q_order = a.q_order
@@ -210,6 +211,17 @@ function reportHTML(sessionId) {
        ORDER BY a.q_order`
     )
     .all(sessionId);
+  // Every bubble a question carries, in position order, keyed by the TEMPLATE
+  // id question_images hangs off — a drawn attempt reads a pool row copied
+  // from that template, and a legacy pool row has no back-reference at all, in
+  // which case only the primary figure below can be shown.
+  const imagesByOwner = new Map();
+  for (const owner of new Set(answers.map((a) => a.owner).filter((o) => o != null))) {
+    const rows = db
+      .prepare('SELECT image FROM question_images WHERE question_id = ? ORDER BY position')
+      .all(owner);
+    if (rows.length) imagesByOwner.set(owner, rows.map((r) => r.image));
+  }
   const drawn = db.prepare('SELECT COUNT(*) c FROM session_questions WHERE session_id = ?').get(sessionId).c;
   const allQuestions =
     drawn > 0 ? drawn : db.prepare('SELECT COUNT(*) c FROM questions WHERE exam_id = ?').get(exam.id).c;
@@ -288,6 +300,14 @@ function reportHTML(sessionId) {
         if (a.ai_feedback) body += `<p class="feedback">${esc(a.ai_feedback)}</p>`;
       }
 
+      // The figures come FIRST: the reader sees the diagram, then the question
+      // that asks about it — the order the student received them on WhatsApp,
+      // where the figure is always the bubble above the question text.
+      const token = auth.reportToken(sessionId);
+      const figures = [...new Set([...(imagesByOwner.get(a.owner) || []), a.image].filter(Boolean))]
+        .map((file) => `<img class="qimg report-img" src="/report/${sessionId}/attachment?file=${encodeURIComponent(file)}&token=${encodeURIComponent(token)}" alt="diagram">`)
+        .join('');
+
       return `<article class="q-card">
         <header class="q-head">
           <span class="q-num">${numbers.get(a.question_id) || (i + 1)}</span>
@@ -295,8 +315,8 @@ function reportHTML(sessionId) {
           <span class="q-type">${a.max_marks} mark${Number(a.max_marks) === 1 ? '' : 's'}</span>
           <span class="q-status ${isCorrect ? 's-pass' : 's-fail'}">${isCorrect ? 'Correct' : a.needs_review ? 'Review' : 'Incorrect'}</span>
         </header>
+        ${figures}
         <p class="q-text">${a.passage ? `<span class="q-passage">${esc(a.passage)}</span><br><br>` : ''}${esc(a.text)}</p>
-        ${a.image ? `<img class="qimg report-img" src="/report/${sessionId}/attachment?file=${encodeURIComponent(a.image)}&token=${encodeURIComponent(auth.reportToken(sessionId))}" alt="diagram">` : ''}
         ${body}
       </article>`;
     })

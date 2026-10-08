@@ -108,6 +108,22 @@ router.use((req, res, next) => {
   next();
 });
 
+/**
+ * A figure the admin has just replaced or removed takes the imported ones with
+ * it: WhatsApp sends question_images rows in preference to questions.image, so
+ * a stale row would keep showing a diagram that is no longer on the page. The
+ * files are unlinked best-effort — an already-missing file is not an error.
+ */
+function clearFigureRows(questionId) {
+  const rows = db
+    .prepare("SELECT image FROM question_images WHERE question_id = ? AND kind = 'figure'")
+    .all(questionId);
+  db.prepare("DELETE FROM question_images WHERE question_id = ? AND kind = 'figure'").run(questionId);
+  for (const row of rows) {
+    try { fs.unlinkSync(path.join(config.uploadsDir, row.image)); } catch {}
+  }
+}
+
 function qWithScheme(row) {
   const scheme = marking.getScheme(row.id);
   return {
@@ -129,6 +145,33 @@ function qWithScheme(row) {
     section_key: row.section_key || '',
     scheme,
   };
+}
+
+/**
+ * Attach `images` — every stored bubble for the question, in position order —
+ * to each row of a question list. The dashboard prints them above the question
+ * text, the order the chat delivers them in. Chunked so a large paper never
+ * exceeds SQLite's bound-parameter limit.
+ */
+function attachImages(questions) {
+  const byId = new Map(questions.map((q) => [q.id, []]));
+  const CHUNK = 500;
+  for (let i = 0; i < questions.length; i += CHUNK) {
+    const chunk = questions.slice(i, i + CHUNK);
+    const rows = db
+      .prepare(
+        `SELECT question_id, image FROM question_images
+          WHERE question_id IN (${chunk.map(() => '?').join(',')})
+          ORDER BY position`
+      )
+      .all(...chunk.map((q) => q.id));
+    for (const row of rows) {
+      const list = byId.get(row.question_id);
+      if (list) list.push(row.image);
+    }
+  }
+  for (const q of questions) q.images = byId.get(q.id) || [];
+  return questions;
 }
 
 function examSummary(row) {
@@ -268,6 +311,7 @@ router.get('/exams/:id', (req, res) => {
     .prepare('SELECT * FROM questions WHERE exam_id = ? ORDER BY q_order')
     .all(exam.id)
     .map(qWithScheme);
+  attachImages(questions);
   // Ensure objective questions always come before theory questions in the UI
   questions.sort((a, b) => {
     if (a.type === b.type) return a.q_order - b.q_order;
@@ -757,6 +801,7 @@ router.put('/exams/:id/questions/:qid', imageUpload.single('file'), asyncWrap(as
       const oldPath = path.join(config.uploadsDir, q.image);
       try { fs.unlinkSync(oldPath); } catch {}
     }
+    clearFigureRows(q.id);
     const ext = req.file.mimetype === 'image/png' ? 'png' : 'jpg';
     const filename = `${Date.now()}-${exam.id}-q${q.q_order}-manual.${ext}`;
     const filePath = path.join(config.uploadsDir, filename);
@@ -768,6 +813,7 @@ router.put('/exams/:id/questions/:qid', imageUpload.single('file'), asyncWrap(as
       const oldPath = path.join(config.uploadsDir, q.image);
       try { fs.unlinkSync(oldPath); } catch {}
     }
+    clearFigureRows(q.id);
     fields.push('image=?');
     vals.push('');
   }
@@ -817,6 +863,7 @@ router.post('/exams/:id/questions/:qid/image', imageUpload.single('file'), async
   fs.writeFileSync(filePath, req.file.buffer);
 
   db.prepare('UPDATE questions SET image = ? WHERE id = ?').run(filename, q.id);
+  clearFigureRows(q.id);
   res.json({ ok: true, image: filename });
 }));
 
@@ -833,6 +880,7 @@ router.delete('/exams/:id/questions/:qid/image', (req, res) => {
     const filePath = path.join(config.uploadsDir, q.image);
     try { fs.unlinkSync(filePath); } catch {}
   }
+  clearFigureRows(q.id);
   db.prepare('UPDATE questions SET image = ? WHERE id = ?').run('', q.id);
   res.json({ ok: true });
 });

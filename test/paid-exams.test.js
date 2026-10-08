@@ -533,6 +533,68 @@ test('a paid exam can deliver its first question in an approved start template',
   }
 });
 
+test('a paid first question that carries a figure still shows it, window or not', async () => {
+  // The start template is text: a question about a diagram can be handed over
+  // without the diagram, outside the 24-hour window where an image cannot be
+  // sent at all. The bubble is recorded as owed before the attempt, and the
+  // student's first reply — which is what opens the window — pays the debt
+  // before their answer to that question is graded.
+  capture();
+  paystackStub();
+  const previous = config.whatsapp.paidStartTemplateName;
+  config.whatsapp.paidStartTemplateName = 'paid_exam_start_test';
+  const realSendImage = wa.sendImage;
+  const images = [];
+  let rejectFirst = true;
+  wa.sendTemplate = async (phone, name, language, params) => {
+    sentTemplates.push({ phone, name, language, params });
+    return { messages: [{ id: 'mock-template' }] };
+  };
+  wa.sendImage = async (phone, file) => {
+    if (rejectFirst) {
+      rejectFirst = false;
+      throw new Error('(#131047) Session expired');
+    }
+    images.push(String(file).split(/[\\/]/).pop());
+    return { messages: [{ id: 'mock-image' }] };
+  };
+  try {
+    const eid = makeExam({ pricing: 'paid', amount: 1000 });
+    const student = addStudent(eid);
+    db.prepare("UPDATE questions SET image='q1-figure.png' WHERE exam_id=? AND q_order=1").run(eid);
+    await exam.sendExamToRecipients(eid);
+    const [payment] = paymentsFor(eid);
+    const raw = JSON.stringify({
+      event: 'charge.success',
+      data: { reference: payment.reference, amount: 1000, currency: 'GHS', channel: 'mobile_money' },
+    });
+    assert.equal((await postWebhook(raw, sign(raw))).status, 200);
+    await waitFor(
+      () => sentTemplates.some((item) => item.name === 'paid_exam_start_test'),
+      'the approved paid exam start template'
+    );
+
+    const owed = () =>
+      db
+        .prepare("SELECT * FROM message_outbox WHERE kind='figure' AND session_id = ?")
+        .get(sessionFor(eid, student.id).id);
+    assert.ok(owed(), 'the figure is recorded as owed the moment the question goes out');
+    assert.equal(owed().state, 'queued', 'the rejection outside the window leaves it owed, not lost');
+    assert.deepEqual(images, [], 'and nothing was shown before the window opened');
+
+    // The reply that opens the window arrives as an answer: the figure has to
+    // land first, so the student sees the diagram before their answer to the
+    // question it belongs to is graded.
+    await exam.handleInbound(student.phone, 'A');
+    assert.deepEqual(images, ['q1-figure.png'], 'the first reply delivers the figure');
+    assert.equal(owed().state, 'sent', 'the debt retires itself');
+  } finally {
+    config.whatsapp.paidStartTemplateName = previous;
+    wa.sendTemplate = realSendTemplate;
+    wa.sendImage = realSendImage;
+  }
+});
+
 test('payment arms the clock and the first answer is graded at once', async () => {
   capture();
   paystackStub();

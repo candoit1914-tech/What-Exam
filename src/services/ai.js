@@ -694,9 +694,12 @@ async function mapLimit(items, limit, fn) {
  * `text`/`passage`/`options` (for math, which can ride inside option text)
  * contains its verbatim marker line — the AI is told to preserve them; a
  * marker that no question kept falls back to the block's FIRST question.
- * Figures attach as `q.markerIndex` (single); a question may keep several
- * math markers, recorded as `q.markerIndices` in document order. Attach is
- * recorded on the question object only — never as a stored text field.
+ * Figures attach as `q.markerIndex` (the first one, kept for every caller
+ * that means "the figure") plus `q.figureIndices` — a paper can put a map AND
+ * a timetable under one question, and dropping the second leaves the student
+ * answering half a question they cannot see. Math markers are recorded as
+ * `q.markerIndices` in document order. Attach is recorded on the question
+ * object only — never as a stored text field.
  *
  * Returns { used:Set, unused:[], unusedMath:[] } — `unused`/`unusedMath` hold
  * markers whose block yielded no questions at all (skipped blocks), so the
@@ -718,7 +721,12 @@ function attachMarkers(questionsByBlock, markersByBlock, mathByBlock) {
       }
       if (!target && qs.length) target = qs[0];
       if (target) {
-        target.markerIndex = m.idx;
+        // Every figure the question names, in document order. `markerIndex`
+        // stays the first one — a single field cannot hold a second figure,
+        // and overwriting it (the old behaviour) silently lost the first.
+        const figures = (target.figureIndices = target.figureIndices || []);
+        if (!figures.includes(m.idx)) figures.push(m.idx);
+        if (target.markerIndex == null) target.markerIndex = m.idx;
         used.add(m.idx);
       }
     }
@@ -2051,6 +2059,10 @@ function mergeSubQuestions(list) {
       // asked to answer a question they cannot see.
       if (!parent.image && q.image) parent.image = q.image;
       if (parent.markerIndex == null && q.markerIndex != null) parent.markerIndex = q.markerIndex;
+      if (q.figureIndices && q.figureIndices.length) {
+        const figures = (parent.figureIndices = parent.figureIndices || []);
+        for (const idx of q.figureIndices) if (!figures.includes(idx)) figures.push(idx);
+      }
       if (part && stage === 'first') stage = { kind: part.kind, label: nextSubLabel(part.kind, part.label) };
       else if (part && stage) stage = { kind: stage.kind, label: nextSubLabel(stage.kind, stage.label) };
       if (stage && stage.label == null) stage = null; // ran past the last letter/roman

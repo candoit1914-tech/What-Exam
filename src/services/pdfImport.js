@@ -65,14 +65,36 @@ function imageFileNameFor(examId, qOrder, markerIndex, now = Date.now()) {
 }
 
 /**
+ * The [IMG:n] markers a question kept, in document order, deduped and
+ * validated. `figureIndices` is the full set; `markerIndex` is the first one
+ * and is always included, so a question imported before this field existed
+ * (or by a caller that only ever wrote the single field) still renders.
+ */
+function figureMarkersFor(g) {
+  const all = [
+    ...(Array.isArray(g.figureIndices) ? g.figureIndices : []),
+    ...(g.markerIndex != null ? [g.markerIndex] : []),
+  ];
+  return [...new Set(all.filter((i) => Number.isInteger(i) && i >= 0))].sort((a, b) => a - b);
+}
+
+/** How many bubbles a question asks for, figures + maths expressions. */
+function mathMarkerCount(g) {
+  return Array.isArray(g.markerIndices) ? new Set(g.markerIndices).size : 0;
+}
+
+/**
  * Render every math expression a question kept (g.markerIndices) and store it
  * as a question_images row with increasing position, so WhatsApp can send the
  * bubbles in reading order above the question text. Best-effort: a render
  * failure logs and skips that bubble — the question still imports.
  * `mathExprs` is the document-global expression list from textWithMarkers;
- * `pageCache` renders each page at most once.
+ * `pageCache` renders each page at most once. `positionOffset` is where this
+ * batch starts in the question's bubble list — figures are stored first, so
+ * the maths rows continue behind them instead of colliding on the same
+ * position.
  */
-async function storeMathImages(g, questionId, mathExprs, pageCache, buffer, examId, qOrder) {
+async function storeMathImages(g, questionId, mathExprs, pageCache, buffer, examId, qOrder, positionOffset = 0) {
   const result = { requested: 0, attached: 0, failed: 0 };
   if (!Array.isArray(g.markerIndices) || !g.markerIndices.length) return result;
   const indices = [...new Set(g.markerIndices)].sort((a, b) => a - b);
@@ -99,7 +121,7 @@ async function storeMathImages(g, questionId, mathExprs, pageCache, buffer, exam
   for (const image of rows) {
     try {
       db.prepare(`INSERT INTO question_images (question_id, position, image, kind) VALUES (?,?,?, 'math')`)
-        .run(questionId, result.attached, image);
+        .run(questionId, positionOffset + result.attached, image);
       result.attached++;
     } catch (e) {
       result.failed++;
@@ -109,6 +131,30 @@ async function storeMathImages(g, questionId, mathExprs, pageCache, buffer, exam
   if (result.failed) console.warn('[pdf-import] math attachments failed', { questionId, ...result });
   diag('math attachments', { questionId, ...result });
   return result;
+}
+
+/**
+ * Persist a question's whole bubble list: its figures first (when the
+ * question needs more than one bubble — see the import loop), then its maths
+ * expressions behind them. They share ONE position sequence because delivery
+ * walks `ORDER BY position` and must never show an expression above the
+ * diagram it explains. Best-effort throughout: a failure logs and the
+ * question still imports without that bubble.
+ */
+async function storeQuestionImages(questionId, figureFiles, g, mathExprs, pageCache, buffer, examId, qOrder) {
+  let stored = 0;
+  for (const image of figureFiles) {
+    try {
+      db.prepare(`INSERT INTO question_images (question_id, position, image, kind) VALUES (?,?,?, 'figure')`)
+        .run(questionId, stored, image);
+      stored++;
+    } catch (e) {
+      console.warn('[pdf-import] figure attachment failed', { questionId, error: e.code || e.name });
+      diag('figure attachment failed', { questionId, error: e.code || e.name });
+    }
+  }
+  if (stored) diag('figure attachments', { questionId, attached: stored });
+  return storeMathImages(g, questionId, mathExprs, pageCache, buffer, examId, qOrder, stored);
 }
 
 // ── Job store ──────────────────────────────────────────────────────────
@@ -287,9 +333,16 @@ async function startJob(jobId, buffer, opts = {}) {
 
     // Estimate from the parseable (cleaned) text — the raw text still contains
     // the solutions/answer-key section, whose "1. B." lines would inflate the
-    // count and produce a false "questions missing" warning.
+    // count and produce a false "questions missing" warning. The estimate
+    // counts EVERY question in the document, so a paper the admin filtered to
+    // one type is compared against everything that was parsed: measuring the
+    // filtered subset against the whole document would cry "questions missing"
+    // over a filter the admin chose on purpose.
     const warning = [
-      ai.completenessWarning(ai.estimateQuestionCount(ai.cleanExamText(text)), filtered),
+      ai.completenessWarning(
+        ai.estimateQuestionCount(ai.cleanExamText(text)),
+        typeFilter ? parsed : filtered
+      ),
       blockWarning,
     ].filter(Boolean).join(' ');
     if (warning) updateJob(jobId, { warning });
@@ -342,34 +395,45 @@ async function startJob(jobId, buffer, opts = {}) {
       const passage = curPassage;
       g.text = stripSourceWatermarks(g.text);
 
-      // Diagrams: render the figure this question kept via its marker and
-      // store the file name (relative, served from uploads). Rendering is
-      // best-effort: a raster/vector decode failure must never fail the
-      // import — the question still exists, just without its figure.
-      let imageFile = '';
-      if (g.markerIndex != null && Number.isInteger(g.markerIndex)) {
-        const entry = images[g.markerIndex];
-        if (entry) {
-          try {
-            const dest = path.join(
-              config.uploadsDir,
-              imageFileNameFor(job.exam_id, nextOrder, g.markerIndex)
-            );
-            imageFile = path.basename(
-              await (entry.kind === 'vector'
-                ? pdf.renderVectorRegion(buffer, entry, dest)
-                : pdf.renderImage(buffer, entry, dest))
-            );
-          } catch (e) {
-            console.warn('[pdf-import] diagram attachment failed', { jobId, questionOrder: nextOrder,
-              marker: `[IMG:${g.markerIndex}]`, page: entry.page });
-            diag('diagram render error', { jobId, error: e.code || e.name });
-          }
-        } else {
+      // Diagrams: render EVERY figure this question kept via its markers and
+      // store the file names (relative, served from uploads). The first goes
+      // into questions.image — the single-image column the dashboard and the
+      // report have always read — and a question that needs more than one
+      // bubble stores the full set as question_images rows, so delivery never
+      // has to choose which of its figures the student gets to see. Rendering
+      // is best-effort: a raster/vector decode failure must never fail the
+      // import — the question still imports, just without that figure.
+      const figureMarkers = figureMarkersFor(g);
+      const figureFiles = [];
+      for (const markerIndex of figureMarkers) {
+        const entry = images[markerIndex];
+        if (!entry) {
           console.warn('[pdf-import] diagram marker has no image', { jobId, questionOrder: nextOrder,
-            marker: `[IMG:${g.markerIndex}]` });
+            marker: `[IMG:${markerIndex}]` });
+          continue;
+        }
+        try {
+          const dest = path.join(
+            config.uploadsDir,
+            imageFileNameFor(job.exam_id, nextOrder, markerIndex)
+          );
+          figureFiles.push(path.basename(
+            await (entry.kind === 'vector'
+              ? pdf.renderVectorRegion(buffer, entry, dest)
+              : pdf.renderImage(buffer, entry, dest))
+          ));
+        } catch (e) {
+          console.warn('[pdf-import] diagram attachment failed', { jobId, questionOrder: nextOrder,
+            marker: `[IMG:${markerIndex}]`, page: entry.page });
+          diag('diagram render error', { jobId, error: e.code || e.name });
         }
       }
+      const imageFile = figureFiles[0] || '';
+      // One bubble rides in questions.image alone (exactly as before); a
+      // question carrying several — two figures, or a figure beside a maths
+      // expression — stores them all as rows in reading order, figures first.
+      const extraBubbles = figureFiles.length + mathMarkerCount(g);
+      const figureRowFiles = figureFiles.length && extraBubbles > 1 ? figureFiles : [];
 
       if (g.type === 'objective') {
         const opts = buildOptions(g.options);
@@ -391,7 +455,7 @@ async function startJob(jobId, buffer, opts = {}) {
         );
         created.push(info.lastInsertRowid);
         savedRows.push(info.lastInsertRowid);
-        await storeMathImages(g, info.lastInsertRowid, sourceText.mathExprs || [], pageCache, buffer, job.exam_id, nextOrder);
+        await storeQuestionImages(info.lastInsertRowid, figureRowFiles, g, sourceText.mathExprs || [], pageCache, buffer, job.exam_id, nextOrder);
         db.prepare(
           `INSERT INTO marking_schemes (question_id, type, scheme) VALUES (?, 'objective', ?)
            ON CONFLICT(question_id) DO UPDATE SET scheme=excluded.scheme, updated_at=datetime('now')`
@@ -415,7 +479,7 @@ async function startJob(jobId, buffer, opts = {}) {
         const q = db.prepare('SELECT * FROM questions WHERE id = ?').get(info.lastInsertRowid);
         created.push(q.id);
         savedRows.push(q.id);
-        await storeMathImages(g, q.id, sourceText.mathExprs || [], pageCache, buffer, job.exam_id, nextOrder);
+        await storeQuestionImages(q.id, figureRowFiles, g, sourceText.mathExprs || [], pageCache, buffer, job.exam_id, nextOrder);
         // Preserve ANY marking-scheme content the paper provides (model answer,
         // key points, rubric). A partial scheme is kept verbatim and then passed
         // to buildMarkingScheme, which fills the missing parts with AI while

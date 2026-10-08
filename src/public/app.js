@@ -1190,6 +1190,20 @@ function selectionBadgeHTML(q) {
     : '<span class="muted" title="Always answered, never offered as a choice">compulsory</span>';
 }
 
+/**
+ * A question's figures, ABOVE its text — the same order the student gets them
+ * in on WhatsApp, so an admin reviewing the paper reads the question exactly
+ * as it will be asked. `q.images` holds every stored bubble in position order;
+ * `q.image` is the primary figure and is deduped into that list.
+ */
+function questionImagesHTML(q, id) {
+  const files = [...new Set([...(q.images || []), q.image].filter(Boolean))];
+  if (!files.length) return '';
+  return files
+    .map((file) => `<div class="qimg-wrap"><img class="qimg" src="${API_BASE}/api/exams/${id}/images/${encodeURIComponent(file)}" alt="diagram"></div>`)
+    .join('');
+}
+
 function qitemHTML(q, id, samePassageAsPrev = false) {
   const opts = q.options || [];
   return `<div class="qitem">
@@ -1199,8 +1213,8 @@ function qitemHTML(q, id, samePassageAsPrev = false) {
         ${q.passage && samePassageAsPrev
           ? `<div class="qpassage-same">↳ same passage as above</div>`
           : q.passage ? `<div class="qpassage">${esc(q.passage)}</div>` : ''}
-<div class="qtext">${esc(q.text)}</div>
-        ${q.image ? `<div class="qimg-wrap"><img class="qimg" src="${API_BASE}/api/exams/${id}/images/${encodeURIComponent(q.image)}" alt="diagram"></div>` : ''}
+        ${questionImagesHTML(q, id)}
+        <div class="qtext">${esc(q.text)}</div>
         <div class="opts-list">
           ${opts.map((o) => `<div class="${o.key === q.correct_answer ? 'correct' : ''}">${o.key}. ${esc(o.text)}${o.key === q.correct_answer ? ' ✓' : ''}</div>`).join('')}
         </div>

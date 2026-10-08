@@ -963,6 +963,94 @@ function recordAcceptance(session) {
   ).run(session.exam_id, session.student_id);
 }
 
+/**
+ * Every bubble a question carries, in reading order: the figures and maths
+ * expressions stored as question_images rows, or — when there are none — the
+ * single figure in questions.image.
+ *
+ * question_images hangs off the TEMPLATE question, and a drawn attempt reads
+ * a pool row whose own id comes from a different table's sequence — so the
+ * template it was copied from is the id whose bubbles it must show.
+ */
+function questionImageFiles(question) {
+  const imageOwnerId = question.template_id || question.id;
+  const rows = db
+    .prepare('SELECT image FROM question_images WHERE question_id = ? ORDER BY position')
+    .all(imageOwnerId);
+  if (rows.length) return rows.map((r) => r.image);
+  return question.image ? [question.image] : [];
+}
+
+/**
+ * Send a question's figures in order, ABOVE the question text.
+ *
+ * A failed bubble is logged and does not stop the ones behind it, but the
+ * result reports the failure so a caller that OWES the figure — a paid paper
+ * whose question went out in a template before the service window was open —
+ * can keep it queued and retry on the student's next message. Callers that
+ * are mid-question ignore the result: the question matters more than its
+ * picture, and it must still be delivered.
+ */
+async function sendQuestionImageBubbles(question, phone) {
+  let error = null;
+  for (const file of questionImageFiles(question)) {
+    try {
+      await wa.sendImage(phone, path.join(config.uploadsDir, file));
+    } catch (err) {
+      error = error || err;
+      console.error('[exam] question image send failed (continued):', err.message);
+    }
+  }
+  return { ok: !error, error };
+}
+
+/**
+ * Record a question's figure as OWED and try to deliver it right now.
+ *
+ * Used only by the paid-start template: that message is text, so a question
+ * carrying a figure has been shown without the thing it refers to. The row is
+ * written BEFORE the attempt — a template outside the 24-hour window opens
+ * nothing, and a rejection must not cost the student the diagram — and
+ * deliverOwedFigures() picks it up on the first reply, which is what actually
+ * opens the window.
+ */
+async function oweQuestionFigure(session, student, question) {
+  if (!questionImageFiles(question).length) return;
+  const entry = outbox.enqueue({
+    sessionId: session.id,
+    questionId: question.id,
+    qOrder: question.q_order,
+    kind: 'figure',
+    recipient: student.phone,
+  });
+  if (entry.state === 'sent') return;
+  const res = await sendQuestionImageBubbles(question, student.phone);
+  if (res.ok) outbox.markSent(entry.id);
+  else outbox.markFailed(entry.id, res.error, Math.max(1, config.exam.sendRetries));
+}
+
+/**
+ * Deliver every figure still owed to this student. Safe to call on every
+ * inbound message: only rows recorded as owed are ever sent, each retires
+ * itself the moment it goes through, and a row whose question no longer
+ * exists is retired too — a debt nobody can pay is not a retry loop.
+ */
+async function deliverOwedFigures(session) {
+  const owed = db
+    .prepare("SELECT * FROM message_outbox WHERE session_id = ? AND kind = 'figure' AND state = 'queued'")
+    .all(session.id);
+  for (const entry of owed) {
+    const question = getSessionQuestion(session.id, entry.q_order);
+    if (!question) {
+      outbox.markSent(entry.id);
+      continue;
+    }
+    const res = await sendQuestionImageBubbles(question, entry.recipient);
+    if (res.ok) outbox.markSent(entry.id);
+    else outbox.markFailed(entry.id, res.error, Math.max(1, config.exam.sendRetries));
+  }
+}
+
 async function sendQuestionTo(session, student, qOrder = null) {
   session = db.prepare('SELECT * FROM sessions WHERE id = ?').get(session.id);
   const exam = db.prepare('SELECT * FROM exams WHERE id = ?').get(session.exam_id);
@@ -997,28 +1085,10 @@ async function sendQuestionTo(session, student, qOrder = null) {
   }
 
   // Diagram/image bubbles go directly ABOVE the question so the student sees
-  // the figure first, then the full question that refers to it. Math
-  // expressions imported from PDFs are stored in question_images (position
-  // order); fall back to the legacy single questions.image for everything else.
-  //
-  // question_images hangs off the TEMPLATE question, and a drawn attempt reads
-  // a pool row whose own id comes from a different table's sequence — so the
-  // template it was copied from is the id whose bubbles it must show.
-  const imageOwnerId = question.template_id || question.id;
-  const mathImages = db
-    .prepare('SELECT image FROM question_images WHERE question_id = ? ORDER BY position')
-    .all(imageOwnerId);
-  if (mathImages.length) {
-    for (const row of mathImages) {
-      await wa.sendImage(student.phone, path.join(config.uploadsDir, row.image)).catch((err) => {
-        console.error('[exam] question image send failed (continued):', err.message);
-      });
-    }
-  } else if (question.image) {
-    await wa.sendImage(student.phone, path.join(config.uploadsDir, question.image)).catch((err) => {
-      console.error('[exam] image send failed (continued):', err.message);
-    });
-  }
+  // the figure first, then the full question that refers to it. Every surface
+  // obeys the same rule — chat, dashboard and report all show the figure on
+  // top of the question it belongs to.
+  await sendQuestionImageBubbles(question, student.phone);
 
   // Question bubble: full stem, then the answer (options or follow-ups), then
   // the timer — nothing omitted.
@@ -1181,6 +1251,12 @@ async function handleInbound(phone, body, meta = {}) {
     }
   }
 
+  // A paid paper's first question may have gone out inside a template, and a
+  // template cannot carry the figure that question refers to. This message is
+  // what opens the 24-hour window, so the owed figure lands now — before the
+  // reply that answers that question is graded.
+  await deliverOwedFigures(session);
+
   // An approved template invites a reply; it does not open the service
   // window. Deliver Q1 on that first reply instead of grading the greeting.
   //
@@ -1312,6 +1388,7 @@ async function sendPaidStartTemplate(session, student, exam, firstQ) {
       recipient: student.phone,
     });
     commitAdvance(session.id, firstQ.q_order, entry.id);
+    await oweQuestionFigure(session, student, firstQ);
   }
   recordAcceptance(session);
   return true;

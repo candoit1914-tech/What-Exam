@@ -190,3 +190,25 @@ test('clicking between tabs still works after a re-render', async () => {
   await settle();
   assert.ok(byId.get('tabbody').innerHTML.includes('Boamah Bryan Ntim'), 'back to recipients renders again');
 });
+
+test('a question shows its figures above its text, the way the chat delivers them', () => {
+  const { sandbox } = boot();
+  // The dashboard is where an admin checks the paper before publishing it. If
+  // it prints the diagram under the question, the admin reads a different
+  // question from the one the student will be asked.
+  const html = sandbox.qitemHTML(
+    {
+      id: 5, q_order: 1, type: 'theory', text: 'Study the diagram and explain it.',
+      marks: 5, difficulty: 'medium', source: 'pdf', is_compulsory: 1, passage: '',
+      options: [], learning_objective: '', image: 'fig-a.png',
+      images: ['fig-a.png', 'fig-b.png'],
+    },
+    7
+  );
+  const first = html.indexOf('fig-a.png');
+  const second = html.indexOf('fig-b.png');
+  const text = html.indexOf('<div class="qtext">');
+  assert.ok(first >= 0 && second >= 0, 'both figures are rendered');
+  assert.ok(text >= 0, 'the question text is rendered');
+  assert.ok(first < text && second < text, 'both figures sit above the question text');
+});
