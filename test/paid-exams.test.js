@@ -298,6 +298,28 @@ test('a paid exam sends only the payment bubble, never the invite', async () => 
   assert.equal(payment.currency, 'GHS');
 });
 
+test('the invite block is never even built for a paid paper', () => {
+  const paper = {
+    id: 999999,
+    title: 'Test',
+    subject: 'Mathematics',
+    duration_minutes: 30,
+    pass_percentage: 50,
+    pricing: 'paid',
+    price_amount: 500,
+  };
+
+  assert.equal(
+    exam.formatExamIntro(paper, 5),
+    '',
+    'no subject, duration, question count or START prompt can be built behind a paywall'
+  );
+  assert.ok(
+    exam.formatExamIntro({ ...paper, pricing: 'free' }, 5).includes('*INSTRUCTIONS*'),
+    'a free paper still gets the full block — the rule is about the paywall, not the message'
+  );
+});
+
 test('a paid checkout can be sent with an approved WhatsApp template', async () => {
   capture();
   paystackStub();

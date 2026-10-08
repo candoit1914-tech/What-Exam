@@ -802,6 +802,15 @@ function examTypeOf(examId) {
 }
 
 function formatExamIntro(exam, questionCount, { started = false } = {}) {
+  // A paid paper has no invite block. Its whole invitation is the payment
+  // bubble: the subject, duration, question count and START prompt below are
+  // all things a student cannot use until Paystack has taken their money.
+  //
+  // The rule lives here, where the text is built, rather than at each call
+  // site, so no caller — written now or later — can put the block back into a
+  // paying student's chat. '' means "there is nothing to say", and every
+  // caller treats it that way.
+  if (payments.isPaidExam(exam)) return '';
   const type = examTypeOf(exam.id);
   const steps = [
     'Questions arrive one at a time.',
@@ -855,11 +864,15 @@ function formatExamIntro(exam, questionCount, { started = false } = {}) {
  * ever counted when it is actually going to be printed.
  */
 async function sendOpeningIntro(student, exam, session, options = {}) {
+  // The paid rule lives in formatExamIntro; this early return only saves
+  // reading a question count for a block that will never be built.
   if (payments.isPaidExam(exam)) return;
   const questionCount =
     getSessionQuestionCount(session.id) ||
     db.prepare('SELECT COUNT(*) c FROM questions WHERE exam_id = ?').get(exam.id).c;
-  await wa.sendText(student.phone, formatExamIntro(exam, questionCount, options));
+  const intro = formatExamIntro(exam, questionCount, options);
+  if (!intro) return;
+  await wa.sendText(student.phone, intro);
 }
 
 /** Resolve a student's objective answer from a tap (replyId), a letter, or full option text. */
@@ -2267,7 +2280,11 @@ async function sendIntro(session, student, exam, count, template, { force = fals
         : [exam.title, exam.subject || 'General', String(exam.duration_minutes), String(count)];
       await wa.sendTemplate(student.phone, template, config.whatsapp.templateLanguage, values.map(text => ({ type: 'text', text })));
     } else {
-      await wa.sendText(student.phone, formatExamIntro(exam, count));
+      // '' for a paid paper — never reached, because the link above returns
+      // first. Kept as a check so an empty bubble cannot reach the chat even
+      // if that ordering ever changes.
+      const intro = formatExamIntro(exam, count);
+      if (intro) await wa.sendText(student.phone, intro);
     }
     outbox.markSent(entry.id);
     recordAcceptance(session);
@@ -2466,6 +2483,7 @@ module.exports = {
   drainSession,
   formatQuestion,
   formatSubQuestions,
+  formatExamIntro,
   buildQuestionBubbles,
   isSectionHeader,
   splitQuestionHeadings,
