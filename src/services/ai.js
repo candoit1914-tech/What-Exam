@@ -2934,6 +2934,90 @@ RULES:
 }
 
 /**
+ * Ask the configured vision model where the figures are on ONE rendered exam
+ * page. This is a rescue, never a source: the page has already been scanned
+ * geometrically and came back empty, while the page text tells a student to
+ * "study the diagram above" — so something printed is there that the path
+ * scanner did not assemble. The model is asked only to POINT at what is
+ * already on the page; it never writes, redraws or describes a figure, so the
+ * worst it can do is hand back a box we then validate.
+ *
+ * Returns pixel boxes at the handed-in page size, or [] when vision is off,
+ * the provider is missing, the model is unsure, or nothing passes validation.
+ */
+async function locateFigures({ imageBase64, mimeType = 'image/png', pageWidth, pageHeight, hint = '' }) {
+  if (!config.ai.vision || !aiConfigured() || !imageBase64) return [];
+  if (!(pageWidth > 0) || !(pageHeight > 0)) return [];
+  // Read the export so tests can stub it, as extractQuestionsFromText does.
+  const chatJSON = module.exports.chatJSON;
+
+  const system =
+    'You locate printed figures on exam pages. You never create, redraw or ' +
+    'describe them — you only report where an existing one is. Answer with JSON only.';
+  const user = [
+    'This is one page of a school exam paper. Return the bounding boxes of every FIGURE on it:',
+    'a diagram, labelled drawing, graph, chart, map, photograph or illustration.',
+    '',
+    'Do NOT box: tables of numbers/words, blocks of question text, headers, footers,',
+    'school crests, stamps, page numbers, or ruled lines on their own.',
+    '',
+    'Return JSON exactly like {"figures":[{"x":0.12,"y":0.30,"w":0.45,"h":0.22}]}',
+    'with x, y, w, h as fractions of the page (0 to 1), origin at the TOP-LEFT,',
+    'x/y the top-left corner of the box, w/h its size. Keep the box tight around the',
+    'figure and its own labels, not the question text around it.',
+    'If the page has no figure, return {"figures":[]}.',
+    hint ? `\nThe page text that refers to a figure reads:\n${hint}` : '',
+  ].join('\n');
+
+  let result;
+  try {
+    result = await chatJSON(
+      [
+        { role: 'system', content: system },
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: user },
+            { type: 'image_url', image_url: { url: `data:${mimeType};base64,${imageBase64}` } },
+          ],
+        },
+      ],
+      { temperature: 0, maxRetries: 1, maxTokens: 1200 }
+    );
+  } catch (err) {
+    console.warn('[ai] figure localisation failed', { error: err && err.message });
+    return [];
+  }
+
+  const raw = (Array.isArray(result) ? result : result && (result.figures || result.boxes)) || [];
+  const boxes = [];
+  for (const b of raw) {
+    if (!b || typeof b !== 'object') continue;
+    const nums = ['x', 'y', 'w', 'h'].map((k) => Number(b[k]));
+    if (!nums.every((n) => Number.isFinite(n))) continue;
+    let [x, y, w, h] = nums;
+    // Models answer in fractions or in pixels; accept both rather than throw
+    // away a correct answer over its units.
+    const fractional = Math.max(x + w, y + h) <= 1.001;
+    if (fractional) { x *= pageWidth; y *= pageHeight; w *= pageWidth; h *= pageHeight; }
+    x = Math.max(0, Math.round(x));
+    y = Math.max(0, Math.round(y));
+    w = Math.round(w);
+    h = Math.round(h);
+    if (x + w > pageWidth) w = pageWidth - x;
+    if (y + h > pageHeight) h = pageHeight - y;
+    if (w < 8 || h < 8) continue;
+    // Area floors: under this it is a fleck of ink; over it the "figure" is the
+    // page itself (a frame, a scan of the whole sheet, or the model giving up
+    // and boxing everything). Both would be handed to a student as a diagram.
+    const area = (w * h) / (pageWidth * pageHeight);
+    if (area < 0.005 || area > 0.45) continue;
+    boxes.push({ x, y, w, h });
+  }
+  return boxes;
+}
+
+/**
  * Transcribe an audio file (voice message) to text.
  * Strategy: a dedicated speech-to-text provider first (most reliable for
  * audio), then provider chat endpoints with input_audio, then Gemini native.
@@ -3149,6 +3233,7 @@ module.exports = {
   detectAiGeneratedAnswer,
   generateTheoryScheme,
   markImageTheory,
+  locateFigures,
   markTheory,
   splitIntoBlocks,
   leadingContext,

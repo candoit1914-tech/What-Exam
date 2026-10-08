@@ -30,7 +30,14 @@ function renderer({ fail = false, enabled = false } = {}) {
   const page = {
     getViewport: ({ scale }) => ({ width: 100 * scale, height: 100 * scale, transform: [scale, 0, 0, scale, 0, 0] }),
     render: () => ({ promise: fail ? Promise.reject(new Error('render broke')) : Promise.resolve() }),
-    getOperatorList: async () => ({ fnArray: [], argsArray: [] }),
+    // The renderer replays the operator list (and paints the text layer from
+    // getTextContent), so a broken render surfaces here — the page's paint
+    // pipeline failing is what the "never writes a placeholder" contract is
+    // about, however it fails.
+    getOperatorList: async () => {
+      if (fail) throw new Error('render broke');
+      return { fnArray: [], argsArray: [] };
+    },
     objs: new Map([['unrelated-logo', { width: 1, height: 1, kind: 3, data: new Uint8Array([255, 0, 0, 255]) }]]),
   };
   const loaded = loadService('pdf', {

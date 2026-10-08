@@ -12,6 +12,191 @@ function diag(event, details) {
 
 // ── Import helpers ─────────────────────────────────────────────────────
 
+const DROP_REASON_TEXT = {
+  tooSmall: 'too small to be a figure',
+  tooBig: 'bigger than a question figure',
+  tooThin: 'lines or page rules',
+  coveredByRaster: 'frames drawn around a photo',
+  repeatingOrnament: 'page decorations repeated on several pages',
+  textInsideBox: 'read as tables',
+  nothingBelow: 'page headers with no question above them',
+};
+
+/**
+ * One sentence saying how the figures went, appended to the import toast.
+ * An import that found no figures otherwise looks exactly like one whose
+ * figures were all filtered out — and "the diagrams did not come through" is
+ * precisely the question this answers before anyone has to read a log: it
+ * either reports what was attached or names the rule that rejected what the
+ * page scan actually found.
+ */
+function figureSummary(diagnostics) {
+  const figures = diagnostics && diagnostics.figures;
+  if (!figures) return '';
+  const pages = figures.pages || 0;
+  const found = figures.kept || 0;
+  const candidates = (figures.candidates && (figures.candidates.raster || 0) + (figures.candidates.vector || 0)) || 0;
+  const vision = figures.visionRecovered || 0;
+  if (found > 0) {
+    const what = found === 1 ? 'image or diagram' : 'images or diagrams';
+    const byAi = vision ? ` (${vision} of them located by the AI reading the page image)` : '';
+    return `Found ${found} ${what} across ${pages} page${pages === 1 ? '' : 's'} and attached each to its question${byAi}.`;
+  }
+  if (!candidates) {
+    return `No images or diagrams were found in this PDF (${pages} page${pages === 1 ? '' : 's'} scanned).`;
+  }
+  const reasons = Object.entries(figures.dropped || {})
+    .filter(([, n]) => n > 0)
+    .map(([key, n]) => `${n} ${DROP_REASON_TEXT[key] || key}`)
+    .join(', ');
+  return `No images or diagrams were attached: the page scan found ${candidates} candidate${candidates === 1 ? '' : 's'}, all rejected as ${reasons}.`;
+}
+
+// ── Vision rescue ──────────────────────────────────────────────────────
+//
+// The path scanner assembles figures out of what the PDF draws. Sometimes
+// there is nothing to assemble — a figure the scanner cannot see, or one a
+// filter was right to distrust — while the page text still tells the student
+// to "study the diagram above". Only one thing on that page can resolve the
+// contradiction: the page itself. AshnaAI is asked to POINT at the printed
+// figure. It never draws, describes or invents one; every box it returns has
+// to survive a size and ink check first, and a page it cannot read simply
+// keeps the figure it never had.
+
+// A figure word, and a word placing it on the page ("above", "shown",
+// "labelled"). Both are needed: "photosynthesis" alone would send vision
+// calls after every biology question.
+const FIGURE_REF = /\b(?:figure|diagram|illustration|graph|chart|picture|photograph|drawing|plate)\b/i;
+const FIGURE_REF_CONTEXT = /\b(?:above|below|shown|given|overleaf|opposite|labelled|labeled|study|examine|refer)\b/i;
+// Budget: an import already spends many AI calls; this one only exists to
+// rescue figures, so it never reads more than a few pages.
+const VISION_PAGE_LIMIT = 3;
+
+function pngSize(buf) {
+  // PNG: 8-byte signature, 4-byte chunk length, "IHDR", then width/height.
+  if (!buf || buf.length < 24 || buf.readUInt32BE(0) !== 0x89504e47) return null;
+  return { width: buf.readUInt32BE(16), height: buf.readUInt32BE(20) };
+}
+
+/** Pages that talk about a figure but yielded no figure to the scanner. */
+function pagesMissingFigures(sourceText) {
+  const rowsByPage = sourceText.rowsByPage || [];
+  const withFigure = new Set((sourceText.images || []).map((i) => i.page));
+  const out = [];
+  rowsByPage.forEach((rows, p) => {
+    const page = p + 1;
+    if (withFigure.has(page)) return; // something was found here already
+    const refs = (rows || []).filter((row) => {
+      const line = String(row.line || '').trim();
+      return line.length >= 8 && line.length <= 300 && FIGURE_REF.test(line) && FIGURE_REF_CONTEXT.test(line);
+    });
+    if (refs.length) out.push({ page, refs });
+  });
+  return out.slice(0, VISION_PAGE_LIMIT);
+}
+
+/** A box of blank paper is not a figure, however confidently it was boxed. */
+async function boxHasInk(pagePng, box) {
+  try {
+    const sharp = require('sharp');
+    const { data } = await sharp(pagePng)
+      .extract({ left: box.x, top: box.y, width: box.w, height: box.h })
+      // Flatten first: these pages are drawn onto a TRANSPARENT canvas, and an
+      // untouched transparent pixel greyscales to 0 — indistinguishable from
+      // black ink. Every blank patch would pass the ink check.
+      .flatten({ background: '#ffffff' })
+      .greyscale()
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+    let inked = 0;
+    for (let i = 0; i < data.length; i++) if (data[i] < 245) inked++;
+    return data.length > 0 && inked / data.length > 0.015;
+  } catch (err) {
+    diag('vision ink check failed', { error: err.code || err.name });
+    return false;
+  }
+}
+
+/**
+ * Splice a vision-boxed figure into the extraction result: it becomes one more
+ * entry in `images` (rendered by the same vector crop as any other region), its
+ * marker lands INSIDE the question that pointed at it, and the diagnostics
+ * count it. Returns false when no sensible anchor line could be found — a
+ * marker nobody can place would attach to the wrong question, which is worse
+ * than no figure at all.
+ */
+function attachVisionFigure(sourceText, page, box, refs) {
+  // Anchor inside the QUESTION that pointed at the figure: a marker line only
+  // attaches to the question whose block it falls into, so prefer a reference
+  // row that opens a question, and otherwise the last reference row (the one
+  // below the figure, which is where papers put "study the diagram above").
+  const anchor = refs.find((r) => /^\s*\d{1,3}\s*[.)]/.test(r.line)) || refs[refs.length - 1];
+  const anchorText = String((anchor && anchor.line) || '').trim();
+  if (!anchorText) return false;
+  const lines = String(sourceText.text || '').split('\n');
+  let at = -1;
+  for (let j = 0; j < lines.length; j++) {
+    if (lines[j].includes(anchorText) || (lines[j].length > 20 && anchorText.includes(lines[j]))) { at = j + 1; break; }
+  }
+  if (at < 0) return false;
+  if (!sourceText.images) sourceText.images = [];
+  const idx = sourceText.images.length;
+  sourceText.images.push({ page, x: box.x, y: box.y, w: box.w, h: box.h, kind: 'vector' });
+  lines.splice(at, 0, `[IMG:${idx}]`);
+  sourceText.text = lines.join('\n');
+  sourceText.markers = (sourceText.markers || []).concat({ idx, page }).sort((a, b) => a.idx - b.idx);
+  return true;
+}
+
+/**
+ * Locate figures the page scanner missed, on the pages whose own text says
+ * there is one. Bounded (a few pages), best-effort (never throws into the
+ * import), and counted so the admin's import note can say the AI found them.
+ * Returns how many figures were recovered.
+ */
+async function recoverFiguresWithVision(buffer, sourceText) {
+  const recovered = { count: 0 };
+  try {
+    if (!config.ai.vision || !ai.aiConfigured()) return 0;
+    const pending = pagesMissingFigures(sourceText);
+    if (!pending.length) return 0;
+    for (const { page, refs } of pending) {
+      const pagePng = await pdf.renderPageToBuffer(buffer, page, 1, { text: true });
+      const size = pngSize(pagePng);
+      if (!size) continue;
+      const hint = refs.map((r) => r.line).join('\n').slice(0, 400);
+      const boxes = await ai.locateFigures({
+        imageBase64: pagePng.toString('base64'),
+        pageWidth: size.width,
+        pageHeight: size.height,
+        hint,
+      });
+      const taken = [];
+      for (let i = 0; i < boxes.length; i++) {
+        const box = boxes[i];
+        // Two boxes on top of each other are the same figure reported twice.
+        if (taken.some((b) => Math.abs(b.x - box.x) < 10 && Math.abs(b.y - box.y) < 10)) continue;
+        if (!(await boxHasInk(pagePng, box))) continue;
+        const attached = attachVisionFigure(sourceText, page, box, refs);
+        if (!attached) continue;
+        taken.push(box);
+        recovered.count++;
+      }
+      if (taken.length) diag('vision figure recovery', { page, boxes: taken.length, refs: refs.length });
+    }
+  } catch (err) {
+    // The rescue is worth nothing if it can break an import that was otherwise
+    // going to produce questions with, at worst, no figures.
+    console.warn('[pdfImport] vision figure recovery failed', { error: err && err.message });
+  }
+  if (recovered.count && sourceText.diagnostics && sourceText.diagnostics.figures) {
+    sourceText.diagnostics.figures.visionRecovered = recovered.count;
+    sourceText.diagnostics.figures.kept = sourceText.images.length;
+    sourceText.diagnostics.figures.keptByPage = sourceText.images.map((i) => `p${i.page}:${i.kind}`);
+  }
+  return recovered.count;
+}
+
 /**
  * Build the stored [{key,text}] option list for an objective question.
  * Keeps the letter each option carries on the paper (A., B., C., D.) as its
@@ -285,14 +470,25 @@ async function startJob(jobId, buffer, opts = {}) {
   const savedRows = [];
   try {
     const sourceText = await pdf.textWithMarkers(buffer);
+    // Pages whose own text tells the student to study a figure, but which gave
+    // the scanner nothing to assemble, get one chance with AshnaAI's vision:
+    // point at what is already printed on the page. It runs before anything
+    // reads sourceText.text/images/markers, so a rescued figure travels through
+    // extraction exactly like a geometrically found one.
+    const visionRecovered = await recoverFiguresWithVision(buffer, sourceText);
+    if (visionRecovered) {
+      console.log(`[pdfImport] vision located ${visionRecovered} figure(s) the page scan missed`);
+    }
     // textWithMarkers already calls analyzeDocument internally which includes
     // the image list. Use that instead of a second extractDocument call.
     const images = sourceText.images || [];
     const text = sourceText.text;
     const isOcr = sourceText._ocr || false;
+    const warnings = [];
     if (isOcr) {
       console.log('[pdfImport] Document was scanned/image-based — used OCR to extract text');
-      updateJob(jobId, { warning: 'This PDF was scanned/image-based. Text was extracted via OCR and may contain minor errors.' });
+      warnings.push('This PDF was scanned/image-based. Text was extracted via OCR and may contain minor errors.');
+      updateJob(jobId, { warning: warnings.join(' ') });
     }
     updateJob(jobId, { stage: 'Parsing questions…', progress: 10 });
 
@@ -344,8 +540,13 @@ async function startJob(jobId, buffer, opts = {}) {
         typeFilter ? parsed : filtered
       ),
       blockWarning,
+      // Appended even when everything is fine: "figures found, attached to
+      // their questions" is the answer an admin is looking for after asking
+      // why the diagrams never showed up.
+      figureSummary(sourceText.diagnostics),
     ].filter(Boolean).join(' ');
-    if (warning) updateJob(jobId, { warning });
+    const jobWarning = [...warnings, warning].filter(Boolean).join(' ');
+    if (jobWarning) updateJob(jobId, { warning: jobWarning });
 
     // Objective questions missing an answer key are sent to AI for answers.
     // This step is best-effort: a failure must not fail the whole import.
@@ -811,6 +1012,8 @@ module.exports = {
   imageFileNameFor,
   storeMathImages,
   describeExtractionFailure,
+  figureSummary,
+  recoverFiguresWithVision,
   slugOf,
   PAPER_SECTION_KEY,
   answerCountFrom,

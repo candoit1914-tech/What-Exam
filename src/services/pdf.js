@@ -66,7 +66,7 @@ async function extractText(buffer) {
  * Render a full PDF page to a PNG buffer at the given scale.
  * Used for OCR of scanned/image-only PDFs.
  */
-async function renderPageToBuffer(buffer, pageNum, scale = 2) {
+async function renderPageToBuffer(buffer, pageNum, scale = 2, opts = {}) {
   const { createCanvas } = require('@napi-rs/canvas');
   const doc = await openDoc(buffer);
   try {
@@ -74,10 +74,12 @@ async function renderPageToBuffer(buffer, pageNum, scale = 2) {
     const vp = page.getViewport({ scale });
     const canvas = createCanvas(Math.ceil(vp.width), Math.ceil(vp.height));
     const ctx = canvas.getContext('2d');
-    // Use replayPageOps to render the page (vector + raster, skips text glyphs).
+    // Use replayPageOps to render the page (vector + raster, text glyphs only
+    // when opts.text — an AI looking at the page needs the labels it is being
+    // asked to locate, OCR of a scanned page does not have any).
     // Render at the requested scale, not scale 1 — otherwise the canvas is just
     // an upscaled blur of a scale-1 raster.
-    const full = await replayPageOps(page, vp);
+    const full = await replayPageOps(page, vp, opts);
     ctx.drawImage(full, 0, 0, canvas.width, canvas.height);
     return canvas.toBuffer('image/png');
   } finally {
@@ -127,6 +129,7 @@ async function ocrDocument(buffer) {
   const images = [];
   const rowsByPage = [];
   const pageData = [];
+  let figureStats = null;
 
   try {
     for (let p = 1; p <= doc.numPages; p++) {
@@ -206,61 +209,21 @@ async function ocrDocument(buffer) {
       pageData.push({ paints, width: vp1.width, height: vp1.height, rows: pageRows });
     }
 
-    // Apply the same image filtering as analyzeDocument
-    const filtered = [];
-    for (let p = 0; p < pageData.length; p++) {
-      const { paints, width, height } = pageData[p];
-      const pageArea = width * height;
-      const perPage = paints.filter((q) => {
-        const box = q.kind === 'vector' ? vectorBox(q) : q;
-        const ratio = (box.w * box.h) / pageArea;
-        if (ratio < PAGE_AREA_MIN) return false;
-        if (ratio > PAGE_AREA_MAX) {
-          return paints.length === 1;
-        }
-        return true;
-      });
-      for (const q of perPage) {
-        const box = q.kind === 'vector' ? vectorBox(q) : q;
-        filtered.push({
-          page: p + 1,
-          x: box.x,
-          y: height - box.y - box.h,
-          w: box.w,
-          h: box.h,
-          kind: q.kind,
-          userBox: { x: box.x, y: box.y, w: box.w, h: box.h },
-          userMid: q.userMid,
-          rasterId: q.rasterId ?? null,
-        });
-      }
-    }
-
-    // Drop frame/outline vectors overlapping rasters, repeating headers, text-in-box
-    const rasters = filtered.filter((q) => q.kind === 'raster');
-    const overlap = (a, b) => {
-      const ix = Math.max(0, Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x));
-      const iy = Math.max(0, Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y));
-      return ix * iy;
+    // The same figure rules as the text-layer path, from the one place that
+    // defines them (selectFigureRegions) — a filter that exists twice has
+    // already drifted once, and it silently gave a scanned paper and its
+    // text-layer twin different figures from the same page.
+    const selection = selectFigureRegions(pageData);
+    images.push(...selection.images);
+    figureStats = {
+      pages: pageData.length,
+      candidates: selection.candidates,
+      paths: selection.paths,
+      dropped: selection.dropped,
+      kept: selection.images.length,
+      keptByPage: selection.images.map((i) => `p${i.page}:${i.kind}`),
+      rejections: (selection.rejections || []).slice(0, 50),
     };
-    const seenBoxes = new Map();
-    for (const q of filtered) {
-      if (q.kind !== 'vector') continue;
-      const key = [Math.round(q.x / 2) * 2, Math.round(q.y / 2) * 2, Math.round(q.w / 2) * 2, Math.round(q.h / 2) * 2].join(',');
-      if (!seenBoxes.has(key)) seenBoxes.set(key, new Set());
-      seenBoxes.get(key).add(q.page);
-    }
-    for (const q of filtered) {
-      if (q.kind === 'vector') {
-        const covered = rasters.some((r) => r.page === q.page && overlap(r, q) >= 0.5 * Math.min(r.w * r.h, q.w * q.h));
-        if (covered) continue;
-        const key = [Math.round(q.x / 2) * 2, Math.round(q.y / 2) * 2, Math.round(q.w / 2) * 2, Math.round(q.h / 2) * 2].join(',');
-        if ((seenBoxes.get(key) || new Set()).size >= 2) continue;
-        const qRows = pageData[q.page - 1].rows;
-        if (qRows.some((row) => row.y >= q.userBox.y && row.y <= q.userBox.y + q.userBox.h)) continue;
-      }
-      images.push(q);
-    }
   } finally {
     try {
       await worker.terminate();
@@ -270,7 +233,7 @@ async function ocrDocument(buffer) {
     }
   }
 
-  return { textLines, images, rowsByPage, mathExprs: [] };
+  return { textLines, images, rowsByPage, mathExprs: [], figureStats };
 }
 
 // Helper: multiply 3x3-affine matrices [a,b,c,d,e,f]
@@ -788,6 +751,234 @@ const RASTER_WIDE_MIN_SIDE = 20;
 // labelled graphics; shorter wide ones are kept as math expressions.
 const VECTOR_TEXT_BOX_MAX_H = 60;
 
+// ── What counts as a figure ─────────────────────────────────────────────
+//
+// ONE decision, shared by the text-layer path and the OCR path. The rule used
+// to live twice and had already drifted: the OCR copy dropped any vector box
+// holding a single text row, so a scanned paper and its text-layer twin could
+// import different figures from the same page.
+//
+// Vector art also does not arrive as a figure. It arrives path by path: a
+// diagram drawn with forty lines, arcs and boxes is forty separate little
+// boxes, nearly all of them under the size floor, so measuring paths one at a
+// time reports "this paper has no figures" about a page full of them. That is
+// how a vector exam diagram went missing — it was never lost, it was never
+// assembled. Paths are grouped first (two paths belong to one figure when
+// their padded boxes touch), then the whole cluster is measured as a region.
+const FIGURE_PAD = 5;
+const CLUSTER_AREA_MAX = 0.45; // beyond this it is a page frame wrapping the page
+const CLUSTER_MIN_SIDE = 12; // thinner than this is a rule or a border
+// How much text inside a vector box makes it a table rather than a labelled
+// diagram: several lines, and enough characters per line to be prose.
+const TABLE_TEXT_ROWS = 2;
+const TABLE_TEXT_CHARS = 40;
+const TABLE_TEXT_AVG_CHARS = 8;
+
+/** The union box of each group of vector paths whose padded boxes touch. */
+function clusterVectorPaths(vectors, pad) {
+  const boxes = vectors.map((v) => vectorBox(v));
+  const parent = boxes.map((_, i) => i);
+  const find = (i) => (parent[i] === i ? i : (parent[i] = find(parent[i])));
+  const touches = (a, b) =>
+    a.x - pad <= b.x + b.w + pad && b.x - pad <= a.x + a.w + pad &&
+    a.y - pad <= b.y + b.h + pad && b.y - pad <= a.y + a.h + pad;
+  // Swept in x order: once a box starts past this box's right edge plus padding
+  // nothing further along can touch it, so the inner scan stops there.
+  const order = boxes.map((_, i) => i).sort((a, b) => boxes[a].x - boxes[b].x);
+  for (let a = 0; a < order.length; a++) {
+    const i = order[a];
+    for (let b = a + 1; b < order.length; b++) {
+      const j = order[b];
+      if (boxes[j].x > boxes[i].x + boxes[i].w + pad * 2) break;
+      if (!touches(boxes[i], boxes[j])) continue;
+      const ri = find(i);
+      const rj = find(j);
+      if (ri !== rj) parent[rj] = ri;
+    }
+  }
+  const groups = new Map();
+  boxes.forEach((box, i) => {
+    const root = find(i);
+    if (!groups.has(root)) groups.set(root, []);
+    groups.get(root).push(box);
+  });
+  return [...groups.values()].map((bs) => {
+    const x = Math.min(...bs.map((b) => b.x));
+    const y = Math.min(...bs.map((b) => b.y));
+    const x2 = Math.max(...bs.map((b) => b.x + b.w));
+    const y2 = Math.max(...bs.map((b) => b.y + b.h));
+    return { x, y, w: x2 - x, h: y2 - y, paths: bs.length };
+  });
+}
+
+/**
+ * The figures of a document: regions in canvas space (top-left origin) as
+ * `{ page, x, y, w, h, kind, userBox, userMid, rasterId }`, plus `dropped`
+ * (candidates rejected, by reason), `candidates` (the regions the scan
+ * produced: one per raster image, one per assembled vector cluster) and
+ * `paths` (the raw paints they were built from), so an import that finds
+ * nothing can say why — and can tell "no figures here" from "a figure per
+ * page, all of them a repeated decoration".
+ */
+function selectFigureRegions(pageData) {
+  const dropped = {
+    tooSmall: 0,
+    tooBig: 0,
+    tooThin: 0,
+    coveredByRaster: 0,
+    repeatingOrnament: 0,
+    textInsideBox: 0,
+    nothingBelow: 0,
+  };
+  const candidates = { raster: 0, vector: 0 };
+  // Raw paints the op list handed over, before clustering. Paths are what a
+  // figure is made of; candidates are the regions they became. Reporting one
+  // as the other produces nonsense in the only sentence that matters — "102
+  // candidates, all rejected as 17 repeated decorations".
+  const paths = { raster: 0, vector: 0 };
+  const regions = [];
+  // What was rejected, with the numbers that decided it. A count says only
+  // that something died; this says what and why, which is the difference
+  // between "no figures found" and knowing which rule ate them.
+  const rejections = [];
+  const reject = (q, reason, extra) => {
+    dropped[reason]++;
+    rejections.push({
+      page: q.page,
+      kind: q.kind,
+      reason,
+      w: Math.round(q.w),
+      h: Math.round(q.h),
+      // A cluster counts as one candidate but is made of many paths; the count
+      // is what tells an ornament (6 shapes, same box, every page) apart from a
+      // single shape that happens to be in the wrong place.
+      ...(q.paths > 1 ? { paths: q.paths } : {}),
+      ...(extra || {}),
+    });
+  };
+
+  for (let p = 0; p < pageData.length; p++) {
+    const { paints, width, height } = pageData[p];
+    const pageArea = width * height;
+    for (const paint of paints) paths[paint.kind] = (paths[paint.kind] || 0) + 1;
+    const asRegion = (box, kind, rasterId) => ({
+      page: p + 1,
+      x: box.x,
+      y: height - box.y - box.h, // user (y-up) → canvas (y-down)
+      w: box.w,
+      h: box.h,
+      kind,
+      userBox: { x: box.x, y: box.y, w: box.w, h: box.h },
+      userMid: box.y + box.h / 2,
+      rasterId: rasterId ?? null,
+      // How many paths the cluster was assembled from. Carried through so a
+      // rejection can report it: one shape being in the wrong place and six
+      // shapes drawing the same page badge on every page read very differently.
+      ...(box.paths ? { paths: box.paths } : {}),
+    });
+
+    // A raster paint already IS one image, so it keeps its own size rules: a
+    // short wide expression survives the floor, a bullet-sized square does not.
+    // candidates are counted here, at the top: a candidate is a region the scan
+    // put forward, whether or not a rule later rejects it. Counting only the
+    // survivors would make "no figures" and "all figures rejected" the same
+    // sentence again — the exact confusion this bookkeeping exists to end.
+    for (const q of paints) {
+      if (q.kind !== 'raster') continue;
+      candidates.raster++;
+      const ratio = (q.w * q.h) / pageArea;
+      const wideProfile = q.h > 0 && q.w / q.h >= RASTER_WIDE_ASPECT && Math.min(q.w, q.h) >= RASTER_WIDE_MIN_SIDE;
+      const minRatio = wideProfile ? RASTER_WIDE_MIN : PAGE_AREA_MIN;
+      if (ratio < minRatio) { reject(q, 'tooSmall'); continue; }
+      if (ratio > PAGE_AREA_MAX && paints.length !== 1) { reject(q, 'tooBig'); continue; }
+      regions.push(asRegion(q, 'raster', q.rasterId));
+    }
+
+    for (const cluster of clusterVectorPaths(paints.filter((q) => q.kind === 'vector'), FIGURE_PAD)) {
+      const page = p + 1;
+      candidates.vector++;
+      const rejected = { ...cluster, page, kind: 'vector' };
+      if (cluster.w < CLUSTER_MIN_SIDE || cluster.h < CLUSTER_MIN_SIDE) { reject(rejected, 'tooThin'); continue; }
+      const ratio = (cluster.w * cluster.h) / pageArea;
+      if (ratio < PAGE_AREA_MIN) { reject(rejected, 'tooSmall'); continue; }
+      // The raster ceiling allows one exception — a lone paint covering most of
+      // the page is a scan. A cluster never gets that excuse: it is assembled
+      // from many paths, so a big one is the frame drawn around the page.
+      if (ratio > CLUSTER_AREA_MAX) { reject(rejected, 'tooBig'); continue; }
+      regions.push(asRegion(cluster, 'vector', null));
+    }
+  }
+
+  const rasters = regions.filter((q) => q.kind === 'raster');
+  const overlap = (a, b) => {
+    const ix = Math.max(0, Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x));
+    const iy = Math.max(0, Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y));
+    return ix * iy;
+  };
+  const boxKey = (q) => [Math.round(q.x / 2) * 2, Math.round(q.y / 2) * 2, Math.round(q.w / 2) * 2, Math.round(q.h / 2) * 2].join(',');
+  const seenBoxes = new Map(); // `${roundedBox}` → the pages it appeared on
+  for (const q of regions) {
+    if (q.kind !== 'vector') continue;
+    const key = boxKey(q);
+    if (!seenBoxes.has(key)) seenBoxes.set(key, new Set());
+    seenBoxes.get(key).add(q.page);
+  }
+
+  const images = [];
+  for (const q of regions) {
+    if (q.kind === 'vector') {
+      if (rasters.some((r) => r.page === q.page && overlap(r, q) >= 0.5 * Math.min(r.w * r.h, q.w * q.h))) {
+        reject(q, 'coveredByRaster'); // frame/outline drawn around a raster figure
+        continue;
+      }
+      if ((seenBoxes.get(boxKey(q)) || new Set()).size >= 2) {
+        reject(q, 'repeatingOrnament'); // same box, same place, 2+ pages: page chrome
+        continue;
+      }
+      // Text inside a vector box is what separates a table from a diagram — the
+      // table's cells ARE its content, a diagram's inside merely carries
+      // labels. It is the AMOUNT of text that tells them apart: "SUN" over a
+      // drawing must survive, a box whose cells read "pH table cell text" must
+      // never be handed to a student as a picture of a box. Short, wide boxes
+      // stay exempt anyway: a typeset equation is text in a box too.
+      const qRows = pageData[q.page - 1].rows || [];
+      const inside = qRows.filter((row) => row.y >= q.userBox.y && row.y <= q.userBox.y + q.userBox.h);
+      const chars = inside.reduce((n, row) => n + (row.line || '').length, 0);
+      const isTable = inside.length >= TABLE_TEXT_ROWS
+        && chars >= TABLE_TEXT_CHARS
+        && chars / inside.length >= TABLE_TEXT_AVG_CHARS
+        && q.userBox.h > VECTOR_TEXT_BOX_MAX_H;
+      if (isTable) {
+        reject(q, 'textInsideBox', {
+          rowsInside: inside.length,
+          charsInside: chars,
+          boxY: [Math.round(q.userBox.y), Math.round(q.userBox.y + q.userBox.h)],
+          boxX: [Math.round(q.userBox.x), Math.round(q.userBox.x + q.userBox.w)],
+          rowYs: inside.map((r) => Math.round(r.y)),
+          labels: inside.map((r) => (r.line || '').slice(0, 40)),
+        });
+        continue;
+      }
+    }
+    // A RASTER with no text row above it is a masthead — a banner or logo at
+    // the top of the page, which belongs to no question and must never show up
+    // above the first one in WhatsApp. Vector clusters are exempt: a drawing at
+    // the top of a page is the continuation of a question from the page before,
+    // and there its marker belongs with the page's first question.
+    if (q.kind === 'raster') {
+      const pageRows = pageData[q.page - 1].rows || [];
+      if (!pageRows.some((row) => row.y > q.userBox.y + q.userBox.h)) { reject(q, 'nothingBelow'); continue; }
+    }
+    images.push(q);
+  }
+
+  // Document order: a figure higher on its page gets the lower marker index,
+  // so [IMG:0] is always the first figure a student reads to.
+  images.sort((a, b) => a.page - b.page || a.y - b.y);
+
+  return { images, dropped, candidates, paths, rejections };
+}
+
 /**
  * One pass over the whole document: joined text lines, per-page row geometry
  * (user space), and the filtered image list. Shared by extractDocument and
@@ -869,85 +1060,27 @@ async function analyzeDocumentWithDoc(doc, buffer) {
     return ocrResult;
   }
 
-  // Assemble images page by page with the size filters applied per page, then
-  // drop two classes of phantom vectors:
-  //  - a 1px frame/outline line drawn around a raster image (identical box,
-  //    no content of its own) — the raster carries the figure;
-  //  - repeating header/footer ornaments (a logo box at the exact same
-  //    position on 2+ pages) — a real question figure never repeats identically.
-  const filtered = [];
-  for (let p = 0; p < pageData.length; p++) {
-    const { paints, width, height } = pageData[p];
-    const pageArea = width * height;
-    const perPage = paints.filter((q) => {
-      const box = q.kind === 'vector' ? vectorBox(q) : q;
-      const ratio = (box.w * box.h) / pageArea;
-      const wideProfile = box.h > 0 && box.w / box.h >= RASTER_WIDE_ASPECT && Math.min(box.w, box.h) >= RASTER_WIDE_MIN_SIDE;
-      const minRatio = q.kind === 'raster' && wideProfile ? RASTER_WIDE_MIN : PAGE_AREA_MIN;
-      if (ratio < minRatio) return false;
-      if (ratio > PAGE_AREA_MAX) {
-        return paints.length === 1;
-      }
-      return true;
-    });
-    for (const q of perPage) {
-      const box = q.kind === 'vector' ? vectorBox(q) : q;
-      filtered.push({
-        page: p + 1,
-        x: box.x,
-        y: height - box.y - box.h, // user (y-up) → canvas (y-down)
-        w: box.w,
-        h: box.h,
-        kind: q.kind,
-        userBox: { x: box.x, y: box.y, w: box.w, h: box.h },
-        userMid: q.userMid,
-        rasterId: q.rasterId ?? null,
-      });
-    }
-  }
-
-  const rasters = filtered.filter((q) => q.kind === 'raster');
-  const overlap = (a, b) => {
-    const ix = Math.max(0, Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x));
-    const iy = Math.max(0, Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y));
-    return ix * iy;
+  // Figure selection lives in exactly one place — selectFigureRegions — so the
+  // text layer path and the OCR path can never disagree about what a figure is,
+  // and so every rejected candidate is counted by reason. Without those counts
+  // a paper with no figures looks identical to a paper whose figures were all
+  // filtered out, which is the one diagnosis an import must be able to make.
+  const { images, dropped, candidates, paths, rejections } = selectFigureRegions(pageData);
+  const figureStats = {
+    pages: pageData.length,
+    candidates,
+    paths,
+    dropped,
+    kept: images.length,
+    keptByPage: images.map((i) => `p${i.page}:${i.kind}`),
+    rejections: rejections.slice(0, 50),
   };
-  const seenBoxes = new Map(); // `${roundedBox}` → set of pages
-  for (const q of filtered) {
-    if (q.kind !== 'vector') continue;
-    const key = [Math.round(q.x / 2) * 2, Math.round(q.y / 2) * 2, Math.round(q.w / 2) * 2, Math.round(q.h / 2) * 2].join(',');
-    if (!seenBoxes.has(key)) seenBoxes.set(key, new Set());
-    seenBoxes.get(key).add(q.page);
-  }
-  const images = [];
-  for (let p = 0; p < filtered.length; p++) {
-    const q = filtered[p];
-    if (q.kind === 'vector') {
-      const covered = rasters.some((r) => r.page === q.page && overlap(r, q) >= 0.5 * Math.min(r.w * r.h, q.w * q.h));
-      if (covered) continue; // frame/outline around a raster figure
-      const key = [Math.round(q.x / 2) * 2, Math.round(q.y / 2) * 2, Math.round(q.w / 2) * 2, Math.round(q.h / 2) * 2].join(',');
-      if ((seenBoxes.get(key) || new Set()).size >= 2) continue; // repeating header/footer ornament
-      // Text-in-box exclusion: a tall region containing text rows is a table /
-      // labelled graphic, not a figure. Short, wide boxes carrying just a line
-      // of text are math expressions/equations — keep those so "Simplify:"-style
-      // questions still carry their expression.
-      const qRows = pageData[q.page - 1].rows;
-      const hasTextInside = qRows.some((row) => row.y >= q.userBox.y && row.y <= q.userBox.y + q.userBox.h);
-      if (hasTextInside && q.userBox.h > VECTOR_TEXT_BOX_MAX_H) continue;
-    }
-    // Page-header/masthead images (a banner or logo at the top of a page with
-    // no text row above it) reference no question. Dropping them prevents a
-    // meaningless image from being attached to the first question and shown
-    // above it in WhatsApp.
-    const pageRows = pageData[q.page - 1].rows;
-    if (q.userBox && !pageRows.some((row) => row.y > q.userBox.y + q.userBox.h)) continue;
-    images.push(q);
-  }
+  diag('figure detection', figureStats);
 
   // mathExprs[exprIndex] === the expression behind token [MATH:exprIndex]:
   // tokens are numbered document-globally, so the flat array position IS the
   // index used by ai.js markerIndices and pdfImport's renderer.
-  return { textLines: merged, images, rowsByPage: pageData.map((d) => d.rows), mathExprs: pageData.flatMap((d, p) => d.mathExprs.map((ex) => ({ page: p + 1, ...ex.box }))) };
+  return { textLines: merged, images, rowsByPage: pageData.map((d) => d.rows), mathExprs: pageData.flatMap((d, p) => d.mathExprs.map((ex) => ({ page: p + 1, ...ex.box }))), figureStats };
 }
 
 /**
@@ -972,7 +1105,7 @@ async function extractDocument(buffer) {
  * n = the figure's index into the extractDocument images array.
  */
 async function textWithMarkers(buffer) {
-  const { textLines, images, rowsByPage, mathExprs, _ocr } = await analyzeDocument(buffer);
+  const { textLines, images, rowsByPage, mathExprs, _ocr, figureStats } = await analyzeDocument(buffer);
   const pageStarts = [];
   {
     let n = 0;
@@ -1043,10 +1176,26 @@ async function textWithMarkers(buffer) {
   const missing = (mathExprs || []).map((ex, idx) => ({ page: ex.page, marker: `[MATH:${idx}]`, idx }))
     .filter((entry) => !found.has(entry.idx));
   const diagnostics = { pages: rowsByPage.length, imageMarkers: markers.length,
-    mathExpressions: (mathExprs || []).length, mathMarkers: found.size, missingMathMarkers: missing.length };
+    mathExpressions: (mathExprs || []).length, mathMarkers: found.size, missingMathMarkers: missing.length,
+    // How many figure candidates the page filters let through, and how many
+    // each rule rejected — the only way to tell "this paper has no figures"
+    // apart from "every figure was filtered out".
+    figures: figureStats || null };
   if (missing.length) console.warn('[pdf] math markers missing from extracted text', { count: missing.length });
+  if (figureStats) {
+    const rejected = Object.values(figureStats.dropped).reduce((a, b) => a + b, 0);
+    if (figureStats.candidates.raster + figureStats.candidates.vector > 0 && figureStats.kept === 0) {
+      console.warn('[pdf] figure candidates were all filtered out', figureStats);
+    } else if (rejected) {
+      diag('figure candidates rejected', { rejected, reasons: figureStats.dropped });
+    }
+  }
   diag('extraction summary', diagnostics);
-  return { text, markers, images, mathExprs, _ocr: !!_ocr, diagnostics };
+  // rowsByPage rides along for the one caller that needs to re-read the page
+  // text after this returns: the vision rescue looks for "study the diagram
+  // above" rows on pages that yielded no figure, and only rows know which page
+  // they came from.
+  return { text, markers, images, mathExprs, _ocr: !!_ocr, diagnostics, rowsByPage };
 }
 
 // A canvas 2D context that accepts every call pdfjs's renderer makes but
@@ -1156,18 +1305,23 @@ async function renderImage(buffer, image, outPath) {
 // Convert pdfjs color args ([r,g,b] 0..1 or gray or cmyk) to a css color
 // string usable by @napi-rs/canvas. Returns null when the args are not a
 // plain gray/rgb/cmyk array (e.g. pattern or device-n references).
-function cssColorFromArgs(args) {
-  if (!args || !args.every((v) => typeof v === 'number')) return null;
+// `byteValues` marks the *RGBColor ops, which pdfjs fills with 0..255 — read
+// as 0..1 they fail the range check, the color is silently dropped, and a
+// mint-green diagram box paints solid black.
+function cssColorFromArgs(args, byteValues) {
+  if (!args || typeof args.every !== 'function' || !args.every((v) => typeof v === 'number')) return null;
   const toHex = (v) => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, '0');
+  const unit = (v) => (byteValues ? v / 255 : v);
+  const inRange = (v) => unit(v) >= 0 && unit(v) <= 1;
   if (args.length === 1) {
-    const g = toHex(args[0] * 255);
+    const g = toHex(unit(args[0]) * 255);
     return `#${g}${g}${g}`;
   }
-  if (args.length === 3 && args.every((v) => v >= 0 && v <= 1)) {
-    return `#${toHex(args[0] * 255)}${toHex(args[1] * 255)}${toHex(args[2] * 255)}`;
+  if (args.length === 3 && args.every(inRange)) {
+    return `#${toHex(unit(args[0]) * 255)}${toHex(unit(args[1]) * 255)}${toHex(unit(args[2]) * 255)}`;
   }
-  if (args.length === 4) {
-    const [c, m, y, k] = args;
+  if (args.length === 4 && args.every(inRange)) {
+    const [c, m, y, k] = [unit(args[0]), unit(args[1]), unit(args[2]), unit(args[3])];
     return `#${toHex(255 * (1 - c) * (1 - k))}${toHex(255 * (1 - m) * (1 - k))}${toHex(255 * (1 - y) * (1 - k))}`;
   }
   return null;
@@ -1178,8 +1332,15 @@ function cssColorFromArgs(args) {
  * skipping the text ops (glyph paths are not consumable by the native
  * canvas). Returns the full-page RGBA canvas mapped through the viewport
  * transform (canvas space, y-down).
+ *
+ * Pass `{ text: true }` to paint the text layer on top. pdfjs cannot draw
+ * glyphs here — its paintChar hands the native canvas a glyph path it refuses
+ * ("Value is none of these types `String`, `Path`") — so the strings are drawn
+ * from getTextContent at their own transforms instead. Figure crops need this:
+ * a diagram delivered without its SUN / CLOUD / RAIN labels is a diagram the
+ * student can see but cannot read.
  */
-async function replayPageOps(page, vp) {
+async function replayPageOps(page, vp, opts = {}) {
   const { createCanvas } = require('@napi-rs/canvas');
   const { OPS } = loadPdfjs();
   const ops = await page.getOperatorList();
@@ -1188,8 +1349,8 @@ async function replayPageOps(page, vp) {
   const [a, b, c, d, e, f] = vp.transform;
   ctx.transform(a, b, c, d, e, f);
 
-  const colorOp = (args, target) => {
-    const col = cssColorFromArgs(args);
+  const colorOp = (args, target, byteValues) => {
+    const col = cssColorFromArgs(args, byteValues);
     if (col) ctx[target] = col;
   };
   const fillOrStroke = (fn) => {
@@ -1223,6 +1384,73 @@ async function replayPageOps(page, vp) {
     ctx.drawImage(srcCanvas, 0, 0, 1, 1);
   };
 
+  // pdfjs does NOT emit move/line/curve as separate ops: it packs an entire
+  // path into ONE constructPath op — a code list plus a flat coordinate list —
+  // and only the legacy cases below were handled here. Every vector path was
+  // therefore silently skipped while rasters drew fine, which is precisely why
+  // a figure "does not appear": the diagram was detected, cropped, saved and
+  // empty. Painting a path also discards it afterwards (pdfjs consumePath), or
+  // the next constructPath would append to it.
+  let pathOpen = false;
+  let curX = 0;
+  let curY = 0;
+  const beginPath = () => {
+    if (!pathOpen) { ctx.beginPath(); pathOpen = true; }
+  };
+  const consumePath = () => {
+    ctx.beginPath();
+    pathOpen = false;
+  };
+  const constructPath = (codes, coords) => {
+    beginPath();
+    let j = 0;
+    for (const raw of codes) {
+      switch (raw | 0) {
+        case OPS.rectangle: {
+          const x = coords[j++]; const y = coords[j++];
+          const w = coords[j++]; const h = coords[j++];
+          ctx.moveTo(x, y);
+          if (w === 0 || h === 0) { ctx.lineTo(x + w, y + h); }
+          else { ctx.lineTo(x + w, y); ctx.lineTo(x + w, y + h); ctx.lineTo(x, y + h); }
+          ctx.closePath();
+          curX = x; curY = y;
+          break;
+        }
+        case OPS.moveTo:
+          curX = coords[j++]; curY = coords[j++];
+          ctx.moveTo(curX, curY);
+          break;
+        case OPS.lineTo:
+          curX = coords[j++]; curY = coords[j++];
+          ctx.lineTo(curX, curY);
+          break;
+        case OPS.curveTo: {
+          const c1x = coords[j++]; const c1y = coords[j++];
+          const c2x = coords[j++]; const c2y = coords[j++];
+          curX = coords[j++]; curY = coords[j++];
+          ctx.bezierCurveTo(c1x, c1y, c2x, c2y, curX, curY);
+          break;
+        }
+        case OPS.curveTo2: {
+          const sx = curX; const sy = curY;
+          const c1x = coords[j++]; const c1y = coords[j++];
+          curX = coords[j++]; curY = coords[j++];
+          ctx.bezierCurveTo(sx, sy, c1x, c1y, curX, curY);
+          break;
+        }
+        case OPS.curveTo3: {
+          const sx = curX; const sy = curY;
+          const c2x = coords[j++]; const c2y = coords[j++];
+          curX = coords[j++]; curY = coords[j++];
+          ctx.bezierCurveTo(sx, sy, c2x, c2y, curX, curY);
+          break;
+        }
+        default:
+          break;
+      }
+    }
+  };
+
   for (let i = 0; i < ops.fnArray.length; i++) {
     const fn = ops.fnArray[i];
     const args = ops.argsArray[i] || [];
@@ -1241,13 +1469,15 @@ async function replayPageOps(page, vp) {
       case OPS.setDash: ctx.setLineDash(args[0] || []); ctx.lineDashOffset = args[1] || 0; break;
       case OPS.setGlobalAlpha: ctx.globalAlpha = args[0]; break;
       case OPS.setFillRGBColor:
+        colorOp(args, 'fillStyle', true); break;
       case OPS.setFillColorN:
       case OPS.setFillColor:
-        colorOp(args, 'fillStyle'); break;
+        colorOp(args, 'fillStyle', false); break;
       case OPS.setStrokeRGBColor:
+        colorOp(args, 'strokeStyle', true); break;
       case OPS.setStrokeColorN:
       case OPS.setStrokeColor:
-        colorOp(args, 'strokeStyle'); break;
+        colorOp(args, 'strokeStyle', false); break;
       case OPS.beginPath: ctx.beginPath(); break;
       case OPS.closePath: ctx.closePath(); break;
       case OPS.moveTo: ctx.moveTo(args[0], args[1]); break;
@@ -1257,34 +1487,44 @@ async function replayPageOps(page, vp) {
       case OPS.curveTo3: ctx.quadraticCurveTo(args[0], args[1], args[2], args[3]); break;
       case OPS.rectangle: ctx.rect(args[0], args[1], args[2], args[3]); break;
       case OPS.ellipse: ctx.ellipse(args[0], args[1], args[2], args[3], 0, 0, Math.PI * 2); break;
+      case OPS.constructPath:
+        constructPath(args[0] || [], args[1] || []);
+        break;
       case OPS.fill:
       case OPS.eoFill:
         if (args[0] === 2) { try { ctx.fill('evenodd'); } catch { /* opaque layers */ } }
         else { try { ctx.fill(); } catch { /* clip-only */ } }
+        consumePath();
         break;
       case OPS.stroke:
         try { ctx.stroke(); } catch { /* clip-only */ }
+        consumePath();
         break;
       case OPS.fillStroke:
         fillOrStroke(3);
+        consumePath();
         break;
       case OPS.closeFillStroke:
         ctx.closePath();
         fillOrStroke(3);
+        consumePath();
         break;
       case OPS.closeStroke:
         ctx.closePath();
         try { ctx.stroke(); } catch { /* clip-only */ }
+        consumePath();
         break;
       case OPS.clip:
         if (args[0] === 2) { try { ctx.clip('evenodd'); } catch { /* skip */ } }
         else { try { ctx.clip(); } catch { /* skip */ } }
+        consumePath();
         break;
       case OPS.eoClip:
         try { ctx.clip('evenodd'); } catch { /* skip */ }
+        consumePath();
         break;
       case OPS.endPath:
-        ctx.beginPath();
+        consumePath();
         break;
       case OPS.paintImageXObject:
         drawRaster(args);
@@ -1309,6 +1549,27 @@ async function replayPageOps(page, vp) {
         break;
     }
   }
+
+  if (opts.text && typeof page.getTextContent === 'function') {
+    // Draw in CANVAS space, not through the viewport transform: that transform
+    // flips y, and a glyph run under a y-flip comes out mirrored — "SUN"
+    // renders upside down. Position each run by converting its baseline origin
+    // through the viewport and scale the font by the viewport scale instead.
+    const content = await page.getTextContent();
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.textBaseline = 'alphabetic';
+    for (const it of content.items) {
+      if (!it || !it.str || !it.transform) continue;
+      const size = Math.hypot(it.transform[2], it.transform[3]) * vp.scale;
+      if (!(size > 0)) continue;
+      const [tx, ty] = vp.convertToViewportPoint(it.transform[4], it.transform[5]);
+      ctx.font = `${size}px Helvetica, Arial, sans-serif`;
+      ctx.fillStyle = '#000';
+      ctx.fillText(it.str, tx, ty);
+    }
+    ctx.restore();
+  }
   return canvas;
 }
 
@@ -1322,14 +1583,31 @@ async function renderVectorRegion(buffer, image, outPath) {
   const doc = await openDoc(buffer);
   try {
     const page = await doc.getPage(image.page);
-    const vp = page.getViewport({ scale: 1 });
-    const full = await replayPageOps(page, vp);
+    // Replay at 2x WITH the text layer. Graphics alone produce a figure a
+    // student can see but not read — labels are half of what makes a diagram
+    // answerable — and pdfjs's own renderer cannot draw glyphs onto this
+    // canvas, so replayPageOps paints them from getTextContent.
+    const scale = 2;
+    const vp = page.getViewport({ scale });
+    let full;
+    try {
+      full = await replayPageOps(page, vp, { text: true });
+    } catch (err) {
+      console.warn('[pdf] labelled figure render failed, replaying graphics only', { page: image.page, err: (err && err.message) || String(err) });
+      full = await replayPageOps(page, vp);
+    }
     const pad = 4;
     const cw = Math.max(1, Math.round((image.w + pad * 2) * 2));
     const ch = Math.max(1, Math.round((image.h + pad * 2) * 2));
     const out = createCanvas(cw, ch);
     const octx = out.getContext('2d');
-    octx.drawImage(full, image.x - pad, image.y - pad, image.w + pad * 2, image.h + pad * 2, 0, 0, cw, ch);
+    const k = full.width / page.getViewport({ scale: 1 }).width; // 2, or 1 if the replay was scaled differently
+    octx.drawImage(
+      full,
+      (image.x - pad) * k, (image.y - pad) * k, (image.w + pad * 2) * k, (image.h + pad * 2) * k,
+      0, 0, cw, ch
+    );
+    diagnoseRender(out, image.page, 'vector');
     fs.writeFileSync(outPath, out.toBuffer('image/png'));
     return outPath;
   } finally {
@@ -1341,17 +1619,16 @@ async function renderVectorRegion(buffer, image, outPath) {
 
 /**
  * Render a math expression region (a stacked-foundry cluster that was replaced
- * inline by a [MATH:n] marker) to a PNG. Unlike renderVectorRegion, the glyphs
- * MUST be drawn too — pdfjs emits them as Path2D objects, which the native
- * canvas accepts once `globalThis.Path2D` shadows the (absent) global. Renders
- * the full page through pdfjs at `scale`, then crops the expression box and
- * writes the PNG. Pass an optional `pageCache` Map (page number -> rendered
- * canvas) to render each page at most once per import job.
- * Returns outPath (side effect: writes the file).
+ * inline by a [MATH:n] marker) to a PNG: replay the page ops AND the text layer
+ * at `scale`, then crop the expression box and write the PNG. The text layer is
+ * the point — a fraction a student cannot read is no better than no fraction —
+ * and pdfjs's own renderer cannot draw glyphs onto this canvas, so
+ * replayPageOps paints them from getTextContent. Pass an optional `pageCache`
+ * Map (page number -> rendered canvas) to render each page at most once per
+ * import job. Returns outPath (side effect: writes the file).
  */
 async function renderMathRegion(buffer, expr, outPath, scale = 4, pageCache) {
   const { createCanvas } = require('@napi-rs/canvas');
-  if (!globalThis.Path2D) globalThis.Path2D = require('@napi-rs/canvas').Path2D;
   const doc = await openDoc(buffer);
   try {
     const page = await doc.getPage(expr.page);
@@ -1363,9 +1640,7 @@ async function renderMathRegion(buffer, expr, outPath, scale = 4, pageCache) {
     try {
       let canvas = pageCache && pageCache.get(expr.page);
       if (!canvas) {
-        canvas = createCanvas(Math.ceil(vp.width), Math.ceil(vp.height));
-        const ctx = canvas.getContext('2d');
-        await page.render({ canvasContext: ctx, viewport: vp }).promise;
+        canvas = await replayPageOps(page, vp, { text: true });
         if (pageCache) pageCache.set(expr.page, canvas);
       }
       octx.drawImage(canvas, expr.x * scale, expr.y * scale, cw, ch, 0, 0, cw, ch);
