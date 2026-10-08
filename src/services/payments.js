@@ -174,7 +174,9 @@ function linkMessage(exam, link) {
     `💰 *Payment required*\n\n` +
     `*${exam.title}* is a paid paper. Pay *${priceLabel(exam)}* to open it:\n` +
     `${link}\n\n` +
-    `Your exam opens automatically the moment the payment lands — no code to type, no waiting.`
+    `Your exam opens automatically the moment the payment lands — no code to type, no waiting.\n\n` +
+    `If it does not appear automatically, type Hi or Exam in this chat ` +
+    `and your paper will start right away.`
   );
 }
 
@@ -327,10 +329,11 @@ async function ensurePaid(exam, student, session) {
 
 function confirmationMessage(exam) {
   return (
+    // Just the receipt. The "type Hi or Exam" fallback moved onto the payment
+    // bubble, which the student already has in the thread, so nothing here
+    // competes with the paper that is opening behind this message.
     `✅ *Payment received* — *${priceLabel(exam)}* for *${exam.title}*.\n\n` +
-    `Your exam is opening now…\n\n` +
-    `If it does not appear on its own, type *Hi* or *Exam* in this chat ` +
-    `and your paper starts right away.`
+    `Your exam is opening now…`
   );
 }
 

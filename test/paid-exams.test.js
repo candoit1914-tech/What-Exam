@@ -291,6 +291,11 @@ test('a paid exam sends only the payment bubble, never the invite', async () => 
     !sent.some((m) => m.includes('Reply *START*')),
     'the student is never told to START a paper they have not paid for'
   );
+  assert.ok(
+    sent[0].includes('type Hi or Exam in this chat') &&
+      sent[0].includes('your paper will start right away'),
+    'the bubble carries the fallback: a Hi or Exam reply opens the paper'
+  );
 
   const [payment] = paymentsFor(eid);
   assert.equal(payment.status, 'pending');
@@ -668,8 +673,8 @@ test('a student whose webhook never arrived is unlocked by verification on reply
   assert.ok(sent.some((m) => m.includes('Payment received')), 'the student is told');
   assert.match(
     sent.find((m) => m.includes('Payment received')),
-    /type \*Hi\* or \*Exam\*/,
-    'and is told how to start the paper when it does not open by itself'
+    /^✅ \*Payment received\* — \*GHS 10\* for \*Paywall Paper\*\.\n\nYour exam is opening now…$/,
+    'the confirmation is the receipt and nothing else — no start advice to read over the paper'
   );
   assert.ok(sent.some((m) => m.includes('QUESTION 1')), 'and gets their paper on the same reply');
   assert.notEqual(outcome.reason, 'payment_required');
