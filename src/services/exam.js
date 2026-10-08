@@ -513,7 +513,19 @@ const START_WORDS = new Set([
   'go',
   'yo',
   'test',
+  'exam',
 ]);
+
+/**
+ * Greetings and commands to start — words that are never a theory answer.
+ *
+ * Deliberately narrower than START_WORDS: "yes", "ok" and "go" can be a
+ * student's real answer to a short theory question, so swallowing them would
+ * cost them a mark. This set only has to catch what the payment confirmation
+ * tells a stuck student to type ("Hi" or "Exam") and the obvious greetings
+ * that go with it.
+ */
+const GREETING_WORDS = new Set(['hi', 'hello', 'hey', 'yo', 'exam', 'start', 'begin']);
 
 function formatQuestion(exam, question, qCount, body, session, displayNumber = null) {
   // The type banner and any passage/instruction/header are sent as their own
@@ -1474,6 +1486,24 @@ async function processAnswer(session, student, body, meta = {}) {
     }
   }
 
+  // The same protection for theory, where a greeting would otherwise be
+  // marked as their answer: the payment confirmation tells a student whose
+  // paper did not open to type Hi or Exam, and that reply can land here if
+  // the push already went out. Only the opening reply of an attempt is read
+  // this way — once an answer exists the student is genuinely mid-paper, and
+  // a short word there may well be what they meant to write.
+  if (question.type === 'theory' && !meta.replyId && sessionHasNoAnswers(session.id)) {
+    const trimmed = body.trim().toLowerCase();
+    if (GREETING_WORDS.has(trimmed)) {
+      await wa.sendText(
+        student.phone,
+        '🚀 Your exam is on — type your full answer to the question below.'
+      );
+      await sendQuestionTo(session, student);
+      return;
+    }
+  }
+
   const already = db
     .prepare('SELECT id FROM answers WHERE session_id = ? AND question_id = ?')
     .get(session.id, question.id);
@@ -2187,6 +2217,15 @@ async function sendIntro(session, student, exam, count, template, { force = fals
   }
   if (entry.state === 'sent') return;
   try {
+    // A paid paper leads with the checkout link: paying is the first thing the
+    // student has to do, and the approved payment template is the message a
+    // cold recipient can actually receive. tryDeliverLink never throws — it
+    // falls back to a plain apology — so a gateway hiccup cannot cost the
+    // student their invite, and the link is re-sent on every reply until they
+    // pay. A free exam never enters this branch, so its invite is untouched.
+    if (payments.isPaidExam(exam)) {
+      await payments.tryDeliverLink(student, exam);
+    }
     if (template) {
       const values = config.whatsapp.templateParams.length ? config.whatsapp.templateParams
         : [exam.title, exam.subject || 'General', String(exam.duration_minutes), String(count)];
@@ -2196,13 +2235,6 @@ async function sendIntro(session, student, exam, count, template, { force = fals
     }
     outbox.markSent(entry.id);
     recordAcceptance(session);
-    // A paid paper sends its checkout link right behind the invite, in its own
-    // try so a gateway hiccup cannot mark the invite failed — and the link is
-    // re-sent on every reply until the student pays, so nothing is lost. A free
-    // exam never enters this branch, so its invite is untouched.
-    if (payments.isPaidExam(exam)) {
-      await payments.tryDeliverLink(student, exam);
-    }
   } catch (error) {
     outbox.markFailed(entry.id, error, Math.max(1, config.exam.sendRetries));
     throw error;

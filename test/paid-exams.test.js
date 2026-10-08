@@ -274,7 +274,7 @@ test('a free exam grades the first answer instead of re-sending question 1', asy
 
 // ── paid papers ───────────────────────────────────────────────────────
 
-test('a paid exam sends the invite and a checkout link behind it', async () => {
+test('a paid exam sends the checkout link first, then the invite', async () => {
   capture();
   paystackStub();
   const eid = makeExam({ pricing: 'paid', amount: 1000 });
@@ -283,10 +283,10 @@ test('a paid exam sends the invite and a checkout link behind it', async () => {
   const report = await exam.sendExamToRecipients(eid);
 
   assert.equal(report.sent, 1, 'still one recipient, one delivery report entry');
-  assert.equal(sent.length, 2, 'invite first, payment link second');
-  assert.ok(sent[0].includes('INSTRUCTIONS'), 'the invite itself is unchanged');
-  assert.match(sent[1], /checkout\.paystack\.com/, 'the second message is the Paystack link');
-  assert.ok(sent[1].includes('GHS 10'), 'the message says what it costs');
+  assert.equal(sent.length, 2, 'payment link first, invite second');
+  assert.match(sent[0], /checkout\.paystack\.com/, 'the first message is the Paystack link');
+  assert.ok(sent[0].includes('GHS 10'), 'the message says what it costs');
+  assert.ok(sent[1].includes('INSTRUCTIONS'), 'the invite itself is unchanged, and follows');
 
   const [payment] = paymentsFor(eid);
   assert.equal(payment.status, 'pending');
@@ -583,6 +583,11 @@ test('a student whose webhook never arrived is unlocked by verification on reply
 
   assert.equal(payments.hasPaid(eid, student.id), true, 'verified against Paystack directly');
   assert.ok(sent.some((m) => m.includes('Payment received')), 'the student is told');
+  assert.match(
+    sent.find((m) => m.includes('Payment received')),
+    /type \*Hi\* or \*Exam\*/,
+    'and is told how to start the paper when it does not open by itself'
+  );
   assert.ok(sent.some((m) => m.includes('QUESTION 1')), 'and gets their paper on the same reply');
   assert.notEqual(outcome.reason, 'payment_required');
 });

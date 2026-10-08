@@ -326,7 +326,12 @@ async function ensurePaid(exam, student, session) {
 }
 
 function confirmationMessage(exam) {
-  return `✅ *Payment received* — *${priceLabel(exam)}* for *${exam.title}*.\n\nYour exam is opening now…`;
+  return (
+    `✅ *Payment received* — *${priceLabel(exam)}* for *${exam.title}*.\n\n` +
+    `Your exam is opening now…\n\n` +
+    `If it does not appear on its own, type *Hi* or *Exam* in this chat ` +
+    `and your paper starts right away.`
+  );
 }
 
 /**
