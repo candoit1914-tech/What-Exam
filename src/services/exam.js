@@ -842,6 +842,26 @@ function formatExamIntro(exam, questionCount, { started = false } = {}) {
   );
 }
 
+/**
+ * The instructions block a paper opens with — and never for a paid one.
+ *
+ * A paid chat reads: the payment bubble, "Payment received", then the paper.
+ * The invite was deliberately withheld when the admin pressed Send, so
+ * re-sending its twin here would put back the exact bubble they asked not to
+ * see. A paid paper that wants its instructions delivered has the approved
+ * paid-start template, which carries them in the same message as question 1.
+ *
+ * The question count is read here rather than by the caller so it is only
+ * ever counted when it is actually going to be printed.
+ */
+async function sendOpeningIntro(student, exam, session, options = {}) {
+  if (payments.isPaidExam(exam)) return;
+  const questionCount =
+    getSessionQuestionCount(session.id) ||
+    db.prepare('SELECT COUNT(*) c FROM questions WHERE exam_id = ?').get(exam.id).c;
+  await wa.sendText(student.phone, formatExamIntro(exam, questionCount, options));
+}
+
 /** Resolve a student's objective answer from a tap (replyId), a letter, or full option text. */
 function resolveObjectiveLetter(question, body, meta = {}) {
   if (meta.replyId) {
@@ -1309,10 +1329,6 @@ async function maybeStartSession(student, preferredExamId = null) {
   }
 
   if (existing && existing.status === 'in_progress') {
-    const questionCount =
-      getSessionQuestionCount(existing.id) ||
-      db.prepare('SELECT COUNT(*) c FROM questions WHERE exam_id = ?').get(exam.id).c;
-
     // An invited-but-unstarted attempt: the state a paper sits in between
     // "invite sent" and "the student engaged". Payment IS that engagement —
     // the moment Paystack confirms the charge the paper opens for real:
@@ -1335,7 +1351,7 @@ async function maybeStartSession(student, preferredExamId = null) {
         const templated = payments.isPaidExam(exam)
           && await sendPaidStartTemplate(existing, student, exam, firstQ);
         if (!templated) {
-          await wa.sendText(student.phone, formatExamIntro(exam, questionCount, { started: true }));
+          await sendOpeningIntro(student, exam, existing, { started: true });
           if (existing.selection_state === 'selecting') {
             await selection.sendSelector(student.phone, existing.id, existing.selection_section);
             return { ok: true, reason: 'selecting' };
@@ -1352,7 +1368,7 @@ async function maybeStartSession(student, preferredExamId = null) {
       return { ok: true, reason: 'started' };
     }
 
-    await wa.sendText(student.phone, formatExamIntro(exam, questionCount, { started: true }));
+    await sendOpeningIntro(student, exam, existing, { started: true });
     // A restart can leave a selector pending with no question sent; re-render it
     // rather than pushing a question the student never chose.
     if (existing.selection_state === 'selecting') {
@@ -1413,10 +1429,7 @@ async function maybeStartSession(student, preferredExamId = null) {
     session = getActiveSession(student.id);
   }
 
-  const questionCount =
-    getSessionQuestionCount(session.id) ||
-    db.prepare('SELECT COUNT(*) c FROM questions WHERE exam_id = ?').get(exam.id).c;
-  await wa.sendText(student.phone, formatExamIntro(exam, questionCount));
+  await sendOpeningIntro(student, exam, session);
   const sent = await sendQuestionTo(session, student).catch(async (err) => {
     await wa.sendText(student.phone, `Could not start "${exam.title}" right now. Please try again shortly.`);
     return false;

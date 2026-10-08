@@ -438,6 +438,38 @@ test('a signed charge webhook marks the payment and opens the paper by itself', 
   assert.notEqual(outcome.reason, 'payment_required');
 });
 
+test('a paid chat never shows the instructions bubble, even once the paper opens', async () => {
+  // The invite was withheld when the admin pressed Send. Its twin — the same
+  // block, re-sent with "your timer starts now" the moment payment lands —
+  // is the same bubble, so a paying student's thread reads: the payment
+  // bubble, "Payment received", then the paper.
+  capture();
+  paystackStub();
+  const eid = makeExam({ pricing: 'paid', amount: 1000 });
+  const student = addStudent(eid);
+  await exam.sendExamToRecipients(eid);
+  sent.length = 0;
+
+  const [payment] = paymentsFor(eid);
+  const raw = JSON.stringify({
+    event: 'charge.success',
+    data: { reference: payment.reference, amount: 1000, currency: 'GHS', channel: 'mobile_money' },
+  });
+  assert.equal((await postWebhook(raw, sign(raw))).status, 200);
+  await waitFor(() => sent.some((m) => m.includes('QUESTION 1')), 'the paper to open');
+
+  assert.ok(sent.some((m) => m.includes('Payment received')), 'the confirmation went out');
+  assert.ok(sent[0].includes('Payment received'), 'and it leads the conversation');
+  assert.ok(
+    !sent.some((m) => m.includes('*INSTRUCTIONS*')),
+    'the instructions block never appears on a paid paper'
+  );
+  assert.ok(
+    !sent.some((m) => m.includes('Subject: *')),
+    'nor the invite header it is built around'
+  );
+});
+
 test('a paid exam can deliver its first question in an approved start template', async () => {
   capture();
   paystackStub();
