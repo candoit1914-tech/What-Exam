@@ -205,6 +205,24 @@ test('the result message marks theory by section, not by draw position', async (
   assert.match(msg, /^1\. ✅ A → A$/m, 'the answer key numbers objectives from 1 too');
 });
 
+test('the selector echoes the numbers the student typed, not the draw position', async () => {
+  const { sid } = paperFixture();
+  db.prepare("UPDATE sessions SET selection_section = 'sec-b', selection_state = 'selecting' WHERE id = ?")
+    .run(sid);
+  const session = db.prepare('SELECT * FROM sessions WHERE id = ?').get(sid);
+  const student = db.prepare('SELECT * FROM students WHERE id = ?').get(session.student_id);
+
+  const sent = await capturing('sendText', () => selection.handleReply(session, student, '1,3', {}));
+
+  assert.equal(sent.length, 1, 'the echo is one message');
+  assert.match(
+    sent[0][1],
+    /✓ Chosen: 1, 3 — 2 of 2/,
+    'the reply protocol speaks in listing numbers, so the echo does too'
+  );
+  assert.doesNotMatch(sent[0][1], /Q5|Q7/, 'a draw position the student never saw must not appear');
+});
+
 test('the report cards use the same numbers as the bubbles', () => {
   const { sid, objectives, theory } = paperFixture();
   answerFor(sid, objectives[0], 1, 'A', 1, 1, 1);

@@ -316,6 +316,17 @@ function listing(plan) {
   return plan.optional.map((q, i) => `${i + 1}. ${stem(q).slice(0, 90)}`).join('\n');
 }
 
+/**
+ * The number the student chose with: the position in the printed listing
+ * (1..n), never the session q_order. The reply protocol is "reply with their
+ * numbers like 1,3", so echoing a draw position the student has never seen
+ * would name questions they did not pick.
+ */
+function listingNumber(plan, qOrder) {
+  const i = plan.optional.findIndex((q) => q.q_order === qOrder);
+  return i >= 0 ? i + 1 : qOrder;
+}
+
 function selectorBody(plan, numbers) {
   const lines = [];
   if (plan.title) lines.push(`*${plan.title}*`, '');
@@ -528,7 +539,7 @@ async function handleReply(session, student, body, meta = {}) {
   await wa.sendText(
     phone,
     chosen.size
-      ? `✓ Chosen: ${[...chosen].map((q) => `Q${q}`).join(', ')} — ${chosen.size} of ${plan.quota}. Reply CONFIRM to lock it in.`
+      ? `✓ Chosen: ${[...chosen].map((q) => listingNumber(plan, q)).join(', ')} — ${chosen.size} of ${plan.quota}. Reply CONFIRM to lock it in.`
       : `Cleared. Choose ${plan.quota} question${plan.quota === 1 ? '' : 's'}.`
   );
   return { handled: true, committed: false };

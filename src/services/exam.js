@@ -549,6 +549,40 @@ function formatQuestion(exam, question, qCount, body, session, displayNumber = n
   return `*QUESTION ${shown}*\n\n${text}`;
 }
 
+/**
+ * The sub-questions of a theory question, laid out the way the printed paper
+ * lays them out: a heading, then every sub-question in its own block with a
+ * blank line above it. Run together on single newlines, (b) reads as a
+ * continuation of (a)'s marks line; spaced, each one is a separate thing to
+ * answer under the same question number.
+ *
+ * Returns '' when there is nothing to show, so a caller can treat it as just
+ * another part of the message.
+ */
+function formatSubQuestions(question) {
+  if (!question || String(question.type) !== 'theory') return '';
+  let followUps;
+  try {
+    followUps = JSON.parse(question.follow_ups);
+  } catch (err) {
+    console.error('[exam] failed to format follow-up questions:', err.message);
+    return '';
+  }
+  if (!Array.isArray(followUps)) return '';
+
+  const blocks = [];
+  for (const fu of followUps) {
+    const text = fu ? String(fu.text || '').trim() : '';
+    if (!text) continue;
+    const marks = fu && Number.isFinite(Number(fu.marks)) && Number(fu.marks) > 0 ? `\nMarks: ${fu.marks}` : '';
+    // Lettered from the kept blocks, so a malformed entry cannot leave a gap
+    // in the student's (a), (b), (c).
+    blocks.push(`*(${String.fromCharCode(97 + blocks.length)})* ${text}${marks}`);
+  }
+  if (!blocks.length) return '';
+  return `*Sub-questions:*\n\n${blocks.join('\n\n')}`;
+}
+
 /** mm:ss left on the clock, computed from the session start + exam duration. */
 function timeRemaining(session, exam) {
   // Reachable only if a question is ever delivered before the student engages.
@@ -943,27 +977,14 @@ async function sendQuestionTo(session, student, qOrder = null) {
     const options = safeParseOptions(question.options);
     parts.push(options.map((o) => `${o.key}. ${o.text}`).join('\n'));
   }
-  if (question.type === 'theory' && question.follow_ups) {
-    try {
-      const followUps = JSON.parse(question.follow_ups);
-      if (Array.isArray(followUps) && followUps.length > 0) {
-        const fuLines = ['*Follow-up Questions:*'];
-        for (let i = 0; i < followUps.length; i++) {
-          const fu = followUps[i];
-          const letter = String.fromCharCode(97 + i);
-          fuLines.push(`*(${letter})* ${fu.text}\nMarks: ${fu.marks}`);
-        }
-        parts.push(fuLines.join('\n'));
-      }
-    } catch (err) {
-      console.error('[exam] failed to format follow-up questions:', err.message);
-    }
-  }
+  const subQuestions = formatSubQuestions(question);
+  if (subQuestions) parts.push(subQuestions);
 
   // Place the timer BELOW the answer options so students see the question,
-  // options, then time remaining — not buried in the question text.
-  const timer = `\n\nTime remaining: *${timeRemaining(session, exam)}*`;
-  parts.push(timer);
+  // options, then time remaining — not buried in the question text. The parts
+  // are joined by a blank line already, so the timer carries no separators of
+  // its own; giving it its own put two blank lines above it.
+  parts.push(`Time remaining: *${timeRemaining(session, exam)}*`);
 
   const combined = parts.join('\n\n');
   if (combined.trim()) {
@@ -1198,21 +1219,15 @@ async function sendPaidStartTemplate(session, student, exam, firstQ) {
     const sequence = sessionQuestionSequence(session);
     const index = sequence.findIndex((q) => q.id === firstQ.id);
     const bubbles = buildQuestionBubbles(exam, firstQ, sequence, index, session);
-    let followUps = [];
-    if (firstQ.type === 'theory' && firstQ.follow_ups) {
-      try {
-        const parsed = JSON.parse(firstQ.follow_ups);
-        if (Array.isArray(parsed)) {
-          followUps = parsed.map((fu, i) => `(${String.fromCharCode(97 + i)}) ${fu.text}`);
-        }
-      } catch { /* malformed optional follow-ups must not block a paid start */ }
-    }
+    // The same vertical, spaced layout the ordinary question message uses, so
+    // a paper opened through the payment template reads like any other paper.
+    const subQuestions = formatSubQuestions(firstQ);
     const details = [
       ...bubbles,
       ...(firstQ.type === 'objective'
         ? [safeParseOptions(firstQ.options).map((o) => `${o.key}. ${o.text}`).join('\n')]
         : []),
-      ...followUps,
+      ...(subQuestions ? [subQuestions] : []),
       `Time allowed: ${exam.duration_minutes} minutes.`,
     ].filter(Boolean);
     questionText = details.join('\n\n');
@@ -2429,6 +2444,7 @@ module.exports = {
   markAllPendingTheory,
   drainSession,
   formatQuestion,
+  formatSubQuestions,
   buildQuestionBubbles,
   isSectionHeader,
   splitQuestionHeadings,
