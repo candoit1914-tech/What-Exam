@@ -1134,13 +1134,16 @@ router.post('/exams/:id/pdf', upload.single('file'), asyncWrap(async (req, res) 
   res.json({ jobId, message: 'Upload accepted. Extraction is running in the background.' });
 }));
 
-// Diagrams extracted from uploaded PDFs, saved as PNGs in uploadsDir.
+// Diagrams extracted from uploaded PDFs, saved as PNGs in uploadsDir. A figure
+// an admin uploads by hand keeps its own type (jpg as often as png), so this
+// route accepts the same set the upload route writes — otherwise every manual
+// figure shows up broken in the dashboard and looks like a failed import.
 router.get('/exams/:id/images/:file', (req, res) => {
   const name = path.basename(String(req.params.file || ''));
-  if (!/^[\w-]+\.png$/i.test(name)) return res.status(400).json({ error: 'Bad file name' });
+  if (!/^[\w-]+\.(png|jpe?g|webp|gif)$/i.test(name)) return res.status(400).json({ error: 'Bad file name' });
   const full = path.join(config.uploadsDir, name);
   if (!fs.existsSync(full)) return res.status(404).json({ error: 'Image not found' });
-  res.type('image/png').sendFile(full);
+  res.type(path.extname(name).slice(1)).sendFile(full);
 });
 
 // Photo answers uploaded via WhatsApp, saved as PNGs in uploadsDir.

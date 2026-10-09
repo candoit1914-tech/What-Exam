@@ -52,6 +52,66 @@ function figureSummary(diagnostics) {
   return `No images or diagrams were attached: the page scan found ${candidates} candidate${candidates === 1 ? '' : 's'}, all rejected as ${reasons}.`;
 }
 
+/**
+ * What actually reached the database — the sentence that decides whether the
+ * student sees a picture at all.
+ *
+ * figureSummary reports what the page SCAN found, which is a different number
+ * from what was ATTACHED: a marker the renderer could not turn into a file, or
+ * a figure no extracted question references, leaves the note claiming
+ * "attached each to its question" over a question that arrives bare in
+ * WhatsApp. Everything here counts rows that exist now:
+ *
+ *   requested — [IMG:n] markers the saved questions kept,
+ *   attached  — files actually rendered and stored for them,
+ *   failures  — why the difference, in the renderer's own words.
+ */
+function attachmentSummary({ requested = 0, attached = 0, failures = [], diagnostics } = {}) {
+  const figures = (diagnostics && diagnostics.figures) || {};
+  const pages = figures.pages || 0;
+  const kept = figures.kept || 0;
+  const vision = figures.visionRecovered || 0;
+  const byAi = vision ? ` (${vision} of them located by the AI reading the page image)` : '';
+  const plural = (n) => (n === 1 ? 'image or diagram' : 'images or diagrams');
+  const reasons = [...new Set((failures || []).map((f) => String(f).slice(0, 160)))].slice(0, 2).join('; ');
+
+  if (requested === 0) {
+    // The scan found figures, but not one of them sits inside a saved
+    // question — the most confusing outcome of all, because figureSummary
+    // would announce figures the student is never going to be shown.
+    if (kept > 0) {
+      return (
+        `Found ${kept} ${plural(kept)} in this PDF, but no saved question references ${kept === 1 ? 'it' : 'them'}, ` +
+        `so none were attached — ${kept === 1 ? 'that question reaches' : 'those questions reach'} the student ` +
+        `${kept === 1 ? 'without its figure' : 'without their figures'}.`
+      );
+    }
+    return figureSummary(diagnostics);
+  }
+  if (attached >= requested && attached > 0 && kept === requested) {
+    return figureSummary(diagnostics) || `Found ${requested} ${plural(requested)} and attached each to its question.`;
+  }
+  if (attached >= requested && attached > 0) {
+    return (
+      `Attached ${attached} ${plural(attached)} to the questions that reference ${attached === 1 ? 'it' : 'them'}${byAi} ` +
+      `(${kept} ${kept === 1 ? 'was' : 'were'} found in the PDF in total — the others belong to questions this import did not save).`
+    );
+  }
+  if (attached > 0) {
+    const missing = requested - attached;
+    return (
+      `Attached ${attached} of ${requested} ${plural(requested)} to their questions; ` +
+      `${missing} could not be rendered (${reasons || 'the renderer produced no file'}) and ` +
+      `${missing === 1 ? 'will reach the student without its figure' : 'will reach the student without their figures'}.`
+    );
+  }
+  return (
+    `Found ${requested} ${plural(requested)} but none could be rendered (${reasons || 'the renderer produced no file'}). ` +
+    `Those questions will reach the student WITHOUT ${requested === 1 ? 'their figure' : 'their figures'} — ` +
+    'check the server log for "diagram attachment failed".'
+  );
+}
+
 // ── Vision rescue ──────────────────────────────────────────────────────
 //
 // The path scanner assembles figures out of what the PDF draws. Sometimes
@@ -534,16 +594,17 @@ async function startJob(jobId, buffer, opts = {}) {
     // one type is compared against everything that was parsed: measuring the
     // filtered subset against the whole document would cry "questions missing"
     // over a filter the admin chose on purpose.
+    //
+    // The figure note is deliberately NOT written here: at this point nothing
+    // has been rendered yet, so a sentence saying the figures were attached
+    // would be a promise, not a report. attachmentSummary() writes it once the
+    // files really exist (or really do not).
     const warning = [
       ai.completenessWarning(
         ai.estimateQuestionCount(ai.cleanExamText(text)),
         typeFilter ? parsed : filtered
       ),
       blockWarning,
-      // Appended even when everything is fine: "figures found, attached to
-      // their questions" is the answer an admin is looking for after asking
-      // why the diagrams never showed up.
-      figureSummary(sourceText.diagnostics),
     ].filter(Boolean).join(' ');
     const jobWarning = [...warnings, warning].filter(Boolean).join(' ');
     if (jobWarning) updateJob(jobId, { warning: jobWarning });
@@ -591,6 +652,12 @@ async function startJob(jobId, buffer, opts = {}) {
     let objIdx = 0;
     const theoryToScheme = [];
     const pageCache = new Map();
+    // Figures this import was asked to attach, how many really got a file, and
+    // why the two numbers differ. Nothing here is inferred from the scan: these
+    // are rows that exist (or do not) once the loop is done.
+    let figureRequested = 0;
+    let figureAttached = 0;
+    const figureFailures = [];
     for (const g of filtered) {
       if (g.passage && String(g.passage).trim()) curPassage = stripSourceWatermarks(String(g.passage).trim());
       const passage = curPassage;
@@ -606,18 +673,20 @@ async function startJob(jobId, buffer, opts = {}) {
       // import — the question still imports, just without that figure.
       const figureMarkers = figureMarkersFor(g);
       const figureFiles = [];
+      figureRequested += figureMarkers.length;
       for (const markerIndex of figureMarkers) {
+        const dest = path.join(
+          config.uploadsDir,
+          imageFileNameFor(job.exam_id, nextOrder, markerIndex)
+        );
         const entry = images[markerIndex];
         if (!entry) {
           console.warn('[pdf-import] diagram marker has no image', { jobId, questionOrder: nextOrder,
             marker: `[IMG:${markerIndex}]` });
+          figureFailures.push(`[IMG:${markerIndex}] pointed at no image on the page`);
           continue;
         }
         try {
-          const dest = path.join(
-            config.uploadsDir,
-            imageFileNameFor(job.exam_id, nextOrder, markerIndex)
-          );
           figureFiles.push(path.basename(
             await (entry.kind === 'vector'
               ? pdf.renderVectorRegion(buffer, entry, dest)
@@ -625,10 +694,16 @@ async function startJob(jobId, buffer, opts = {}) {
           ));
         } catch (e) {
           console.warn('[pdf-import] diagram attachment failed', { jobId, questionOrder: nextOrder,
-            marker: `[IMG:${markerIndex}]`, page: entry.page });
+            marker: `[IMG:${markerIndex}]`, page: entry.page, error: e.message || e.code || e.name });
           diag('diagram render error', { jobId, error: e.code || e.name });
+          // Named in the import note, not just the log: this is the moment a
+          // student's diagram quietly disappears, and the admin's only other
+          // clue would be a question that arrives in WhatsApp with nothing
+          // above it.
+          figureFailures.push(`${path.basename(dest)}: ${e.message || e.code || e.name}`);
         }
       }
+      figureAttached += figureFiles.length;
       const imageFile = figureFiles[0] || '';
       // One bubble rides in questions.image alone (exactly as before); a
       // question carrying several — two figures, or a figure beside a maths
@@ -701,6 +776,20 @@ async function startJob(jobId, buffer, opts = {}) {
         theoryToScheme.push(q);
       }
       nextOrder++;
+    }
+
+    // Written only now, when every render has happened and "attached" counts
+    // files that exist. Appended rather than set, so an OCR note or a
+    // completeness warning from earlier survives.
+    const figureNote = attachmentSummary({
+      requested: figureRequested,
+      attached: figureAttached,
+      failures: figureFailures,
+      diagnostics: sourceText.diagnostics,
+    });
+    if (figureNote) {
+      const prior = (getJob(jobId) || {}).warning;
+      updateJob(jobId, { warning: [prior, figureNote].filter(Boolean).join(' ') });
     }
 
     updateJob(jobId, { stage: 'Building marking schemes…', progress: 70 });
@@ -1013,6 +1102,7 @@ module.exports = {
   storeMathImages,
   describeExtractionFailure,
   figureSummary,
+  attachmentSummary,
   recoverFiguresWithVision,
   slugOf,
   PAPER_SECTION_KEY,

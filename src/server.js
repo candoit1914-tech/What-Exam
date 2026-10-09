@@ -1,5 +1,6 @@
 const express = require('express');
 const path = require('path');
+const fs = require('fs');
 const config = require('./config');
 const { checkConfig } = require('./services/configCheck');
 const api = require('./routes/api');
@@ -54,7 +55,29 @@ app.get('/report/:sessionId/attachment', (req, res) => {
   const name = path.basename(String(req.query.file || ''));
   if (!/^[\w-]+\.png$/i.test(name)) return res.status(400).send('Bad file name');
   const full = path.join(config.uploadsDir, name);
-  res.type('image/png').sendFile(full).on('error', () => res.status(404).end());
+  // Checked up front: res.sendFile() returns undefined in Express 4, so the
+  // old `.sendFile(...).on('error')` chain threw a TypeError and turned every
+  // missing attachment into a 500 instead of a 404.
+  if (!fs.existsSync(full)) return res.status(404).end();
+  res.type('image/png').sendFile(full);
+});
+
+// A question's figure, for WhatsApp to fetch itself.
+//
+// This is the fallback transport for `image.link`: /api demands a bearer token
+// Meta cannot present, so a figure needs a route that is public but signed —
+// one file, one token, an expiry. Without it, a media upload Meta refuses
+// (oversized crop, media permission missing) leaves the student reading a
+// question whose diagram only ever existed on this server.
+app.get('/figure/:file', (req, res) => {
+  const name = path.basename(String(req.params.file || ''));
+  if (!/^[\w-]+\.(png|jpe?g|webp|gif)$/i.test(name)) return res.status(400).send('Bad file name');
+  if (!auth.verifyFigureToken(req.query.token || '', name)) {
+    return res.status(403).send('Invalid or expired figure link.');
+  }
+  const full = path.join(config.uploadsDir, name);
+  if (!fs.existsSync(full)) return res.status(404).end();
+  res.type(path.extname(name).slice(1)).sendFile(full);
 });
 
 app.get('/report/:sessionId', (req, res) => {

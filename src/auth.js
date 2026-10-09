@@ -3,6 +3,9 @@ const config = require('./config');
 
 const ADMIN_TTL_MS = 12 * 60 * 60 * 1000;
 const REPORT_TTL_MS = 90 * 24 * 60 * 60 * 1000;
+// Long enough that a figure sent today still resolves when the student opens
+// the question days later; short enough that a leaked link stops working.
+const FIGURE_TTL_MS = 90 * 24 * 60 * 60 * 1000;
 
 function secret() {
   return crypto.createHash('sha256').update(String(config.admin.password) + ':what-exam:sign:v1').digest('hex');
@@ -63,4 +66,25 @@ function reportUrl(sessionId) {
   return `/report/${sessionId}?token=${encodeURIComponent(reportToken(sessionId))}`;
 }
 
-module.exports = { verifyPassword, adminToken, verifyAdmin, verifyReportToken, reportUrl, reportToken, ADMIN_TTL_MS };
+/**
+ * A signed, expiring URL for ONE figure file.
+ *
+ * /api refuses every request without a bearer token, which is correct for the
+ * dashboard and useless for WhatsApp: Meta fetches `image.link` with no
+ * credentials at all. This token is what lets a figure live outside /api
+ * without becoming a directory listing — it names exactly one file, and it
+ * expires.
+ */
+function figureToken(file) {
+  return signToken({ sub: 'figure', f: String(file) }, FIGURE_TTL_MS);
+}
+
+function verifyFigureToken(token, file) {
+  const p = verifyToken(token);
+  return !!p && p.sub === 'figure' && p.f === String(file);
+}
+
+module.exports = {
+  verifyPassword, adminToken, verifyAdmin, verifyReportToken, reportUrl, reportToken,
+  figureToken, verifyFigureToken, ADMIN_TTL_MS,
+};

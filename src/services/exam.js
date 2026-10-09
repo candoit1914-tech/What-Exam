@@ -2,6 +2,7 @@ const db = require('../db');
 const fs = require('fs');
 const path = require('path');
 const config = require('../config');
+const auth = require('../auth');
 const wa = require('./whatsapp');
 const marking = require('./marking');
 const results = require('./results');
@@ -982,6 +983,18 @@ function questionImageFiles(question) {
 }
 
 /**
+ * The same picture served from our own server, signed for one file.
+ *
+ * This is what wa.sendImage falls back to when the Media API will not take the
+ * bytes: `image.link` makes WhatsApp fetch the figure itself, so the only
+ * thing that can stop the student seeing their diagram is our own URL being
+ * unreachable — not a media permission, not a size limit.
+ */
+function figureLink(file) {
+  return `${config.appUrl}/figure/${encodeURIComponent(file)}?token=${encodeURIComponent(auth.figureToken(file))}`;
+}
+
+/**
  * Send a question's figures in order, ABOVE the question text.
  *
  * A failed bubble is logged and does not stop the ones behind it, but the
@@ -995,13 +1008,44 @@ async function sendQuestionImageBubbles(question, phone) {
   let error = null;
   for (const file of questionImageFiles(question)) {
     try {
-      await wa.sendImage(phone, path.join(config.uploadsDir, file));
+      await wa.sendImage(phone, path.join(config.uploadsDir, file), { publicUrl: figureLink(file) });
     } catch (err) {
       error = error || err;
-      console.error('[exam] question image send failed (continued):', err.message);
+      // The ONLY record of a figure that never arrived. Without it the failure
+      // is invisible: the question text goes out normally, the student simply
+      // answers a diagram they cannot see, and nothing in the log names the
+      // file that was lost.
+      console.error(
+        `[exam] question image send failed (continued) — question ${question.id}, file ${file}: ${err.message}`
+      );
     }
   }
   return { ok: !error, error };
+}
+
+/**
+ * Deliver a question's figures and RECORD the attempt, so a bubble that fails
+ * is owed rather than lost.
+ *
+ * Every question goes through here, not just the paid-template path: a figure
+ * that failed once (Media API hiccup, file written a moment after the send) is
+ * retried by deliverOwedFigures() on the student's next message, and the error
+ * stays in message_outbox where it can be read afterwards.
+ */
+async function deliverQuestionFigures(session, student, question) {
+  if (!questionImageFiles(question).length) return { ok: true, error: null };
+  const entry = outbox.enqueue({
+    sessionId: session.id,
+    questionId: question.id,
+    qOrder: question.q_order,
+    kind: 'figure',
+    recipient: student.phone,
+  });
+  if (entry.state === 'sent') return { ok: true, error: null };
+  const res = await sendQuestionImageBubbles(question, student.phone);
+  if (res.ok) outbox.markSent(entry.id);
+  else outbox.markFailed(entry.id, res.error, Math.max(1, config.exam.sendRetries));
+  return res;
 }
 
 /**
@@ -1015,18 +1059,7 @@ async function sendQuestionImageBubbles(question, phone) {
  * opens the window.
  */
 async function oweQuestionFigure(session, student, question) {
-  if (!questionImageFiles(question).length) return;
-  const entry = outbox.enqueue({
-    sessionId: session.id,
-    questionId: question.id,
-    qOrder: question.q_order,
-    kind: 'figure',
-    recipient: student.phone,
-  });
-  if (entry.state === 'sent') return;
-  const res = await sendQuestionImageBubbles(question, student.phone);
-  if (res.ok) outbox.markSent(entry.id);
-  else outbox.markFailed(entry.id, res.error, Math.max(1, config.exam.sendRetries));
+  return deliverQuestionFigures(session, student, question);
 }
 
 /**
@@ -1087,8 +1120,10 @@ async function sendQuestionTo(session, student, qOrder = null) {
   // Diagram/image bubbles go directly ABOVE the question so the student sees
   // the figure first, then the full question that refers to it. Every surface
   // obeys the same rule — chat, dashboard and report all show the figure on
-  // top of the question it belongs to.
-  await sendQuestionImageBubbles(question, student.phone);
+  // top of the question it belongs to. The attempt is recorded: a picture that
+  // fails to send is retried on the student's next message instead of being
+  // logged once and lost.
+  await deliverQuestionFigures(session, student, question);
 
   // Question bubble: full stem, then the answer (options or follow-ups), then
   // the timer — nothing omitted.
@@ -2572,6 +2607,8 @@ module.exports = {
   sendExamToRecipients,
   resendExamToRecipients,
   sendQuestionTo,
+  deliverOwedFigures,
+  deliverQuestionFigures,
   restartSession,
   getSessionQuestion,
   getSessionQuestionCount,

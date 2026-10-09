@@ -12,6 +12,7 @@
     "init": "node src/server.js --init",
     "test": "node --test test/*.test.js",
     "config:check": "node scripts/config-check.js",
+    "figures": "node scripts/figure-report.js",
     "seed": "node scripts/seed-exam.js",
     "send": "node scripts/send-exam.js"
   },

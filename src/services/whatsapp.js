@@ -186,30 +186,145 @@ async function sendText(to, text) {
   return data;
 }
 
-/** Upload a PNG (buffer or file path) to the Media API, then send it as an image message. */
-async function sendImage(to, image) {
-  let imageBuffer;
-  if (Buffer.isBuffer(image)) {
-    imageBuffer = image;
-  } else {
-    const fs = require('fs');
-    imageBuffer = fs.readFileSync(image);
-  }
+// ── Image messages ────────────────────────────────────────────────────
+//
+// The /media endpoint is strict and quiet about it: it takes PNG, JPEG, GIF or
+// WebP up to 5 MB and answers anything else with a bare 400. The caller never
+// sees that 400 as "your picture was too big" — it arrives three bubbles later
+// as a student telling you the diagram never came through, while the question
+// text beside it went out fine. So every figure is sniffed and normalized
+// BEFORE the upload, shrunk once more if Meta still refuses, and — if the
+// upload cannot be made to work at all — sent by LINK instead, which asks
+// WhatsApp to fetch the bytes from our own signed URL and needs no media
+// permission whatsoever.
+const MEDIA_MAX_BYTES = 4 * 1024 * 1024;
+
+/** The WhatsApp-accepted image type of these bytes, or '' when unreadable. */
+function imageMediaType(buf) {
+  if (!Buffer.isBuffer(buf)) return '';
+  if (buf.length >= 24 && buf.readUInt32BE(0) === 0x89504e47) return 'image/png';
+  if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'image/jpeg';
+  if (buf.length >= 12 && buf.toString('ascii', 0, 4) === 'RIFF' && buf.toString('ascii', 8, 12) === 'WEBP') return 'image/webp';
+  if (buf.length >= 6 && buf.toString('ascii', 0, 3) === 'GIF') return 'image/gif';
+  return '';
+}
+
+/**
+ * Re-encode to a bounded JPEG — the format every WhatsApp client renders and
+ * the /media endpoint never argues about. White, not black: a diagram drawn on
+ * a transparent canvas composites onto black for JPEG, which turns a line
+ * drawing into an unreadable silhouette.
+ */
+async function toSendableJpeg(buf) {
+  const sharp = require('sharp');
+  const out = await sharp(buf, { limitInputPixels: 1024 * 1024 * 512 })
+    .rotate()
+    .flatten({ background: '#ffffff' })
+    .resize({ width: 1920, height: 1920, fit: 'inside', withoutEnlargement: true })
+    .jpeg({ quality: 82 })
+    .toBuffer();
+  return out && out.length ? out : buf;
+}
+
+async function uploadMedia(buffer, mime) {
   const form = new FormData();
+  const name = mime === 'image/jpeg' ? 'figure.jpg' : mime === 'image/png' ? 'figure.png' : 'figure.img';
   form.append('messaging_product', 'whatsapp');
-  form.append('type', 'image/png');
-  form.append('file', new Blob([imageBuffer], { type: 'image/png' }), 'certificate.png');
-  const uploaded = await request(`${GRAPH}/v21.0/${config.whatsapp.phoneNumberId}/media`, {
+  form.append('type', mime);
+  form.append('file', new Blob([buffer], { type: mime }), name);
+  return request(`${GRAPH}/v21.0/${config.whatsapp.phoneNumberId}/media`, {
     body: form,
     timeoutMs: 30000,
   });
-  const mediaId = uploaded?.id;
-  if (!mediaId) throw new Error(`WhatsApp media upload failed: ${JSON.stringify(uploaded).slice(0, 200)}`);
+}
+
+/**
+ * Upload image bytes, returning the media id. Failures about the BYTES
+ * (unreadable format, file too large) get one shrink-and-retry; auth, rate
+ * limit and network failures are passed straight through, because re-sending
+ * the same file smaller does not fix a token.
+ */
+async function uploadImageBuffer(buffer, mime, label) {
+  try {
+    const uploaded = await uploadMedia(buffer, mime);
+    const id = uploaded?.id;
+    if (!id) throw new Error(`WhatsApp media upload returned no id: ${JSON.stringify(uploaded).slice(0, 200)}`);
+    return id;
+  } catch (err) {
+    if (err.status !== 400) throw err;
+    let shrunk;
+    try {
+      shrunk = await toSendableJpeg(buffer);
+    } catch {
+      throw err; // the original rejection is the real reason
+    }
+    console.warn(`[whatsapp] media upload rejected (${err.message.slice(0, 160)}); retrying ${label} as a smaller JPEG`);
+    const uploaded = await uploadMedia(shrunk, 'image/jpeg');
+    const id = uploaded?.id;
+    if (!id) throw new Error(`WhatsApp media upload returned no id: ${JSON.stringify(uploaded).slice(0, 200)}`);
+    return id;
+  }
+}
+
+/**
+ * Is this a URL Meta's crawler could actually reach? WhatsApp only fetches
+ * HTTPS, and a link pointing at localhost is unreachable from Meta's side — so
+ * in both cases the fallback would trade a real upload error for an opaque
+ * fetch failure, and the original reason is kept instead.
+ */
+function linkUsable(url) {
+  try {
+    const u = new URL(url);
+    return u.protocol === 'https:' && !/^(localhost|127\.0\.0\.1|\[::1\])$/i.test(u.hostname);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Send an image message.
+ *
+ * `image` is a file path or a buffer. `opts.publicUrl` is the same picture on
+ * our own server: when the media upload cannot be made to work, the message
+ * goes out with `image.link` instead of `image.id`, so a Media-API problem
+ * costs the student their diagram only if BOTH transports fail.
+ */
+async function sendImage(to, image, opts = {}) {
+  const fs = require('fs');
+  let buffer;
+  let label;
+  if (Buffer.isBuffer(image)) {
+    buffer = image;
+    label = 'the attached buffer';
+  } else {
+    label = image;
+    // A file that is not there is reported as such. readFileSync's ENOENT
+    // ("ENOENT: no such file or directory, open '/opt/…/1791.png'") does name
+    // the path, but this says in one line what it means for the exam.
+    if (!fs.existsSync(image)) throw new Error(`Figure file is missing from disk: ${image}`);
+    buffer = fs.readFileSync(image);
+  }
+  if (!buffer || !buffer.length) throw new Error(`Figure file is empty: ${label}`);
+
+  let mime = imageMediaType(buffer);
+  if (!mime || buffer.length > MEDIA_MAX_BYTES) {
+    buffer = await toSendableJpeg(buffer);
+    mime = 'image/jpeg';
+  }
+
+  let mediaId = null;
+  try {
+    mediaId = await uploadImageBuffer(buffer, mime, label);
+  } catch (err) {
+    if (!opts.publicUrl || !linkUsable(opts.publicUrl)) throw err;
+    console.error(`[whatsapp] media upload failed, sending ${label} by link instead: ${err.message}`);
+  }
+
   const data = await api('messages', {
     messaging_product: 'whatsapp',
     to,
     type: 'image',
-    image: { id: mediaId },
+    image: mediaId ? { id: mediaId } : { link: opts.publicUrl },
   });
   logOutbound(to, data?.messages?.[0]?.id, 'image');
   return data;
@@ -358,6 +473,8 @@ module.exports = {
   splitTextChunks,
   sendText,
   sendImage,
+  imageMediaType,
+  linkUsable,
   sendInteractiveButtons,
   sendInteractiveList,
   sendTemplate,
