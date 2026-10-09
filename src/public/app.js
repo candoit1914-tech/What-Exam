@@ -705,14 +705,14 @@ function selectionRulesCardHTML(examId, sections, selection, questions) {
   const editable = examState.data.exam && !['live', 'ended'].includes(examState.data.exam.status);
   return `<div class="card" style="margin-top:14px">
     <h3 style="margin-bottom:4px">SELECTION <span class="gr">RULES</span></h3>
-    <p class="muted qmeta">Students choose which questions to answer. Compulsory questions are always answered.</p>
+    <p class="muted qmeta">Students choose which questions to answer. Compulsory questions are always answered, and the number you set counts them too — "Answer any 4" in a section of five means four questions answered, not four chosen.</p>
     ${rows.map((r) => `<div class="row" style="margin-top:12px;gap:10px;align-items:flex-end;flex-wrap:wrap">
       <div class="field" style="flex:1;min-width:180px"><label>Section</label>
         <input type="text" data-skey="${esc(r.section_key)}" value="${esc(r.title)}" ${editable ? '' : 'disabled'}></div>
       <div class="field" style="flex:2;min-width:220px"><label>Paper instruction</label>
         <input type="text" data-sinst="${esc(r.section_key)}" value="${esc(r.instructions)}" ${editable ? '' : 'disabled'}></div>
       <div class="field" style="width:120px"><label>Answer any</label>
-        <input type="number" data-scount="${esc(r.section_key)}" min="0" max="${r.pool || (r.pool + r.compulsory)}" value="${r.answer_count}" ${editable ? '' : 'disabled'}></div>
+        <input type="number" data-scount="${esc(r.section_key)}" min="0" max="${r.pool + r.compulsory}" value="${r.answer_count}" ${editable ? '' : 'disabled'}></div>
       <div class="muted" style="padding-bottom:10px">of ${SelectionUI.rowHint(r)}</div>
     </div>`).join('')}
     ${editable ? `<div class="row" style="margin-top:14px">

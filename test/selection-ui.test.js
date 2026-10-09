@@ -36,9 +36,17 @@ test('a section with a rule renders one row carrying the real pool sizes', () =>
   );
   assert.equal(rows.length, 1);
   assert.equal(rows[0].section_key, 'section-b');
-  assert.equal(rows[0].answer_count, 2, "the card shows the server's resolved quota");
+  // The card shows what the section OWES — three questions, one of them
+  // compulsory — because that is the number an admin types. Showing the quota
+  // (the two they pick) would reprice the rule to 2 on the next save.
+  assert.equal(rows[0].answer_count, 3, "the card shows the server's resolved rule");
   assert.equal(rows[0].pool, 3);
   assert.equal(rows[0].compulsory, 1);
+});
+
+test('a plan that carries toAnswer is shown verbatim', () => {
+  const rows = ui.ruleRows([], [{ ...PLAN, toAnswer: 4, quota: 3 }]);
+  assert.equal(rows[0].answer_count, 4, 'the server-resolved count wins over any rebuild');
 });
 
 test('a section with questions but no rule still appears, so the admin can set one', () => {
@@ -93,23 +101,26 @@ test('the resolved plan still wins over the raw questions for a known key', () =
     [{ section_key: 'section-b', is_compulsory: 1 }] // stale list, all compulsory
   );
   assert.equal(rows[0].pool, 3, 'the plan carries the server\u2019s resolved pool, not a re-count');
-  assert.equal(rows[0].answer_count, 2);
+  assert.equal(rows[0].answer_count, 3, 'and the rule it resolved, compulsory included');
 });
 
 test('the row hint states the ceiling so the quota is never a surprise', () => {
   const [row] = ui.ruleRows([], [PLAN]);
-  assert.equal(ui.rowHint(row), '3 optionals · 1 compulsory');
-  assert.equal(ui.rowHint({ pool: 1, compulsory: 0 }), '1 optional · 0 compulsory');
+  // The ceiling is the whole section: the student owes the compulsory question
+  // too, so an input capped at the optional pool would refuse the paper's own
+  // "answer any 4 of 5" the moment one of the five is compulsory.
+  assert.equal(ui.rowHint(row), '4 questions · 1 compulsory');
+  assert.equal(ui.rowHint({ pool: 1, compulsory: 0 }), '1 question · 0 compulsory');
 });
 
-test('only rules with a live quota reach the summary', () => {
+test('only live rules reach the summary, counted the way the paper counts them', () => {
   // A section the server resolved to 0 is answer-all. Listing it as a rule
   // would tell the admin students get a choice they do not get.
   const lines = ui.summaryLines([
     PLAN,
     { section_key: 'section-c', title: 'SECTION C', quota: 0, optional: [{}, {}] },
   ]);
-  assert.deepEqual(lines, ['SECTION B: answer any 2 of 3']);
+  assert.deepEqual(lines, ['SECTION B: answer 3 of 4 (1 compulsory)']);
   assert.deepEqual(ui.summaryLines([]), [], 'no rules reads as none, not as an empty line');
   assert.deepEqual(ui.summaryLines(undefined), []);
 });
@@ -117,7 +128,7 @@ test('only rules with a live quota reach the summary', () => {
 test('the summary falls back to the key when a section has no title', () => {
   assert.deepEqual(
     ui.summaryLines([{ section_key: 'section-b', quota: 1, optional: [{}] }]),
-    ['section-b: answer any 1 of 1']
+    ['section-b: answer 1 of 1']
   );
 });
 
@@ -194,8 +205,8 @@ test('the exam page renders a selection-rules card and a save path', () => {
   );
   assert.match(
     app,
-    /max="\$\{r\.pool \|\| \(r\.pool \+ r\.compulsory\)\}"/,
-    'a section whose questions are all compulsory still accepts a quota — saving it is what makes them optional'
+    /max="\$\{r\.pool \+ r\.compulsory\}"/,
+    'the ceiling is the whole section: answer_count counts the compulsory questions too'
   );
 });
 

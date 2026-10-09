@@ -524,31 +524,29 @@ router.patch('/exams/:id/sections', (req, res) => {
       if (!s || !String(s.section_key || '').trim()) continue;
       const key = String(s.section_key).trim();
       const want = Math.max(0, parseInt(s.answer_count, 10) || 0);
-      let pool = db
+      const optional = db
         .prepare('SELECT COUNT(*) c FROM questions WHERE exam_id = ? AND section_key = ? AND is_compulsory = 0')
         .get(exam.id, key).c;
-      if (want > 0 && pool === 0) {
-        // A quota over an empty pool cannot fire: the quota is priced against
-        // the OPTIONAL questions, so with none flagged the rule clamps to
-        // answer-all and the student is never offered a single choice. That is
-        // the shape an imported paper ends up in when the paper's own
-        // instruction could not be read (every question keeps its compulsory
-        // default), and it is also what the card means when it says a section
-        // has "0 optionals". An admin typing a quota for it is saying this
-        // section IS a choice, so flag its questions optional and price the
-        // quota against them.
-        const total = db
-          .prepare('SELECT COUNT(*) c FROM questions WHERE exam_id = ? AND section_key = ?')
-          .get(exam.id, key).c;
-        if (total > 0) {
-          db.prepare('UPDATE questions SET is_compulsory = 0 WHERE exam_id = ? AND section_key = ?')
-            .run(exam.id, key);
-          pool = total;
-        }
+      const total = db
+        .prepare('SELECT COUNT(*) c FROM questions WHERE exam_id = ? AND section_key = ?')
+        .get(exam.id, key).c;
+      if (want > 0 && optional === 0 && total > 0) {
+        // A quota over an empty pool cannot fire: the choices are the OPTIONAL
+        // questions, so with none flagged the rule has nothing to offer and
+        // every quota silently collapses to answer-all. That is the shape an
+        // imported paper ends up in when the paper's own instruction could not
+        // be read (every question keeps its compulsory default), and it is also
+        // what the card means when it says a section has "0 optionals". An
+        // admin typing a quota for it is saying this section IS a choice, so
+        // flag its questions optional and offer them.
+        db.prepare('UPDATE questions SET is_compulsory = 0 WHERE exam_id = ? AND section_key = ?')
+          .run(exam.id, key);
       }
-      // Clamp to the real pool: a quota covering every optional question is
-      // answer-all, and storing it would show the admin a rule that never fires.
-      const count = Math.min(want, pool);
+      // Clamp against the WHOLE section, compulsory questions included:
+      // answer_count is the paper's own number ("answer any 4 of 5"), so only a
+      // count that covers every question is answer-all. Storing that would show
+      // the admin a rule that can never fire.
+      const count = Math.min(want, total);
       upsert.run(exam.id, key, String(s.title || ''),
         String(s.instructions || ''), parseInt(s.position, 10) || 0, count);
     }

@@ -325,6 +325,14 @@ function drawSessionQuestions(sessionId, examId) {
   chosen.forEach((p, i) => {
     ins.run(sessionId, p.id, i + 1, 1, p.section_key || '');
   });
+  // A rule that stops at the compulsory questions ("answer any 1, question 1 is
+  // compulsory") leaves nothing to choose, so no selector will ever open — and
+  // the optional questions the paper never demanded must not be delivered
+  // either. Dropping them here is what makes that section read as committed
+  // from the student's very first bubble.
+  for (const key of selection.compulsoryOnlySections(sessionId)) {
+    selection.applySelection(sessionId, key, []);
+  }
   db.prepare('UPDATE sessions SET paper_total = ? WHERE id = ?')
     .run(selection.computePaperTotal(sessionId), sessionId);
   return chosen.length;
@@ -874,11 +882,17 @@ function formatExamIntro(exam, questionCount, { started = false, opening = false
     : 'If the questions do not appear automatically, type Hi or Exam in this chat and your exam will start immediately.\n\n';
   const instructions = steps.map((s, i) => `${i + 1}. ${s}`).join('\n');
   // A paper that asks the student to choose says so up front, so nobody only
-  // discovers the rule when the selector interrupts them mid-exam.
+  // discovers the rule when the selector interrupts them mid-exam. The count is
+  // the paper's own — compulsory questions included — because that is the
+  // number the student will be held to.
   const rules = selection
     .sectionPlan(exam.id)
-    .filter((s) => s.quota > 0)
-    .map((s) => `${selection.sectionLabel(s) || s.section_key}: answer any ${s.quota} of the ${s.optional.length} questions.`);
+    .filter((s) => s.toAnswer > 0)
+    .map((s) => {
+      const total = s.optional.length + s.compulsory.length;
+      const forced = s.compulsory.length ? ` (${s.compulsory.length} compulsory)` : '';
+      return `${selection.sectionLabel(s) || s.section_key}: answer ${s.toAnswer} of the ${total} questions${forced}.`;
+    });
   const ruleLines = rules.length ? `${rules.join('\n')}\n\n` : '';
   return (
     `*${String(exam.title).toUpperCase()}*\n\n` +

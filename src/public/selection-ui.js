@@ -5,7 +5,7 @@
    Everything here derives from the payload GET /api/exams/:id returns —
    `sections` (stored rules) and `selection` (the resolved plan from
    src/services/selection.js). Neither vocabulary is copied in here: the server
-   already collapses "quota covers the whole pool" to 0, so a second rule list in
+   already collapses a rule that covers every question to 0, so a second rule list in
    the browser would go stale and could offer a choice the server cannot honour. */
 (function (root) {
   // One row per section, merging what is stored with what the server resolved.
@@ -38,9 +38,8 @@
       var optional = plan.optional || [];
       var compulsory = plan.compulsory || [];
       if (!byKey[key]) {
-        // No resolved plan for this key yet: the pool is what the questions
-        // say right now, which is exactly what the server will clamp against
-        // when the quota is saved.
+        // No resolved plan for this key yet: the questions are what the server
+        // will clamp the rule against when the quota is saved.
         optional = [];
         compulsory = [];
         (questions || []).forEach(function (q) {
@@ -53,33 +52,52 @@
         section_key: key,
         title: sec.title || plan.title || key,
         instructions: sec.instructions || plan.instructions || '',
-        // The server resolves the real quota; never recompute it here or the
-        // card would show a rule the students are not actually given.
-        answer_count: Number(plan.quota) || 0,
+        // The server resolves the real rule; never recompute it here or the
+        // card would show a number the students are not actually given.
+        // `toAnswer` is the rule the admin typed — the questions the section
+        // owes, COMPULSORY INCLUDED — while `quota` is only the part of it the
+        // student picks. Reading quota back into the input would show 3 for a
+        // rule of 4, and the next save would silently reprice the paper. A plan
+        // without `toAnswer` (older server, hand-built fixture) is rebuilt the
+        // same way; a section resolved to answer-all still reads 0.
+        answer_count: Number(
+          plan.toAnswer != null
+            ? plan.toAnswer
+            : (Number(plan.quota) > 0 ? Number(plan.quota) + (plan.compulsory || []).length : 0)
+        ) || 0,
         pool: optional.length,
         compulsory: compulsory.length,
       };
     });
   }
 
-  // "Answer any 2 of 3 optional · 1 compulsory" — the numbers an admin needs to
-  // set a sensible quota, so the input's ceiling is never a surprise.
+  // "4 questions · 1 compulsory" — the numbers an admin needs to type a
+  // sensible rule. The ceiling is the WHOLE section, because answer_count is
+  // the number of questions the student answers, compulsory ones included:
+  // an input capped at the optional pool would refuse the paper's own
+  // "answer any 4 of 5" the moment one of the five is compulsory.
   function rowHint(row) {
     var pool = Number(row.pool) || 0;
     var forced = Number(row.compulsory) || 0;
-    return pool + ' optional' + (pool === 1 ? '' : 's') + ' · ' + forced + ' compulsory';
+    var total = pool + forced;
+    return total + (total === 1 ? ' question' : ' questions') + ' · ' + forced + ' compulsory';
   }
 
   // The one-line summary shown in the Edit Exam modal and anywhere a paper's
-  // shape is described. Only rules with a live quota appear: a section that
-  // resolved to 0 is answer-all, and listing it as a rule would be a lie.
+  // shape is described. Only live rules appear: a section that resolved to 0
+  // is answer-all, and listing it as a rule would be a lie. The counts are the
+  // paper's own — compulsory included — so the line reads exactly like the
+  // instruction printed on the paper.
   function summaryLines(selection) {
     return (selection || [])
-      .filter(function (s) { return Number(s.quota) > 0; })
+      .filter(function (s) { return Number(s.quota) > 0 || Number(s.toAnswer) > 0; })
       .map(function (s) {
-        var pool = (s.optional || []).length;
+        var optional = (s.optional || []).length;
+        var forced = (s.compulsory || []).length;
+        var toAnswer = Number(s.toAnswer) || Number(s.quota) + forced;
         var label = s.title || s.section_key;
-        return label + ': answer any ' + s.quota + ' of ' + pool;
+        return label + ': answer ' + toAnswer + ' of ' + (optional + forced) +
+          (forced ? ' (' + forced + ' compulsory)' : '');
       });
   }
 

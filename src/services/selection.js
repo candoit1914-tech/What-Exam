@@ -8,10 +8,19 @@ const { stripPaperFurniture } = require('./textClean');
 // the quota, its questions give the compulsory/optional split. Two derived
 // facts decide everything downstream:
 //
-//   selective = a quota exists AND it is smaller than the optional pool.
-//               A quota that covers the whole pool is a no-op selector, so it
-//               is suppressed rather than shown to the student.
-//   quota     = MIN(answer_count, optional.length)
+//   toAnswer  = the number of questions the section owes, counted the way the
+//               paper counts them: COMPULSORY QUESTIONS INCLUDED. "Answer any
+//               4 of 5, question 1 is compulsory" stores 4 and is answered by
+//               the forced one plus three choices — pricing the same 4 against
+//               the optional pool alone would cover every optional question,
+//               read as answer-all, and hand the student all five.
+//   quota     = toAnswer - compulsory.length, clamped to the optional pool.
+//               It is how many OPTIONAL questions the student still picks;
+//               a compulsory question is never offered, only answered.
+//
+// A section is selective only while 0 < quota < optional.length. A quota that
+// covers the whole optional pool is a no-op selector, so it is suppressed
+// rather than shown to the student.
 
 /** Template space. Admin UI and PDF reconciliation only. */
 function sectionsForExam(examId) {
@@ -27,18 +36,36 @@ function questionsInSection(examId, sectionKey) {
 }
 
 /**
- * Clamp a raw answer_count against a real optional pool.
+ * Resolve a stored `answer_count` against the section's real questions.
  *
- * The two suppression cases are different and both matter:
- *   quota 0            — nothing to choose.
- *   quota >= pool      — "answer any 5" with 5 on offer is answer-all. Showing a
- *                        selector there would let a student unanswer questions
- *                        the paper already demanded, which silently changes the
- *                        denominator for no reason.
+ * `answer_count` answers the paper's own question — "how many of these
+ * questions does the student have to answer?" — so it counts the compulsory
+ * ones. The optional pool is what is left to CHOOSE from once they are paid
+ * for. Returns `{ toAnswer, quota }`:
+ *
+ *   answer_count 0          — no rule: the section is answered in full.
+ *   answer_count >= total   — "answer any 5" with 5 on offer is answer-all.
+ *                             Showing a selector there would let a student
+ *                             unanswer questions the paper already demanded,
+ *                             which silently changes the denominator for no
+ *                             reason. Also reported as toAnswer 0, so nothing
+ *                             is asked and the section stays answer-all.
+ *   0 < toAnswer <= forced  — the rule stops at the compulsory questions:
+ *                             there is nothing left to choose, so no selector
+ *                             is owed, but the optionals are still NOT part of
+ *                             the paper (toAnswer > 0 marks the rule live).
+ *
+ * Callers that only ask "is there a choice to make?" keep reading `quota`;
+ * `toAnswer` is what the rule owes the student and what the admin typed.
  */
-function clampedQuota(answerCount, optionalLength) {
-  const quota = Math.min(Math.max(0, Number(answerCount) || 0), optionalLength);
-  return quota > 0 && quota < optionalLength ? quota : 0;
+function resolveRule(answerCount, compulsoryLength, optionalLength) {
+  const want = Math.max(0, Number(answerCount) || 0);
+  const total = compulsoryLength + optionalLength;
+  if (want <= 0 || want >= total) return { toAnswer: 0, quota: 0 };
+  return {
+    toAnswer: want,
+    quota: Math.max(0, Math.min(want - compulsoryLength, optionalLength)),
+  };
 }
 
 /**
@@ -52,13 +79,15 @@ function sectionPlan(examId) {
     const all = questionsInSection(examId, section.section_key);
     const compulsory = all.filter((q) => q.is_compulsory);
     const optional = all.filter((q) => !q.is_compulsory);
+    const rule = resolveRule(section.answer_count, compulsory.length, optional.length);
     plan.push({
       section_key: section.section_key,
       title: section.title || '',
       instructions: section.instructions || '',
       position: section.position,
       answer_count: section.answer_count,
-      quota: clampedQuota(section.answer_count, optional.length),
+      toAnswer: rule.toAnswer,
+      quota: rule.quota,
       compulsory,
       optional,
     });
@@ -127,13 +156,15 @@ function sessionPlan(sessionId) {
     if (!all.length) continue;
     const compulsory = all.filter((q) => q.is_compulsory);
     const optional = all.filter((q) => !q.is_compulsory);
+    const rule = resolveRule(section.answer_count, compulsory.length, optional.length);
     out.push({
       section_key: section.section_key,
       title: section.title || '',
       instructions: section.instructions || '',
       position: section.position,
       answer_count: section.answer_count,
-      quota: clampedQuota(section.answer_count, optional.length),
+      toAnswer: rule.toAnswer,
+      quota: rule.quota,
       compulsory,
       optional,
       committed: sectionCommitted(sessionId, section.section_key),
@@ -145,6 +176,21 @@ function sessionPlan(sessionId) {
 function isSelective(sessionId, sectionKey) {
   const found = sessionPlan(sessionId).find((s) => s.section_key === sectionKey);
   return !!found && found.quota > 0 && !found.committed;
+}
+
+/**
+ * Sections whose rule owes ONLY the compulsory questions.
+ *
+ * "Answer any 1, question 1 is compulsory" leaves no choice to make, so a
+ * selector there would be an interrogation with no answer to it — but the rule
+ * is still live, and the optional questions the paper never demanded must not
+ * be delivered. The draw drops them (exam.js calls applySelection with no
+ * picks); everything downstream then reads the section as already committed.
+ */
+function compulsoryOnlySections(sessionId) {
+  return sessionPlan(sessionId)
+    .filter((s) => s.toAnswer > 0 && s.quota === 0 && s.optional.length > 0)
+    .map((s) => s.section_key);
 }
 
 /**
@@ -677,6 +723,7 @@ module.exports = {
   sessionPlan,
   sectionLabel,
   isSelective,
+  compulsoryOnlySections,
   hasSelections,
   needsChoice,
   computePaperTotal,

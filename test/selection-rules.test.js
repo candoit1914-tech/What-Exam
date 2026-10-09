@@ -13,6 +13,7 @@ const { test, after } = require('node:test');
 const assert = require('node:assert/strict');
 const db = require('../src/db');
 const { applySelectionRules, slugOf, buildSectionMeta } = require('../src/services/pdfImport');
+const selection = require('../src/services/selection');
 // Pure classic script, no DB behind it — the browser slug must equal the importer's
 // or a section key set on the dashboard never matches what an import wrote.
 const selectionUi = require('../src/public/selection-ui');
@@ -44,9 +45,9 @@ test('an extraction with no section data writes no rule at all', () => {
 });
 
 test('a selective section makes its non-forced questions selectable', () => {
-  // Four questions, one compulsory: a pool of three with a quota of two is a
-  // real choice. (A pool of two with a quota of two is answer-all, which by
-  // design writes no rule at all — see the answer-all test below.)
+  // Four questions, one compulsory, and a paper that demands two of them. The
+  // count is stored exactly as the paper states it — two — because the
+  // compulsory question is owed OUT of those two, leaving one to choose.
   const { eid, saved } = examWith([
     { section: 'SECTION B' }, { section: 'SECTION B' },
     { section: 'SECTION B' }, { section: 'SECTION B' },
@@ -60,7 +61,13 @@ test('a selective section makes its non-forced questions selectable', () => {
   assert.equal(out.applied, 1);
 
   const sec = db.prepare('SELECT * FROM exam_sections WHERE exam_id=?').get(eid);
-  assert.equal(sec.answer_count, 2, 'the pool is three, because question 1 is compulsory');
+  assert.equal(sec.answer_count, 2, 'the paper\u2019s own number, compulsory question included');
+
+  // What the import writes and what the selector prices are the same rule:
+  // two owed, one of them forced, so the student picks one of three.
+  const plan = selection.sectionPlan(eid)[0];
+  assert.equal(plan.toAnswer, 2, 'the section still owes what the paper demanded');
+  assert.equal(plan.quota, 1, 'and offers the three questions it left to choose from');
 
   const rows = db.prepare('SELECT source_number, is_compulsory FROM questions WHERE exam_id=? ORDER BY q_order').all(eid);
   assert.equal(rows[0].is_compulsory, 1, 'question 1 stays compulsory');
@@ -114,9 +121,9 @@ test('a rule that ends up meaning answer-all is not written', () => {
   assert.equal(db.prepare('SELECT COUNT(*) c FROM exam_sections WHERE exam_id=?').get(eid).c, 0);
 });
 
-test('a quota larger than the real pool collapses to answer-all, not a phantom rule', () => {
-  // Three optional questions and a quota of nine. Clamping lands on 3, which
-  // equals the pool, and a rule that covers every question can never fire — so
+test('a quota larger than the section collapses to answer-all, not a phantom rule', () => {
+  // Three questions and a count of nine. Clamping lands on 3, which covers
+  // every question, and a rule that covers every question can never fire — so
   // nothing is written and the reason is reported. Storing 3 would advertise a
   // choice the student does not get.
   const { eid, saved } = examWith([

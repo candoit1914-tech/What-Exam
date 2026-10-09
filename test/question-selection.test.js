@@ -151,18 +151,93 @@ test('sectionPlan splits compulsory from optional and reports the real quota', (
     { compulsory: false, section: 'b' },
     { compulsory: false, section: 'b' },
   ]);
-  rule(eid, 'b', 'SECTION B', 2);
+  // "Answer any THREE" over four questions: the student owes three of them,
+  // and the compulsory one is paid for out of those three, so two are chosen.
+  rule(eid, 'b', 'SECTION B', 3);
   const plan = selection.sectionPlan(eid);
   assert.equal(plan.length, 1);
-  assert.equal(plan[0].quota, 2);
+  assert.equal(plan[0].toAnswer, 3, 'the rule is the paper\u2019s own number, compulsory included');
+  assert.equal(plan[0].quota, 2, 'so only the two left over are chosen');
   assert.equal(plan[0].optional.length, 3, 'the compulsory question is not part of the pool');
   assert.equal(plan[0].compulsory.length, 1);
 });
 
-test('a quota beyond the pool clamps to answer-all and is suppressed', () => {
-  // answer_count 5 against a pool of 2 clamps down to 2, which now covers the
-  // whole pool — so it is answer-all and the selector would be a no-op. Clamping
-  // and the answer-all rule compose deliberately; the derived quota is 0, not 2.
+test('a 4-of-5 section with one compulsory question still offers a choice', () => {
+  // The shape this whole feature exists for: the paper demands four of its
+  // five questions and forces one of them. Pricing the four against the four
+  // left to choose would cover the pool, read as answer-all and deliver all
+  // five — the student would never be asked anything.
+  const eid = paperExam([
+    { compulsory: true, section: 'b' },
+    { compulsory: false, section: 'b' },
+    { compulsory: false, section: 'b' },
+    { compulsory: false, section: 'b' },
+    { compulsory: false, section: 'b' },
+  ]);
+  rule(eid, 'b', 'SECTION B', 4);
+  const plan = selection.sectionPlan(eid);
+  assert.equal(plan[0].toAnswer, 4, 'four questions are owed, the forced one among them');
+  assert.equal(plan[0].quota, 3, 'three choices make up the rest');
+  assert.equal(selection.sectionPlan(eid)[0].quota > 0, true, 'and the student is asked for them');
+});
+
+test('a 2-of-3 section with one compulsory question still offers a choice', () => {
+  const eid = paperExam([
+    { compulsory: true, section: 'b' },
+    { compulsory: false, section: 'b' },
+    { compulsory: false, section: 'b' },
+  ]);
+  rule(eid, 'b', 'SECTION B', 2);
+  const plan = selection.sectionPlan(eid);
+  assert.equal(plan[0].toAnswer, 2);
+  assert.equal(plan[0].quota, 1, 'the compulsory question leaves exactly one to pick');
+});
+
+test('a rule that stops at the compulsory questions owes only them', () => {
+  // "Answer any ONE, question 1 is compulsory": nothing is left to choose, so no
+  // selector may open — and the questions the paper did not demand are not part
+  // of this student's paper at all.
+  const eid = paperExam([
+    { marks: 5, compulsory: true, section: 'b' },
+    { marks: 5, compulsory: false, section: 'b' },
+    { marks: 5, compulsory: false, section: 'b' },
+  ]);
+  rule(eid, 'b', 'SECTION B', 1);
+  const sid = examSvc.createSession(eid, 1);
+  const plan = selection.sessionPlan(sid.id)[0];
+  assert.equal(plan.toAnswer, 1, 'the rule is live: one question is owed');
+  assert.equal(plan.quota, 0, 'and it leaves nothing to pick');
+  assert.equal(plan.committed, true, 'so the section is already decided at the draw');
+  assert.equal(
+    selection.needsChoice({ id: sid.id }, plan.optional[0]), false,
+    'a student is never asked a question there is no answer to'
+  );
+
+  const seq = examSvc.sessionQuestionSequence(db.prepare('SELECT * FROM sessions WHERE id=?').get(sid.id));
+  assert.deepEqual(seq.map((q) => q.text), ['Q1'], 'only the compulsory question is delivered');
+  assert.equal(selection.computePaperTotal(sid.id), 5, 'and only it is billed');
+});
+
+test('the invite states the rule the way the paper counts it', () => {
+  const eid = paperExam([
+    { compulsory: true, section: 'b' },
+    { compulsory: false, section: 'b' },
+    { compulsory: false, section: 'b' },
+  ]);
+  rule(eid, 'b', 'SECTION B', 2);
+  const examRow = db.prepare('SELECT * FROM exams WHERE id=?').get(eid);
+  assert.match(
+    examSvc.formatExamIntro(examRow, 3),
+    /SECTION B: answer 2 of the 3 questions \(1 compulsory\)\./,
+    'the student is told what is owed in total, not how many choices they get'
+  );
+});
+
+test('a quota beyond the section clamps to answer-all and is suppressed', () => {
+  // answer_count 5 against a section of 3 questions is more than the paper can
+  // owe, so it covers every question — answer-all, and a selector there would
+  // be a no-op. Clamping and the answer-all rule compose deliberately; the
+  // derived quota is 0, not 2.
   const eid = paperExam([
     { compulsory: true, section: 'b' },
     { compulsory: false, section: 'b' },
@@ -171,6 +246,7 @@ test('a quota beyond the pool clamps to answer-all and is suppressed', () => {
   rule(eid, 'b', 'SECTION B', 5);
   const plan = selection.sectionPlan(eid);
   assert.equal(plan[0].quota, 0, 'a quota covering the whole pool is never selective');
+  assert.equal(plan[0].toAnswer, 0, 'so the section owes nothing but its questions');
   assert.equal(plan[0].answer_count, 5, 'the stored count is untouched by the derived clamp');
 });
 
@@ -207,12 +283,12 @@ test('sessionPlan keys the pool on session q_order, never on a template id', () 
     { compulsory: false, section: 'b' },
     { compulsory: false, section: 'b' },
   ]);
-  rule(eid, 'b', 'SECTION B', 2);
+  rule(eid, 'b', 'SECTION B', 3);
   const sid = examSvc.createSession(eid, 1);
   const sec = selection.sessionPlan(sid.id)[0];
   // q_order is the only key here; there is no questions.id anywhere in this shape.
   for (const q of sec.optional) assert.equal(typeof q.q_order, 'number');
-  assert.equal(sec.quota, 2);
+  assert.equal(sec.quota, 2, 'three owed, one of them compulsory, so two are chosen');
   assert.equal(sec.committed, false, 'nothing is chosen until the student chooses');
 });
 
@@ -249,7 +325,7 @@ test('paper total sums the compulsory and the chosen, not the whole section', ()
     { marks: 10, compulsory: false, section: 'b' },
     { marks: 10, compulsory: false, section: 'b' },
   ]);
-  rule(eid, 'b', 'SECTION B', 2);
+  rule(eid, 'b', 'SECTION B', 3);
   const sid = examSvc.createSession(eid, 1);
   const pool = poolOf(sid.id, 'b');
   const total = selection.applySelection(sid.id, 'b', pool.slice(0, 2));
@@ -262,7 +338,7 @@ test('deselecting everything but one still bills the compulsory question', () =>
     { marks: 5, compulsory: false, section: 'b' },
     { marks: 5, compulsory: false, section: 'b' },
   ]);
-  rule(eid, 'b', 'SECTION B', 1);
+  rule(eid, 'b', 'SECTION B', 2);
   const sid = examSvc.createSession(eid, 1);
   const pool = poolOf(sid.id, 'b');
   assert.equal(selection.applySelection(sid.id, 'b', [pool[1]]), 12);
@@ -278,8 +354,8 @@ test('a committed section is not offered again, but a later one still is', () =>
     { compulsory: false, section: 'b' },
     { compulsory: false, section: 'b' },
   ]);
-  rule(eid, 'a', 'SECTION A', 1, 0);
-  rule(eid, 'b', 'SECTION B', 2, 1);
+  rule(eid, 'a', 'SECTION A', 2, 0);
+  rule(eid, 'b', 'SECTION B', 3, 1);
   const sid = examSvc.createSession(eid, 1);
   const poolA = poolOf(sid.id, 'a');
   selection.applySelection(sid.id, 'a', [poolA[0]]);
@@ -332,7 +408,9 @@ function selectiveSession(quota = 2, poolSize = 3) {
     { marks: 5, compulsory: true, section: 'b' },
     ...Array.from({ length: poolSize }, () => ({ marks: 5, compulsory: false, section: 'b' })),
   ]);
-  rule(eid, 'b', 'SECTION B', quota);
+  // answer_count is the section's TOTAL, because that is what the paper counts:
+  // `quota` optional picks plus the compulsory question sitting beside them.
+  rule(eid, 'b', 'SECTION B', quota + 1);
   const sid = examSvc.createSession(eid, 1);
   return { eid, sid, phone: '23300000000' };
 }
@@ -613,7 +691,7 @@ test('a chosen paper is billed for the choice, not the whole pool', () => {
     { marks: 10, compulsory: false, section: 'b' },
     { marks: 10, compulsory: false, section: 'b' },
   ]);
-  rule(eid, 'b', 'SECTION B', 2);
+  rule(eid, 'b', 'SECTION B', 3);
   const sid = examSvc.createSession(eid, 1);
   const pool = poolOf(sid.id, 'b');
   selection.applySelection(sid.id, 'b', pool.slice(0, 2));
@@ -996,7 +1074,7 @@ test('only selected questions reach the sequence', () => {
     { section: 'b', compulsory: false },
     { section: 'b', compulsory: false },
   ]);
-  rule(eid, 'b', 'SECTION B', 1);
+  rule(eid, 'b', 'SECTION B', 2);
   const sid = examSvc.createSession(eid, 1);
   const pool = poolOf(sid.id, 'b');
   selection.applySelection(sid.id, 'b', [pool[0]]);
@@ -1039,7 +1117,7 @@ test('nextInSequence steps over a question the student deselected', () => {
     { section: 'b', compulsory: false },
     { section: 'b', compulsory: false },
   ]);
-  rule(eid, 'b', 'SECTION B', 1);
+  rule(eid, 'b', 'SECTION B', 2);
   const sid = examSvc.createSession(eid, 1);
   const pool = poolOf(sid.id, 'b');
   // Keep only the first optional; the rest are deselected. A question id that is
@@ -1047,7 +1125,7 @@ test('nextInSequence steps over a question the student deselected', () => {
   // would otherwise hand back a question the student explicitly rejected.
   selection.applySelection(sid.id, 'b', [pool[0]]);
   const session = db.prepare('SELECT * FROM sessions WHERE id=?').get(sid.id);
-  assert.equal(selection.sessionPlan(sid.id)[0].quota, 1);
+  assert.equal(selection.sessionPlan(sid.id)[0].quota, 1, 'two owed, one of them compulsory');
 
   const next = examSvc.nextInSequence(session, { id: -1, q_order: pool[0] });
   assert.equal(next, null, `q_order ${pool[0] + 1} was deselected, so there is nothing after it`);

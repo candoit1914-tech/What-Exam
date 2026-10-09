@@ -226,6 +226,9 @@ CREATE INDEX IF NOT EXISTS idx_question_images_question ON question_images(quest
 
 -- "Answer any N of M" rules. One row per paper section that carries a quota;
 -- answer_count = 0 means the section is answered in full and never prompts.
+-- N counts the section's COMPULSORY questions too — the paper's own "answer any
+-- 4 of 5" stores 4 — so the student picks N minus the compulsory ones from what
+-- is left. See selection.resolveRule.
 CREATE TABLE IF NOT EXISTS exam_sections (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
   exam_id      INTEGER NOT NULL REFERENCES exams(id) ON DELETE CASCADE,

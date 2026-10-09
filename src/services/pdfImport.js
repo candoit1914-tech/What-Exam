@@ -985,7 +985,8 @@ function buildSectionMeta(questions) {
  *
  *   - a compulsory question whose number never landed in the database is reported
  *     and dropped, because pointing at the wrong question is unrecoverable;
- *   - a count larger than the real pool is clamped;
+ *   - a count larger than the section is clamped (the count includes its
+ *       compulsory questions, so it is priced against all of them);
  *   - a rule that ends up meaning "answer all" is not written at all, so the exam
  *     behaves exactly as it does today.
  */
@@ -1063,10 +1064,14 @@ function applySelectionRules(examId, questions, savedQuestions, sectionMeta = {}
       const meta = isPaper
         ? paperMeta
         : (sectionMeta[section] || sectionMeta[key] || {});
-      const pool = inSection.length - forcedIds.size;
+      // The count is the paper's own — "answer any FOUR questions" counts the
+      // compulsory ones, so it is priced against the WHOLE section. Pricing the
+      // same 4 against the three questions that are left to choose would cover
+      // the entire pool, read as answer-all and hand the student all five.
+      const total = inSection.length;
       const want = Math.max(0, parseInt(meta.answer_count, 10) || 0);
-      const count = Math.min(want, pool);
-      if (count <= 0 || count >= pool) {
+      const count = Math.min(want, total);
+      if (count <= 0 || count >= total) {
         skipped.push(`${section}: rule is answer-all, nothing to choose`);
         continue;
       }

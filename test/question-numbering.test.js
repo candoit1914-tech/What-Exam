@@ -39,7 +39,10 @@ function paperFixture(theoryRows = THEORY_DEFAULT) {
     'INSERT INTO exam_sections(exam_id,section_key,title,instructions,position,answer_count) VALUES (?,?,?,?,?,?)'
   );
   section.run(eid, 'sec-a', 'SECTION A', 'Answer ALL questions.', 0, 0);
-  section.run(eid, 'sec-b', 'SECTION B', 'Answer any TWO questions.', 1, 2);
+  // SECTION B owes three of its four questions: the compulsory one plus the two
+  // the student picks. answer_count counts the compulsory question, so the rule
+  // is 3 rather than the 2 that are actually chosen.
+  section.run(eid, 'sec-b', 'SECTION B', 'Answer any THREE questions.', 1, 3);
 
   const pool = db.prepare(
     'INSERT INTO question_pool(exam_id,type,text,correct_answer,marks,is_compulsory,section_key) VALUES (?,?,?,?,?,?,?)'

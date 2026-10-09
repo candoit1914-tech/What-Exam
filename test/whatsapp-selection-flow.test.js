@@ -66,22 +66,27 @@ const questionBubbles = (sent) => sent
  * A theory paper that opens straight into a "choose 3 of 5" section, with the
  * invite already delivered — the state every real student is in when they reach
  * a selector, and the one the repeated-picker bug lived in.
+ *
+ * `compulsory` marks that many leading questions as forced, and `answerCount`
+ * is what the section owes in total — the paper's own number, forced questions
+ * included — so a "2 of 3 with one compulsory" paper is
+ * `{ pool: 3, compulsory: 1, answerCount: 2 }` and the student picks one.
  */
 let phoneSeq = 0;
-function openAtSelector({ quota = 3, pool = 5 } = {}) {
+function openAtSelector({ quota = 3, pool = 5, compulsory = 0, answerCount = null } = {}) {
   const eid = db.prepare(
     "INSERT INTO exams(title,duration_minutes,status) VALUES ('Paper',30,'live')"
   ).run().lastInsertRowid;
   for (let i = 1; i <= pool; i++) {
     db.prepare(
       `INSERT INTO questions(exam_id,q_order,type,text,marks,is_compulsory,section_key)
-       VALUES (?,?,'theory',?,5,0,'b')`
-    ).run(eid, i, `Question ${i} body`);
+       VALUES (?,?,'theory',?,5,?,'b')`
+    ).run(eid, i, `Question ${i} body`, i <= compulsory ? 1 : 0);
   }
   db.prepare(
     `INSERT INTO exam_sections(exam_id,section_key,title,instructions,position,answer_count)
      VALUES (?,?,?, ?, 0, ?)`
-  ).run(eid, 'b', 'SECTION II', 'Answer any THREE questions', quota);
+  ).run(eid, 'b', 'SECTION II', 'Answer any THREE questions', answerCount ?? quota);
 
   const phone = `233555${String(++phoneSeq).padStart(6, '0')}`;
   const studentId = db.prepare('INSERT INTO students(phone) VALUES (?)').run(phone).lastInsertRowid;
@@ -271,6 +276,92 @@ test('Continue delivers only the chosen questions, in order, and never the picke
     assert.equal(cards(cap.sent).length, 0, 'and no selection card returns either');
     assert.equal(
       cap.sent.filter((m) => (m.body || m.text || '').includes('Choose questions')).length, 0
+    );
+  } finally { cap.restore(); }
+});
+
+// The shape a real paper takes when it forces one question and still offers a
+// choice: "answer any TWO of these THREE". The compulsory question is answered
+// without being offered, the student picks ONE of the other two — the quota is
+// the section's own total, so a paper that says 2 of 3 must never deliver three.
+test('a "2 of 3" paper with a compulsory question asks for exactly one choice', async () => {
+  const { sid, phone, poolOrders } = openAtSelector({ pool: 3, compulsory: 1, answerCount: 2 });
+  const cap = captureWa();
+  try {
+    await examSvc.handleInbound(phone, 'START');
+    assert.equal(pickers(cap.sent).length, 0, 'the forced question is delivered without being asked about');
+    assert.ok(
+      questionBubbles(cap.sent).some((t) => t.includes(drawnText(sid, 1))),
+      'and it arrives in full'
+    );
+
+    await examSvc.handleInbound(phone, 'my answer to the compulsory one');
+    const picker = pickers(cap.sent)[0];
+    assert.ok(picker, 'the choice opens at the first question the student may refuse');
+    assert.match(picker.body, /exactly 1 of the 2 questions below/, 'one choice is owed out of the two on offer');
+    assert.match(picker.body, /[Cc]ompulsory/, 'and the forced question is named, never offered');
+    assert.equal(picker.rows.length, 2, 'only the questions actually on offer are listed');
+    assert.ok(
+      picker.rows.every((r) => !r.title.includes('Question 1')),
+      'the compulsory question is never a row a student could untick'
+    );
+
+    // Take the second question and leave the first optional behind.
+    await examSvc.handleInbound(phone, '', { replyId: `sel:b:${poolOrders[1]}` });
+    await examSvc.handleInbound(phone, 'CONTINUE');
+    assert.match(texts(cap.sent), /Locked in/);
+    assert.equal(sessionRow(sid).paper_total, 10, 'two questions at five marks each are owed');
+    assert.equal(sessionRow(sid).selection_state, '', 'and the choice is closed for good');
+
+    const delivered = questionBubbles(cap.sent);
+    assert.ok(
+      delivered.some((t) => t.includes(drawnText(sid, poolOrders[1]))),
+      'the chosen question is delivered in full'
+    );
+    assert.ok(
+      !delivered.some((t) => t.includes(drawnText(sid, poolOrders[0]))),
+      'the question the student refused is never sent'
+    );
+  } finally { cap.restore(); }
+});
+
+test('a "4 of 5" paper with a compulsory question asks for three choices and bills four', async () => {
+  const { sid, phone, poolOrders } = openAtSelector({ pool: 5, compulsory: 1, answerCount: 4 });
+  const cap = captureWa();
+  try {
+    await examSvc.handleInbound(phone, 'START');
+    await examSvc.handleInbound(phone, 'answer to the compulsory one');
+
+    const picker = pickers(cap.sent)[0];
+    assert.ok(picker, 'the choice opens after the forced question');
+    assert.match(picker.body, /exactly 3 of the 4 questions below/);
+
+    const picks = poolOrders.slice(0, 3);
+    const dropped = poolOrders[3];
+    for (const q of picks) await examSvc.handleInbound(phone, '', { replyId: `sel:b:${q}` });
+    await examSvc.handleInbound(phone, 'CONTINUE');
+
+    assert.match(texts(cap.sent), /Locked in/);
+    assert.equal(sessionRow(sid).paper_total, 20, 'the forced one plus three choices: four questions priced');
+    assert.equal(sessionRow(sid).selection_state, '', 'the choice is closed for good');
+    assert.equal(pickers(cap.sent).length, 1, 'the picker came once and never returns');
+
+    // The commit carries the first chosen question; each answer after it moves
+    // the chat on to the next one, in the paper's own order.
+    assert.ok(
+      questionBubbles(cap.sent).some((t) => t.includes(drawnText(sid, picks[0]))),
+      'the first chosen question goes out with the commit'
+    );
+    for (const expected of picks.slice(1)) {
+      const mark = cap.sent.length;
+      await examSvc.handleInbound(phone, `answer to ${expected}`);
+      const asked = questionBubbles(cap.sent.slice(mark))[0];
+      assert.ok(asked, `answering produced question ${expected}`);
+      assert.ok(asked.includes(drawnText(sid, expected)), `and it is question ${expected}, in full`);
+    }
+    assert.ok(
+      !questionBubbles(cap.sent).some((t) => t.includes(drawnText(sid, dropped))),
+      'the question nobody chose is never sent'
     );
   } finally { cap.restore(); }
 });
