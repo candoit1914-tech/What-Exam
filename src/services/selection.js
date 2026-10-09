@@ -1,5 +1,6 @@
 const db = require('../db');
 const wa = require('./whatsapp');
+const { stripPaperFurniture } = require('./textClean');
 
 // ── Rule resolution ────────────────────────────────────────────────────
 //
@@ -284,7 +285,13 @@ async function openChoice(phone, sessionId, sectionKey) {
 }
 
 function stem(q) {
-  return String(q.text || '').replace(/\s+/g, ' ').trim();
+  // The picker card quotes the question verbatim, so it gets the same pass as
+  // the chat: a stem never carries the paper's running header, its time and
+  // marks lines or a "Question 3 [10 marks]" label the app numbers anyway.
+  // The furniture pass runs BEFORE the text is flattened to one line, since
+  // it recognises those things as whole lines.
+  const clean = stripPaperFurniture(String(q.text || ''));
+  return clean.replace(/\s+/g, ' ').trim();
 }
 
 /**
@@ -356,6 +363,20 @@ function optionLine(chosen, n, q) {
 }
 
 /**
+ * The name a STUDENT sees for a section.
+ *
+ * The paper's own label keeps its structure but loses the description the app
+ * does not print: "PART 1: COMPULSORY READING AND LANGUAGE TASK" reads as
+ * "*PART 1*" in the picker. Admin screens keep `title` verbatim — it is what
+ * they edit — so this runs only where text leaves the app.
+ */
+function sectionLabel(plan) {
+  return stripPaperFurniture(String((plan && plan.title) || ''))
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
  * The whole multi-select card: every question on offer with its current tick,
  * then the live count. This is what the student sees after every tap, and it is
  * deliberately NOT the selector — the selector opens the stage, this only
@@ -369,7 +390,8 @@ function selectionCard(plan, chosen) {
 
 function selectorBody(plan, numbers, chosen) {
   const lines = [];
-  if (plan.title) lines.push(`*${plan.title}*`, '');
+  const label = sectionLabel(plan);
+  if (label) lines.push(`*${label}*`, '');
   // The paper's own instruction line ("Answer any THREE questions") is NOT
   // printed: this app writes the instructions a student follows, the PDF only
   // supplies questions. The quota sentence below says the same thing in the
@@ -422,7 +444,7 @@ async function sendSelector(phone, sessionId, sectionKey) {
   }));
   try {
     await wa.sendInteractiveList(
-      phone, plan.title || 'Choose', body, 'Choose questions', rows,
+      phone, sectionLabel(plan) || 'Choose', body, 'Choose questions', rows,
       `Tap to toggle · choose ${plan.quota}`
     );
   } catch (err) {
@@ -653,6 +675,7 @@ module.exports = {
   sectionsForExam,
   sectionPlan,
   sessionPlan,
+  sectionLabel,
   isSelective,
   hasSelections,
   needsChoice,

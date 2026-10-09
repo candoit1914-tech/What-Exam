@@ -16,7 +16,7 @@ const selection = require('./selection');
 // The Paystack paywall. payments.js requires ./exam back only lazily, inside
 // unlock(), so this edge is safe at require time too.
 const payments = require('./payments');
-const { stripSourceWatermarks } = require('./textClean');
+const { stripSourceWatermarks, stripPaperFurniture } = require('./textClean');
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -745,7 +745,12 @@ function buildQuestionBubbles(exam, question, sequence, index, session) {
     bubbles.push(formatSectionHeader(type));
   }
 
-  const clean = (p) => stripPaperOnlyInstructions(stripSourceWatermarks(p)).trim();
+  // Paper furniture (running header, paper title, time/marks lines, the
+  // printed INSTRUCTIONS block, "Question 1 [40 marks]") goes before anything
+  // splits the rest, so it can neither become a heading nor travel inside the
+  // passage bubble. Part labels are shortened to "*PART 1*" by the same pass.
+  const clean = (p) =>
+    stripPaperFurniture(stripPaperOnlyInstructions(stripSourceWatermarks(p))).trim();
   // Dedupe keys are normalized (case + whitespace) so the same passage or
   // heading is never sent twice just because extraction differed in spacing.
   const norm = (s) => String(s || '').toLowerCase().replace(/\s+/g, ' ').trim();
@@ -778,7 +783,7 @@ function buildQuestionBubbles(exam, question, sequence, index, session) {
     seen.passages.add(pasKey);
   }
 
-  const textClean = stripSourceWatermarks(String(question.text || '')).trim();
+  const textClean = stripPaperFurniture(stripSourceWatermarks(String(question.text || ''))).trim();
   const { headings: tHead, body } = splitQuestionHeadings(textClean);
   for (const h of tHead) {
     if (!seen.headings.has(h)) {
@@ -858,13 +863,22 @@ function formatExamIntro(exam, questionCount, { started = false, opening = false
   const startLine = started || opening
     ? ''
     : 'Reply *START* to this chat to open it.\n\n';
+  // The invite must also say how to pull the exam open by hand. A free-form
+  // question can be refused (WhatsApp's 24-hour window) or throttled, and when
+  // that happens this invite is the only bubble a waiting student reads — so
+  // it is where the escape hatch belongs. Both words count as a greeting
+  // (START_WORDS / GREETING_WORDS), and handleInbound delivers the owed
+  // question the moment one arrives.
+  const chaseLine = started
+    ? ''
+    : 'If the questions do not appear automatically, type Hi or Exam in this chat and your exam will start immediately.\n\n';
   const instructions = steps.map((s, i) => `${i + 1}. ${s}`).join('\n');
   // A paper that asks the student to choose says so up front, so nobody only
   // discovers the rule when the selector interrupts them mid-exam.
   const rules = selection
     .sectionPlan(exam.id)
     .filter((s) => s.quota > 0)
-    .map((s) => `${s.title || s.section_key}: answer any ${s.quota} of the ${s.optional.length} questions.`);
+    .map((s) => `${selection.sectionLabel(s) || s.section_key}: answer any ${s.quota} of the ${s.optional.length} questions.`);
   const ruleLines = rules.length ? `${rules.join('\n')}\n\n` : '';
   return (
     `*${String(exam.title).toUpperCase()}*\n\n` +
@@ -875,6 +889,7 @@ function formatExamIntro(exam, questionCount, { started = false, opening = false
     `Pass mark: *${exam.pass_percentage}%\n\n` +
     ruleLines +
     startLine +
+    chaseLine +
     `*INSTRUCTIONS*\n${instructions}`
   );
 }
@@ -1398,8 +1413,9 @@ async function sendPaidStartTemplate(session, student, exam, firstQ) {
     const plan = selection.sessionPlan(session.id).find((item) => item.section_key === firstQ.section_key);
     const quota = plan?.quota || 1;
     const card = plan ? selection.selectionCard(plan, new Set()) : '';
+    const label = selection.sectionLabel(plan);
     questionText =
-      `${plan?.title ? `${plan.title}\n\n` : ''}` +
+      `${label ? `${label}\n\n` : ''}` +
       `You must choose exactly ${quota} of the ${plan?.optional.length || 0} questions below.\n` +
       `Tap a question number to select or deselect it.\n\n${card}\n\n` +
       `Reply with the numbers you choose, e.g. 1,3 — then CONTINUE.`;

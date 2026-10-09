@@ -4,7 +4,7 @@ const ai = require('./ai');
 const marking = require('./marking');
 const path = require('path');
 const config = require('../config');
-const { stripSourceWatermarks } = require('./textClean');
+const { stripSourceWatermarks, stripPaperFurniture } = require('./textClean');
 
 function diag(event, details) {
   if (process.env.PDF_DIAG === '1') console.log('[pdf-import:diag]', event, details);
@@ -659,9 +659,17 @@ async function startJob(jobId, buffer, opts = {}) {
     let figureAttached = 0;
     const figureFailures = [];
     for (const g of filtered) {
-      if (g.passage && String(g.passage).trim()) curPassage = stripSourceWatermarks(String(g.passage).trim());
+      // Paper furniture (running header, paper title, time/marks lines, the
+      // printed INSTRUCTIONS block, "Question 1 [40 marks]") is stripped from
+      // the ROWS that reach WhatsApp and the dashboard. Only the stored copies
+      // are cleaned: g.passage stays raw on purpose, because buildSectionMeta
+      // reads it later for the "answer any THREE of the five" rule, and that
+      // rule lives in exactly the lines being dropped here.
+      if (g.passage && String(g.passage).trim()) {
+        curPassage = stripPaperFurniture(stripSourceWatermarks(String(g.passage).trim()));
+      }
       const passage = curPassage;
-      g.text = stripSourceWatermarks(g.text);
+      g.text = stripPaperFurniture(stripSourceWatermarks(g.text));
 
       // Diagrams: render EVERY figure this question kept via its markers and
       // store the file names (relative, served from uploads). The first goes

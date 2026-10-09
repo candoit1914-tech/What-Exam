@@ -620,7 +620,9 @@ test('buildQuestionBubbles puts a PDF section heading in its own bubble before t
   assert.deepEqual(exam.buildQuestionBubbles({}, q1, seq, 0), [
     'Reply with the letter of your answer (e.g. A, B, C, or D).',
     '*OBJECTIVE*',
-    '*PART A, LEXIS AND STRUCTURE*',
+    // The heading arrives as the label alone: the paper's description of what
+    // that part contains is its own prose, and the app writes the label.
+    '*PART A*',
     '*QUESTION 1*\n\nFrom the words lettered A to D, choose the one that best completes each sentence.',
   ]);
   assert.deepEqual(exam.buildQuestionBubbles({}, q2, seq, 1), ['*QUESTION 2*\n\nQ2']);

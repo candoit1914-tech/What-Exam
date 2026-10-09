@@ -35,4 +35,76 @@ function stripMarkers(text) {
     .replace(/\s?\[(?:IMG|MATH):\d+\]/g, '');
 }
 
-module.exports = { stripSourceWatermarks, stripMarkers };
+// ── Paper furniture ────────────────────────────────────────────────────────
+// A practice paper prints a great deal that a student reading a WhatsApp chat
+// has no use for: the running header ("2027 BECE French Mock | Original
+// practice material Page 8"), the paper's own title ("PAPER 2: WRITTEN AND
+// COMMUNICATIVE SKILLS"), its time and marks lines, its printed INSTRUCTIONS
+// block, and the "Question 1 [40 marks]" label above every question. This app
+// writes its own header, part labels, instructions and numbering, so none of
+// that may reach a question or a passage.
+//
+// Two rules keep the dropping safe:
+//   - only STANDALONE lines go; a phrase inside prose never does;
+//   - a line that could be a real question stem is kept even though it reads
+//     like an instruction ("Write a letter to your friend…", "Read the
+//     passage and answer…"). Only the narrow forms a paper uses to address
+//     the candidate as a whole are dropped.
+const FURNITURE = [
+  // running header / footer of a practice paper
+  /original\s+practice\s+material/i,
+  /^\d{4}\s+(?:bece|waec|neco|jsce|gce)\b/i,
+  /^(?:bece|waec|neco|jsce|gce)\b.*\bmock\b/i,
+  /^page\s+\d+(?:\s*(?:of|\/)\s*\d+)?$/i,
+  // the paper's own title block
+  /^paper\s+\d+\s*[:：.,\-–—]/i,
+  /^time\s*[:·]\s*\S/i,
+  /^(?:duration|suggested\s+(?:raw\s+)?marks?|total\s+(?:raw\s+)?marks?|raw\s+marks?)\s*[:·]/i,
+  /^marks?\s+(?:reward|are|will\s+be)\b/i,
+  // the printed instructions block
+  /^instructions?\s*[:：]?\s*$/i,
+  /^instructions?\s*[:：]/i,
+  /^in\s+(?:part|section|paper)\s+[0-9ivx]+(?:\s*[,.:]|\s*$)/i,
+  /^answer\s+(?:all|any|one|only)\b/i,
+  /^write\s+(?:clearly|neatly|legibly)\b/i,
+  // the label the app numbers for the student anyway
+  /^(?:question|soal)\s*\d+\s*(?:\[[^\]]*\]|\(\s*\d+(?:\.\d+)?\s*marks?\s*\)|[-–—:.])?\s*$/i,
+];
+
+/**
+ * "PART 1: COMPULSORY READING AND LANGUAGE TASK" and "PART A, LEXIS AND
+ * STRUCTURE" are labels the paper pads with a description. The app prints the
+ * label alone — "*PART 1*", "*PART A*" — so the structure stays and the
+ * paper's prose goes. The padding is ALL CAPS on a printed paper; mixed case
+ * means a sentence that happens to start with "Part 1", and prose is never
+ * rewritten.
+ */
+function shortenPartLabel(line) {
+  const m = /^(part|section)\s+(?:\d{1,2}|[ivx]{1,4}|[a-z])\s*[:：.,\-–—]/i.exec(line);
+  if (!m) return null;
+  const rest = line.slice(m[0].length);
+  if (/[^A-Z0-9\s:.,()'"/\-–—]/.test(rest)) return null;
+  return m[0].replace(/[:：.,\-–—]\s*$/, '').toUpperCase();
+}
+
+function stripPaperFurniture(text) {
+  const lines = String(text || '').split(/\r?\n/);
+  const kept = [];
+  for (const raw of lines) {
+    const l = raw.trim();
+    if (!l) { kept.push(raw); continue; }
+    if (FURNITURE.some((re) => re.test(l))) continue;
+    const short = shortenPartLabel(l);
+    kept.push(short == null ? raw : short);
+  }
+  return kept
+    .join('\n')
+    // The paper's own annotation of what a question is worth. The app carries
+    // marks in the dashboard and the report; the chat stem does not need it.
+    .replace(/\s*\[\s*\d+(?:\.\d+)?\s*marks?\s*\]/gi, '')
+    .replace(/\s*\(\s*\d+(?:\.\d+)?\s*marks?\s*\)\s*$/gi, '')
+    .replace(/\n{2,}/g, '\n')
+    .trim();
+}
+
+module.exports = { stripSourceWatermarks, stripPaperFurniture, stripMarkers };
