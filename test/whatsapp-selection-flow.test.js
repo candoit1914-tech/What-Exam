@@ -111,6 +111,14 @@ test('the section picker is sent exactly once, however many questions are tapped
     // The first reply after the invite opens the paper — and, here, the selector.
     await examSvc.handleInbound(phone, 'START');
     assert.equal(pickers(cap.sent).length, 1, 'the section message opens the stage once');
+    assert.ok(
+      !cap.sent.some((m) => (m.body || m.text || '').includes('Answer any THREE questions')),
+      "the paper's own instruction line is never printed — the app's quota sentence says it"
+    );
+    assert.ok(
+      cap.sent.some((m) => /You must choose exactly 3 of the \d+ questions below\./.test(m.body || m.text || '')),
+      'and the instruction the student follows is the app\u2019s own'
+    );
 
     for (const q of poolOrders.slice(0, 3)) {
       await examSvc.handleInbound(phone, '', { replyId: `sel:b:${q}` });

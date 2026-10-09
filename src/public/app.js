@@ -1870,7 +1870,7 @@ async function removeRecipient(id, sid) {
 }
 
 async function sendExam(id) {
-  if (!confirm('Send this exam to all recipients now? Each student\'s timer starts when they first reply.')) return;
+  if (!confirm('Send this exam to all recipients now? Question 1 goes out immediately — each student\'s timer starts when they first reply.')) return;
   const btn = event.currentTarget;
   btn.disabled = true;
   btn.textContent = 'Sending…';
@@ -1928,7 +1928,7 @@ async function postResend(id, studentIds, btn, idleLabel) {
 }
 
 function resendExamToNotStarted(id, btn) {
-  if (!confirm('Resend this exam to everyone who has not started yet? Their timer starts when they first reply.')) return;
+  if (!confirm('Resend this exam to everyone who has not started yet? Question 1 goes out immediately; their timer starts when they first reply.')) return;
   return postResend(id, null, btn, 'Resend to not started');
 }
 

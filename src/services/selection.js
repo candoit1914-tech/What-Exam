@@ -370,7 +370,11 @@ function selectionCard(plan, chosen) {
 function selectorBody(plan, numbers, chosen) {
   const lines = [];
   if (plan.title) lines.push(`*${plan.title}*`, '');
-  if (plan.instructions) lines.push(`${plan.instructions}`, '');
+  // The paper's own instruction line ("Answer any THREE questions") is NOT
+  // printed: this app writes the instructions a student follows, the PDF only
+  // supplies questions. The quota sentence below says the same thing in the
+  // app's own words, and the intro block stated the section rule already.
+  //
   // The number the bubble will carry — and when that number can still move,
   // the text the bubble will carry instead. drawnInSection returns
   // question_id, never id, so the map is keyed on exactly that.

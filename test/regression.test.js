@@ -273,7 +273,7 @@ test('buildQuestionBubbles sends THEORY header once before theory questions', ()
   assert.deepEqual(exam.buildQuestionBubbles({}, q3, seq, 2), ['*QUESTION 2*\n\nQ3']);
 });
 
-test('buildQuestionBubbles emits header, instructions, passage, then question', () => {
+test('buildQuestionBubbles emits header, passage, then question — never the paper instructions', () => {
   const passage = 'Read the passage.\nAma lost her pencil on the way to school.';
   const q1 = { id: 1, q_order: 1, type: 'objective', text: 'Q1', passage };
   const q2 = { id: 2, q_order: 2, type: 'objective', text: 'Q2', passage };
@@ -281,7 +281,6 @@ test('buildQuestionBubbles emits header, instructions, passage, then question', 
   assert.deepEqual(exam.buildQuestionBubbles({}, q1, seq, 0), [
     'Reply with the letter of your answer (e.g. A, B, C, or D).',
     '*OBJECTIVE*',
-    '*Instructions*\n\nRead the passage.',
     'Ama lost her pencil on the way to school.',
     '*QUESTION 1*\n\nQ1',
   ]);
@@ -293,7 +292,6 @@ test('buildQuestionBubbles treats an unknown index as the first question', () =>
   assert.deepEqual(exam.buildQuestionBubbles({}, q, [], -1), [
     'Reply with the letter of your answer (e.g. A, B, C, or D).',
     '*OBJECTIVE*',
-    '*Instructions*\n\nRead the passage.',
     '*QUESTION 3*\n\nQ3',
   ]);
 });
@@ -546,14 +544,14 @@ test('stripSourceWatermarks keeps normal prose that merely mentions exams', () =
 });
 
 test('buildQuestionBubbles strips watermark lines from a passage before sending', () => {
-  const dirtyPassage = 'Read the passage below.\nDOWNLOADED FROM SRONU\npapers.sronu.com';
+  const dirtyPassage = 'Read the passage below.\nAma lost her pencil on the way to school.\nDOWNLOADED FROM SRONU\npapers.sronu.com';
   const q1 = { id: 1, q_order: 1, type: 'objective', text: 'Q1', passage: dirtyPassage };
   const q2 = { id: 2, q_order: 2, type: 'objective', text: 'Q2', passage: dirtyPassage };
   const seq = [q1, q2];
   const bubbles = exam.buildQuestionBubbles({}, q1, seq, 0);
   const joined = bubbles.join('\n');
   assert.doesNotMatch(joined, /sronu/i, 'no watermark in any bubble');
-  assert.match(joined, /Read the passage below\./, 'real passage content kept');
+  assert.match(joined, /Ama lost her pencil on the way to school\./, 'real passage content kept');
   assert.deepEqual(exam.buildQuestionBubbles({}, q2, seq, 1), ['*QUESTION 2*\n\nQ2'], 'passage-once: Q2 emits no passage bubble at all');
 });
 
@@ -567,23 +565,21 @@ test('buildQuestionBubbles does not duplicate a shared instruction-laden passage
     ...exam.buildQuestionBubbles({}, q2, seq, 1),
   ];
   assert.equal(out.filter((b) => b === 'The farmers rely on irrigation.').length, 1, 'passage body emitted exactly once across both questions');
-  assert.equal(out.filter((b) => b === '*Instructions*\n\nRead the following passage and answer questions 1 to 5.').length, 1, 'instructions emitted exactly once');
+  assert.equal(out.filter((b) => b.startsWith('*Instructions*')).length, 0, 'the paper instruction line is never sent at all');
   assert.equal(out.filter((b) => b.startsWith('*THEORY*')).length, 1, 'header emitted exactly once');
 });
 
-test("buildQuestionBubbles keeps a later question's own instruction lines", () => {
+test("buildQuestionBubbles drops a later question's own paper instructions too", () => {
   const q1 = { id: 1, q_order: 1, type: 'objective', text: 'Q1', passage: 'Read the first passage.\nAma went to the market.' };
   const q2 = { id: 2, q_order: 2, type: 'objective', text: 'Q2', passage: 'Read the second passage.\nKofi stayed home.' };
   const seq = [q1, q2];
   assert.deepEqual(exam.buildQuestionBubbles({}, q1, seq, 0), [
     'Reply with the letter of your answer (e.g. A, B, C, or D).',
     '*OBJECTIVE*',
-    '*Instructions*\n\nRead the first passage.',
     'Ama went to the market.',
     '*QUESTION 1*\n\nQ1',
   ]);
   assert.deepEqual(exam.buildQuestionBubbles({}, q2, seq, 1), [
-    '*Instructions*\n\nRead the second passage.',
     'Kofi stayed home.',
     '*QUESTION 2*\n\nQ2',
   ]);
@@ -630,9 +626,9 @@ test('buildQuestionBubbles puts a PDF section heading in its own bubble before t
   assert.deepEqual(exam.buildQuestionBubbles({}, q2, seq, 1), ['*QUESTION 2*\n\nQ2']);
 });
 
-test('buildQuestionBubbles splits a header off the top of a passage and emits it once', () => {
+test('buildQuestionBubbles splits a header off the top of a passage and drops the paper instructions', () => {
   const passage =
-    'SECTION B\nAnswer ONE question in this section.\nWrite an essay on any one of the following topics.';
+    'SECTION B\nAnswer ONE question in this section.\nAma and Kofi walked to the market together.';
   const q1 = { id: 1, q_order: 1, type: 'theory', text: 'Q1', passage };
   const q2 = { id: 2, q_order: 2, type: 'theory', text: 'Q2', passage };
   const seq = [q1, q2];
@@ -640,7 +636,7 @@ test('buildQuestionBubbles splits a header off the top of a passage and emits it
     'Type your full answer to each question as a single message.',
     '*THEORY*',
     '*SECTION B*',
-    '*Instructions*\n\nAnswer ONE question in this section.\nWrite an essay on any one of the following topics.',
+    'Ama and Kofi walked to the market together.',
     '*QUESTION 1*\n\nQ1',
   ]);
   const out = [
@@ -659,7 +655,7 @@ test('buildQuestionBubbles dedupes the same heading across questions', () => {
   assert.equal(out.filter((b) => b === '*PART A*').length, 1, 'heading emitted once across the sequence');
 });
 
-test('buildQuestionBubbles dedupes instructions and passage that differ only in whitespace', () => {
+test('buildQuestionBubbles dedupes passages that differ only in whitespace, and sends no instructions', () => {
   const q1 = {
     id: 1,
     q_order: 1,
@@ -677,9 +673,9 @@ test('buildQuestionBubbles dedupes instructions and passage that differ only in 
   const seq = [q1, q2];
   const out = [...exam.buildQuestionBubbles({}, q1, seq, 0), ...exam.buildQuestionBubbles({}, q2, seq, 1)];
   assert.equal(
-    out.filter((b) => b === '*Instructions*\n\nRead the following passage and answer questions 1 to 5.').length,
-    1,
-    'instructions deduped across whitespace differences'
+    out.filter((b) => b.startsWith('*Instructions*')).length,
+    0,
+    'the paper instruction lines never reach the chat, however they are spaced'
   );
   assert.equal(
     out.filter((b) => b === 'The farmers rely on irrigation.').length,

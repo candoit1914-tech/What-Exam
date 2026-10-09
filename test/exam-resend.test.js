@@ -97,7 +97,7 @@ test('resending to a student who finished is skipped', async () => {
   } finally { cap.restore(); }
 });
 
-test('a resend to an unstarted student re-invites rather than starting the clock', async () => {
+test('a resend to a student who never replied re-invites without pushing the paper twice', async () => {
   const { eid, ids, phones } = fixture(1);
   const cap = captureSends();
   try {
@@ -107,8 +107,9 @@ test('a resend to an unstarted student re-invites rather than starting the clock
     assert.equal(report.sent, 1);
     assert.equal(db.prepare('SELECT started_at FROM sessions WHERE exam_id=? AND student_id=?').get(eid, ids[0]).started_at, null,
       'resending must not start the clock');
-    assert.ok(cap.sent.join('\n').includes('INSTRUCTIONS'), 'the invite is re-delivered');
-    assert.ok(!cap.sent.join('\n').includes('QUESTION 1'), 'still no question until the student replies');
+    assert.ok(cap.sent.join('\n').includes('INSTRUCTIONS'), 'the invite is re-delivered as the nudge');
+    assert.ok(!cap.sent.join('\n').includes('QUESTION 1'),
+      'question 1 already went out with the Send press — the outbox knows, so it is not pushed a second time');
   } finally { cap.restore(); }
 });
 

@@ -227,7 +227,7 @@ test('a paid exam with no amount is refused rather than sold for free', async ()
 
 // ── free papers are untouched ─────────────────────────────────────────
 
-test('a free exam sends exactly one message and books nothing', async () => {
+test('a free exam starts immediately and books nothing', async () => {
   capture();
   paystackStub(); // present only to prove it is never called
   const eid = makeExam();
@@ -236,13 +236,21 @@ test('a free exam sends exactly one message and books nothing', async () => {
   const report = await exam.sendExamToRecipients(eid);
 
   assert.equal(report.sent, 1);
-  assert.equal(sent.length, 1, 'the free invite is the only message that goes out');
+  assert.equal(report.failed, 0);
   assert.ok(sent[0].includes('INSTRUCTIONS'), 'the normal invite is delivered');
   assert.ok(!/paystack|payment/i.test(sent[0]), 'no paywall language on a free paper');
+  assert.ok(
+    sent.some((m) => m.includes('QUESTION 1')),
+    'question 1 arrives right behind the instructions, with no reply in between'
+  );
+  assert.ok(
+    !sent.some((m) => m.includes('Reply *START*')),
+    'the invite never tells the student to START a paper that is already on screen'
+  );
   assert.equal(paymentsFor(eid).length, 0, 'no payment row is ever created');
 });
 
-test('a free exam grades the first answer instead of re-sending question 1', async () => {
+test('a free exam grades the first real answer instead of re-sending question 1', async () => {
   capture();
   paystackStub();
   const eid = makeExam();
@@ -250,10 +258,20 @@ test('a free exam grades the first answer instead of re-sending question 1', asy
   await exam.sendExamToRecipients(eid);
   sent.length = 0;
 
-  // The first reply opens the paper and delivers question 1.
+  // Question 1 is already on screen, so the first reply is read against it —
+  // and a greeting must never be graded as an answer to it.
   const opened = await exam.handleInbound(student.phone, 'hello');
-  assert.equal(opened.reason, 'started');
-  assert.ok(sent.some((m) => m.includes('QUESTION 1')));
+  assert.equal(opened.reason, 'answered');
+  assert.ok(sent.some((m) => m.includes('QUESTION 1')), 'a greeting re-sends the question instead of being marked');
+  assert.ok(
+    db.prepare('SELECT started_at FROM sessions WHERE exam_id=? AND student_id=?').get(eid, student.id).started_at,
+    'the clock arms on that first reply'
+  );
+  assert.equal(
+    db.prepare(`SELECT COUNT(*) c FROM answers a JOIN sessions s ON s.id = a.session_id WHERE s.exam_id = ? AND s.student_id = ?`).get(eid, student.id).c,
+    0,
+    'the greeting is recorded as no answer at all'
+  );
   sent.length = 0;
 
   // The next reply is an ANSWER to question 1 — it must be recorded

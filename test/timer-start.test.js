@@ -43,7 +43,7 @@ test('a restarted attempt also waits for the student', () => {
   assert.equal(db.prepare('SELECT started_at FROM sessions WHERE id=?').get(next.id).started_at, null);
 });
 
-test('sending an exam delivers the invite only, not a question', async () => {
+test('sending an exam starts it right away: instructions, then question 1 — but no clock', async () => {
   const { eid } = fixture();
   const sent = [];
   const original = wa.sendText;
@@ -53,13 +53,16 @@ test('sending an exam delivers the invite only, not a question', async () => {
     assert.equal(report.sent, 1);
     assert.equal(report.failed, 0);
     const joined = sent.join('\n');
-    assert.ok(joined.includes('INSTRUCTIONS'), 'the invite must be delivered');
-    assert.ok(!joined.includes('QUESTION 1'), 'no question may be pushed at send time');
-    assert.ok(!joined.includes('Time remaining'), 'no countdown before the student begins');
+    assert.ok(joined.includes('INSTRUCTIONS'), 'the WhatsApp instructions must be delivered');
+    assert.ok(!joined.includes('Reply *START*'), 'nothing is left to reply START to — the paper is already here');
+    assert.ok(joined.includes('QUESTION 1'), 'question 1 follows the instructions with no reply in between');
+    assert.ok(joined.includes('Time remaining: *30:00*'), 'the countdown shows the full duration while the clock is still off');
+    const row = db.prepare('SELECT started_at FROM sessions WHERE exam_id=?').get(eid);
+    assert.equal(row.started_at, null, 'the clock still waits for the student to engage');
   } finally { wa.sendText = original; }
 });
 
-test('the first student reply starts the clock and delivers question 1', async () => {
+test('the first student reply arms the clock without re-grading anything', async () => {
   const { eid, student } = fixture();
   const sent = [];
   const original = wa.sendText;
@@ -70,7 +73,51 @@ test('the first student reply starts the clock and delivers question 1', async (
     await exam.handleInbound(student.phone, 'START');
     const row = db.prepare('SELECT started_at FROM sessions WHERE exam_id=?').get(eid);
     assert.ok(row.started_at, 'the clock must start on first engagement');
-    assert.ok(sent.join('\n').includes('QUESTION 1'), 'question 1 must arrive on the reply');
+    assert.ok(sent.join('\n').includes('QUESTION 1'), 'the question the student already holds is re-sent, not swallowed');
+  } finally { wa.sendText = original; }
+});
+
+test('a question WhatsApp refuses is deferred, not failed: the invite still carries the exam', async () => {
+  const { eid, student } = fixture();
+  const sent = [];
+  const original = wa.sendText;
+  const refuseQuestions = async (phone, text) => {
+    if (/QUESTION/.test(String(text))) {
+      const err = new Error('(#131047) Re-engagement message: outside the 24-hour window');
+      err.code = 131047;
+      throw err;
+    }
+    sent.push(String(text));
+    return { messages: [{ id: 'mock' }] };
+  };
+  wa.sendText = refuseQuestions;
+  try {
+    const report = await exam.sendExamToRecipients(eid);
+    assert.equal(report.sent, 1, 'the recipient is reached — the invite went out');
+    assert.equal(report.failed, 0, 'a refused question must not fail the whole delivery');
+    assert.ok(sent.join('\n').includes('INSTRUCTIONS'), 'the invite is the fallback that carries the exam');
+
+    const entry = db.prepare(
+      "SELECT state FROM message_outbox WHERE kind='question' AND session_id=(SELECT id FROM sessions WHERE exam_id=?)"
+    ).get(eid);
+    assert.ok(entry, 'the refused question is recorded, not dropped');
+    assert.notEqual(entry.state, 'sent', 'and it is never claimed as delivered');
+    assert.equal(db.prepare('SELECT started_at FROM sessions WHERE exam_id=?').get(eid).started_at, null,
+      'the clock is untouched by a start that could not complete');
+
+    // The student's reply is what opens the 24-hour window, so the paper goes
+    // out on it — the same path the invite used to be the only step of.
+    sent.length = 0;
+    wa.sendText = async (phone, text) => { sent.push(String(text)); return { messages: [{ id: 'mock' }] }; };
+    await exam.handleInbound(student.phone, 'START');
+    assert.ok(sent.join('\n').includes('QUESTION 1'), 'the first reply opens the paper');
+    assert.ok(db.prepare('SELECT started_at FROM sessions WHERE exam_id=?').get(eid).started_at,
+      'and arms the clock');
+    assert.equal(
+      db.prepare("SELECT state FROM message_outbox WHERE kind='question' AND session_id=(SELECT id FROM sessions WHERE exam_id=?)").get(eid).state,
+      'sent',
+      'the owed delivery is retired the moment it finally goes through'
+    );
   } finally { wa.sendText = original; }
 });
 

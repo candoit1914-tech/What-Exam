@@ -534,9 +534,9 @@ const START_WORDS = new Set([
 const GREETING_WORDS = new Set(['hi', 'hello', 'hey', 'yo', 'exam', 'start', 'begin']);
 
 function formatQuestion(exam, question, qCount, body, session, displayNumber = null) {
-  // The type banner and any passage/instruction/header are sent as their own
-  // bubbles by buildQuestionBubbles, so the question bubble carries just the
-  // stem (optionally pre-stripped of leading section headers).
+  // The type banner and any passage/heading are sent as their own bubbles by
+  // buildQuestionBubbles, so the question bubble carries just the stem
+  // (optionally pre-stripped of leading section headers).
   let text = body != null ? body : String(question.text || '').trim();
   // Ensure the question text ends with proper punctuation for a complete sentence.
   // This fixes truncated questions from PDF imports where extraction may have
@@ -596,18 +596,29 @@ function formatSubQuestions(question, displayNumber = null) {
   return `*Sub-questions:*\n\n${blocks.join('\n\n')}`;
 }
 
-/** mm:ss left on the clock, computed from the session start + exam duration. */
-function timeRemaining(session, exam) {
-  // Reachable only if a question is ever delivered before the student engages.
-  // new Date('') is NaN, and "Time remaining: NaN:NaN" must never ship.
-  if (!session || !session.started_at) return '—';
-  const startedAtStr = String(session.started_at);
-  const utcStr = /[Zz]|[+-]\d{2}:\d{2}$/.test(startedAtStr) ? startedAtStr : startedAtStr + 'Z';
-  const ms = new Date(utcStr).getTime() + exam.duration_minutes * 60000 - Date.now();
-  const total = Math.max(0, Math.round(ms / 1000));
+function clockText(seconds) {
+  const total = Math.max(0, Math.round(seconds));
   const mm = String(Math.floor(total / 60)).padStart(2, '0');
   const ss = String(total % 60).padStart(2, '0');
   return `${mm}:${ss}`;
+}
+
+/** mm:ss left on the clock, computed from the session start + exam duration. */
+function timeRemaining(session, exam) {
+  // A question CAN reach the chat before the student engages — the admin's
+  // Send button starts the paper immediately — and their first reply arms the
+  // clock with the FULL duration (handleInbound re-arms while no answer
+  // exists). What is left before that moment is therefore the full duration,
+  // not a dash. new Date('') is NaN, so "Time remaining: NaN:NaN" must never
+  // ship either.
+  if (!session || !session.started_at) {
+    const minutes = Number(exam && exam.duration_minutes);
+    return Number.isFinite(minutes) && minutes >= 0 ? clockText(minutes * 60) : '—';
+  }
+  const startedAtStr = String(session.started_at);
+  const utcStr = /[Zz]|[+-]\d{2}:\d{2}$/.test(startedAtStr) ? startedAtStr : startedAtStr + 'Z';
+  const ms = new Date(utcStr).getTime() + exam.duration_minutes * 60000 - Date.now();
+  return clockText(ms / 1000);
 }
 
 // Paper-only exam instructions (shading, booklets, margins, ink) make no sense
@@ -630,10 +641,12 @@ function stripPaperOnlyInstructions(text) {
     .join('\n');
 }
 
-// Section instructions live in the first question's passage field. Pull the
-// leading instruction-like lines ("Read the passage…", "Answer ONE question…")
-// into their own bubble so they are not jammed against the header, and leave
-// the reading passage itself separate.
+// Section instructions live in the first question's passage field. They are
+// the PAPER's instructions ("Read the passage…", "Answer ONE question…") and
+// are deliberately NOT sent: a WhatsApp exam takes the app's own instructions
+// (the intro block, the per-type "Reply with the letter…" line) and the
+// paper's questions, nothing else. The split still runs so those lines cannot
+// leak into the reading-passage bubble that follows.
 const SECTION_INSTRUCTION = [
   /^read\b/i,
   /between\s+\d+\s+and\s+\d+\s+words/i,
@@ -704,10 +717,6 @@ function formatSectionHeader(type) {
   return `*${type}*`;
 }
 
-function formatSectionInstructions(instructions) {
-  return `*Instructions*\n\n${instructions}`;
-}
-
 /** Simple instructions shown before the first question of each type. */
 const SECTION_INTRO = {
   objective: 'Reply with the letter of your answer (e.g. A, B, C, or D).',
@@ -715,12 +724,16 @@ const SECTION_INTRO = {
 };
 
 /**
- * The chat bubbles to send for one question: a section header (once per type,
- * before the first of its kind), the section instructions and reading passage
- * as separate bubbles (once, before the first question that uses them), then
- * the question bubble. "Already sent" is derived from the questions that
- * precede this one in the sequence, so resume/nudge re-sends never duplicate
- * headers, instructions, or passages.
+ * The chat bubbles to send for one question: the app's own section intro and
+ * type header (once per type, before the first of its kind), any section
+ * heading and reading passage as separate bubbles (once, before the first
+ * question that uses them), then the question bubble.
+ *
+ * The PAPER's own instruction lines are never among them — a WhatsApp exam
+ * carries the instructions this app writes and the questions the PDF holds,
+ * not the instructions the PDF happens to print. "Already sent" is derived
+ * from the questions that precede this one in the sequence, so resume/nudge
+ * re-sends never duplicate headers or passages.
  */
 function buildQuestionBubbles(exam, question, sequence, index, session) {
   const bubbles = [];
@@ -733,35 +746,31 @@ function buildQuestionBubbles(exam, question, sequence, index, session) {
   }
 
   const clean = (p) => stripPaperOnlyInstructions(stripSourceWatermarks(p)).trim();
-  // Dedupe keys are normalized (case + whitespace) so the same instruction or
-  // passage is never sent twice just because extraction differed in spacing.
+  // Dedupe keys are normalized (case + whitespace) so the same passage or
+  // heading is never sent twice just because extraction differed in spacing.
   const norm = (s) => String(s || '').toLowerCase().replace(/\s+/g, ' ').trim();
-  const seen = { instructions: new Set(), passages: new Set(), headings: new Set() };
+  const seen = { passages: new Set(), headings: new Set() };
   for (const q of prev) {
     const pClean = clean(q.passage);
     const pRest = splitQuestionHeadings(pClean).body;
-    const { instructions: pIns, passage: pPas } = splitSectionMeta(pRest);
-    seen.instructions.add(norm(pIns));
+    const { passage: pPas } = splitSectionMeta(pRest);
     seen.passages.add(norm(pPas));
     splitQuestionHeadings(pClean).headings.forEach((h) => seen.headings.add(h));
     splitQuestionHeadings(String(q.text || '').trim()).headings.forEach((h) => seen.headings.add(h));
   }
 
-  // Section headers, instructions and the reading passage lead the block as
-  // separate bubbles (each once across the sequence), then the question.
+  // Section headings and the reading passage lead the block as separate
+  // bubbles (each once across the sequence), then the question. The leading
+  // instruction lines are pulled off the passage and dropped, so the paper's
+  // instructions never reach the chat.
   const pClean = clean(question.passage);
   const { headings: pHead, body: pRest } = splitQuestionHeadings(pClean);
-  const { instructions, passage } = splitSectionMeta(pRest);
+  const { passage } = splitSectionMeta(pRest);
   for (const h of pHead) {
     if (!seen.headings.has(h)) {
       bubbles.push(`*${h}*`);
       seen.headings.add(h);
     }
-  }
-  const insKey = norm(instructions);
-  if (instructions && !seen.instructions.has(insKey)) {
-    bubbles.push(formatSectionInstructions(instructions));
-    seen.instructions.add(insKey);
   }
   const pasKey = norm(passage);
   if (passage && !seen.passages.has(pasKey)) {
@@ -814,7 +823,7 @@ function examTypeOf(examId) {
   return 'Mixed';
 }
 
-function formatExamIntro(exam, questionCount, { started = false } = {}) {
+function formatExamIntro(exam, questionCount, { started = false, opening = false } = {}) {
   // A paid paper has no invite block. Its whole invitation is the payment
   // bubble: the subject, duration, question count and START prompt below are
   // all things a student cannot use until Paystack has taken their money.
@@ -833,14 +842,20 @@ function formatExamIntro(exam, questionCount, { started = false } = {}) {
     'Answers are locked once you send them.',
     started
       ? 'Your timer starts now. The exam ends automatically when time is up.'
-      : 'Reply START to begin — your timer starts the moment you reply.',
+      : opening
+        // `opening` is the block that goes out with question 1 right behind it:
+        // there is no START to reply to any more, and the clock is armed by the
+        // student's first answer (handleInbound re-arms while no answer exists).
+        ? 'Your timer starts the moment you send your first answer. The exam ends automatically when time is up.'
+        : 'Reply START to begin — your timer starts the moment you reply.',
     'Copying AI-written answers (e.g. ChatGPT, Gemini) is cheating — such answers are detected and earn 0 marks.',
   ];
   // The START prompt only makes sense before the student has begun. Telling
   // someone who has just started to reply START, or that their exam "begins
   // instantly" the moment an admin presses Send, is the confusion this split
-  // exists to remove.
-  const startLine = started
+  // exists to remove. `opening` joins `started` here for the same reason: the
+  // question is already arriving behind this message.
+  const startLine = started || opening
     ? ''
     : 'Reply *START* to this chat to open it.\n\n';
   const instructions = steps.map((s, i) => `${i + 1}. ${s}`).join('\n');
@@ -1108,9 +1123,10 @@ async function sendQuestionTo(session, student, qOrder = null) {
   const index = sequence.findIndex((q) => q.id === question.id);
 
   // Every bubble that is not the question itself is meta content — section
-  // intro, type header, heading, instructions, reading passage — and goes out
-  // as its OWN WhatsApp message. An instruction and a question never share a
-  // chat bubble (per product requirement).
+  // intro, type header, heading, reading passage — and goes out as its OWN
+  // WhatsApp message. An instruction and a question never share a chat bubble
+  // (per product requirement), and the paper's own instructions are not sent
+  // at all: the app writes the instructions, the PDF only supplies questions.
   const bubbles = buildQuestionBubbles(exam, question, sequence, index, session);
   const questionBubble = bubbles.pop();
   for (const bubble of bubbles) {
@@ -1582,7 +1598,9 @@ async function maybeStartSession(student, preferredExamId = null) {
     session = getActiveSession(student.id);
   }
 
-  await sendOpeningIntro(student, exam, session);
+  // Question 1 goes out immediately behind this block, so the block never
+  // tells the student to reply START — there is nothing left to start.
+  await sendOpeningIntro(student, exam, session, { opening: true });
   const sent = await sendQuestionTo(session, student).catch(async (err) => {
     await wa.sendText(student.phone, `Could not start "${exam.title}" right now. Please try again shortly.`);
     return false;
@@ -2386,7 +2404,7 @@ async function mapLimit(items, limit, fn) {
 }
 
 /** Deliver (or nudge) the exam to one recipient, mutating `report`. */
-async function sendIntro(session, student, exam, count, template, { force = false } = {}) {
+async function sendIntro(session, student, exam, count, template, { force = false, opening = false } = {}) {
   const entry = outbox.enqueue({ sessionId: session.id, kind: 'intro', recipient: student.phone });
   if (force && entry.state === 'sent') {
     // Resending an invite the student never answered is the whole point of a
@@ -2421,8 +2439,9 @@ async function sendIntro(session, student, exam, count, template, { force = fals
     } else {
       // '' for a paid paper — never reached, because the link above returns
       // first. Kept as a check so an empty bubble cannot reach the chat even
-      // if that ordering ever changes.
-      const intro = formatExamIntro(exam, count);
+      // if that ordering ever changes. `opening` drops the "Reply START" line:
+      // question 1 is arriving right behind this message.
+      const intro = formatExamIntro(exam, count, { opening });
       if (intro) await wa.sendText(student.phone, intro);
     }
     outbox.markSent(entry.id);
@@ -2430,6 +2449,42 @@ async function sendIntro(session, student, exam, count, template, { force = fals
   } catch (error) {
     outbox.markFailed(entry.id, error, Math.max(1, config.exam.sendRetries));
     throw error;
+  }
+}
+
+/**
+ * Start the paper for real: the WhatsApp instructions go out, then question 1
+ * follows them immediately — no "Reply *START*" waiting room in between. This
+ * is what the admin's Send button does.
+ *
+ * The invite still leads because it is the message WhatsApp will accept from a
+ * number that has not messaged the business in 24 hours. If the free-form
+ * question behind it is refused (131047/131026 — template required), nothing
+ * is lost or abandoned: the invite is already in the chat, so the student's
+ * first reply opens the paper through the existing invite branch, and the
+ * queued outbox row keeps the delivery owed (recoverQueuedSends() replays it)
+ * rather than marking the recipient unreachable.
+ *
+ * A paid paper stops inside sendIntro(): the checkout link is its whole
+ * invitation, and there is no paper to push until Paystack says so.
+ */
+async function startImmediately(session, student, exam, count, template, report, { force = false } = {}) {
+  await sendIntro(session, student, exam, count, template, { force, opening: true });
+  // Counted here rather than after the question: for a paid paper the invite
+  // (the checkout link) IS the whole delivery, and the report must still show
+  // the recipient as reached.
+  report.sent++;
+  if (payments.isPaidExam(exam)) return;
+  const firstQ = getSessionQuestion(session.id, session.current_q_order)
+    || firstUnansweredSelected(session);
+  if (!firstQ) return;
+  try {
+    // Through advanceAndSend, so the delivery is recorded in the outbox: a
+    // bare sendQuestionTo leaves no trace, and nothing could replay it.
+    await advanceAndSend(session, student, firstQ);
+  } catch (err) {
+    // The invite made it out; this is a deferred start, not a failed send.
+    console.warn(`[exam] question 1 deferred for ${student.phone}: ${friendlyError(err)}`);
   }
 }
 
@@ -2446,12 +2501,16 @@ async function sendExamToStudent(exam, student, questionCount, template, report)
       session = restartSession(session);
       fresh = true;
     } else if (session.status === 'in_progress') {
-      // No start time means the invite went out and the student never replied.
-      // That is not a live attempt, so nudging them a question they have never
-      // seen would be wrong — re-deliver the invite and leave the clock alone.
+      // No start time means the paper has never opened — the invite went out
+      // and the student never replied (or the immediate push was refused by
+      // WhatsApp). Nudging the same invite a second time would change nothing,
+      // so pressing Send again starts the paper for real.
       if (!session.started_at) {
-        await sendIntro(session, student, exam, getSessionQuestionCount(session.id) || questionCount, template, { force: true });
-        report.sent++;
+        await startImmediately(
+          session, student, exam,
+          getSessionQuestionCount(session.id) || questionCount,
+          template, report, { force: true }
+        );
         return;
       }
       // A session whose timer already lapsed must restart, or the next
@@ -2485,13 +2544,16 @@ async function sendExamToStudent(exam, student, questionCount, template, report)
       const attemptCount = getSessionQuestionCount(session.id) || questionCount;
       // The clock does not run from the send. createSession/restartSession
       // already left started_at NULL; re-assert it so a session carried over
-      // from an older code path cannot resume a stale countdown.
+      // from an older code path cannot resume a stale countdown. It is armed
+      // by the student's FIRST reply instead, so the paper can sit unread in
+      // the chat without costing anybody a minute of it.
       db.prepare('UPDATE sessions SET started_at=NULL WHERE id=?').run(session.id);
-      await sendIntro(session, student, exam, attemptCount, template);
-      // Only the invite goes out now. Question 1 is delivered by handleInbound
-      // when the student actually replies, so that starting the clock and
-      // receiving the paper are the same event rather than two separate ones.
-      report.sent++;
+      // The exam starts with the button: the WhatsApp instructions go out and
+      // question 1 follows them at once, figures above the question as always.
+      // If WhatsApp refuses the free-form question (a number outside the
+      // 24-hour window), the invite behind it is the fallback — the student's
+      // first reply then opens the paper exactly as before.
+      await startImmediately(session, student, exam, attemptCount, template, report);
       return;
     }
     await sendQuestionTo(session, student);
