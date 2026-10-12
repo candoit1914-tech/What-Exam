@@ -239,6 +239,103 @@ function computePaperTotal(sessionId) {
     .get(session.exam_id).t;
 }
 
+// ── What the paper actually owes ───────────────────────────────────────
+//
+// The template-space answers to two questions an admin (and a student) must be
+// able to see BEFORE the paper runs: how many questions the rules really leave
+// to answer, and what those questions are worth together. Both are derived from
+// sectionPlan, so a rule edit changes them at once and nothing is stored twice.
+
+/**
+ * The number of questions a student will actually answer, compulsory included.
+ *
+ * A section with a live rule owes exactly its `toAnswer`; a section with no rule
+ * is answered in full; and a question that belongs to no section at all (or to a
+ * key the rules never named) is answered in full too — it is part of the paper
+ * whether or not anyone wrote a rule about it. The intro block prints this
+ * number, because "Number of questions: 15" over a paper the student will only
+ * ever answer 8 questions of is a promise the chat then breaks.
+ */
+function answerableCount(examId) {
+  const plan = sectionPlan(examId);
+  const covered = new Set(plan.map((s) => s.section_key));
+  let total = 0;
+  for (const s of plan) {
+    const n = s.compulsory.length + s.optional.length;
+    total += s.toAnswer > 0 ? Math.min(s.toAnswer, n) : n;
+  }
+  for (const r of db
+    .prepare('SELECT COALESCE(section_key,\'\') k, COUNT(*) c FROM questions WHERE exam_id = ? GROUP BY k')
+    .all(examId)) {
+    if (!covered.has(r.k)) total += r.c;
+  }
+  return total;
+}
+
+/**
+ * What the paper is worth once every rule is applied: the marks of the
+ * compulsory questions plus the marks of the quota a student picks from each
+ * section. That number is the paper — it is what a result is scored out of —
+ * so it has to be knowable before the exam runs, not discovered in the result.
+ *
+ * A section whose optional questions do not all carry the same marks cannot be
+ * priced exactly before the student picks: `from`/`to` are the cheapest and the
+ * dearest paper they could build, and `exact` says so. Everything else is a
+ * single number.
+ *
+ * `poolTotal` is every mark on the paper including the questions a student may
+ * refuse; `complete` is whether the rules price ALL of them. A selective paper
+ * is deliberately incomplete — refusing questions is the choice — and the one
+ * thing that must never happen is the student being scored against the pool
+ * rather than against what they owe.
+ */
+function pricingSummary(examId) {
+  const plan = sectionPlan(examId);
+  const covered = new Set(plan.map((s) => s.section_key));
+  const marksOf = (qs) => qs.reduce((sum, q) => sum + Number(q.marks || 0), 0);
+  let from = 0;
+  let to = 0;
+  let exact = true;
+  for (const s of plan) {
+    const forced = marksOf(s.compulsory);
+    if (s.toAnswer <= 0) {
+      from += forced + marksOf(s.optional);
+      to += forced + marksOf(s.optional);
+      continue;
+    }
+    const values = s.optional.map((q) => Number(q.marks || 0));
+    const quota = Math.min(s.quota, values.length);
+    const pick = values.slice().sort((a, b) => a - b);
+    const cheapest = pick.slice(0, quota).reduce((a, b) => a + b, 0);
+    const dearest = pick.slice(Math.max(0, values.length - quota)).reduce((a, b) => a + b, 0);
+    if (cheapest !== dearest) exact = false;
+    from += forced + cheapest;
+    to += forced + dearest;
+  }
+  // Questions no rule ever named are part of the paper and answered in full.
+  const stray = db
+    .prepare(
+      `SELECT COALESCE(section_key,'') k, COALESCE(SUM(marks),0) m, COUNT(*) c
+         FROM questions WHERE exam_id = ? GROUP BY k`
+    )
+    .all(examId)
+    .filter((r) => !covered.has(r.k));
+  for (const r of stray) { from += r.m; to += r.m; }
+
+  const poolTotal = Number(
+    db.prepare('SELECT COALESCE(SUM(marks),0) t FROM questions WHERE exam_id = ?').get(examId).t || 0
+  );
+  return {
+    priced: exact ? from : null,
+    from,
+    to,
+    exact,
+    poolTotal,
+    complete: exact && poolTotal > 0 && from === poolTotal,
+    leftOut: exact ? Math.max(0, poolTotal - from) : null,
+  };
+}
+
 /**
  * Commit the student's choice for one section and re-price the paper.
  *
@@ -257,6 +354,18 @@ function applySelection(sessionId, sectionKey, chosenQOrders) {
     if (row.is_compulsory) continue; // forced by the paper
     setSel.run(chosen.has(row.q_order) ? 1 : 0, sessionId, row.q_order);
   }
+  // Anything still queued for a question the student just refused is retired
+  // here, in the same breath as the refusal. A queued question replay would put
+  // a refused question back in the chat, and a queued figure would put its
+  // diagram there some minutes later, hanging alone above whatever the student
+  // is answering by then. 'sent' is the outbox's own word for "retired, never
+  // to be retried" (see deliverOwedFigures).
+  db.prepare(
+    `UPDATE message_outbox SET state = 'sent', error = '', updated_at = datetime('now')
+      WHERE session_id = ? AND state = 'queued' AND kind IN ('question', 'figure')
+        AND q_order IN (SELECT q_order FROM session_questions
+                         WHERE session_id = ? AND section_key = ? AND is_selected = 0)`
+  ).run(sessionId, sessionId, sectionKey);
   const total = computePaperTotal(sessionId);
   // Clear the provisional state; the choice is now committed. selection_section
   // is deliberately KEPT: it is the only pointer handleReply has to the section,
@@ -727,6 +836,8 @@ module.exports = {
   hasSelections,
   needsChoice,
   computePaperTotal,
+  answerableCount,
+  pricingSummary,
   applySelection,
   beginChoice,
   openChoice,

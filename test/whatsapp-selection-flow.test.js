@@ -365,3 +365,140 @@ test('a "4 of 5" paper with a compulsory question asks for three choices and bil
     );
   } finally { cap.restore(); }
 });
+
+// The commit is also where the student finally sees their own paper: the exact
+// numbers they will now be asked — compulsory ones named as such — and what the
+// whole sheet is worth, so "scored out of 100" is a number seen BEFORE the
+// questions start rather than one that appears in the result.
+test('Continue prints the answer sheet: the numbers chosen and what the paper is worth', async () => {
+  const { sid, phone, poolOrders } = openAtSelector({ pool: 3, compulsory: 1, answerCount: 2 });
+  const cap = captureWa();
+  try {
+    await examSvc.handleInbound(phone, 'START');
+    await examSvc.handleInbound(phone, 'answer to the compulsory one');
+    await examSvc.handleInbound(phone, '', { replyId: `sel:b:${poolOrders[1]}` });
+    cap.sent.length = 0;
+    await examSvc.handleInbound(phone, 'CONTINUE');
+
+    const sheet = cap.sent.find((m) => /here is your paper/.test(m.text || ''));
+    assert.ok(sheet, 'the commit hands the student their own sheet');
+    assert.match(sheet.text, /\*THEORY\*/, 'the paper is grouped the way the printed paper is');
+    assert.match(
+      sheet.text, /Q1 \(compulsory\), Q2/,
+      'the compulsory question is named as such, the chosen one carries its number'
+    );
+    assert.match(
+      sheet.text, /Total: 2 questions, 10 marks\. Your score is out of 10\./,
+      'what the result is scored out of was on screen before the first question'
+    );
+    assert.equal(
+      cap.sent.filter((m) => /here is your paper/.test(m.text || '')).length, 1,
+      'the sheet is printed once, at the commit'
+    );
+    const sheetAt = cap.sent.indexOf(sheet);
+    const askAt = cap.sent.findIndex((m) => /\*QUESTION \d+\*/.test(m.text || ''));
+    assert.ok(askAt > sheetAt, 'and it arrives before the questions it describes');
+  } finally { cap.restore(); }
+});
+
+// A resume, a nudge or a replay can still name a question the student refused
+// at the selector: current_q_order is only a position, not a promise. The walk
+// must continue at the first SELECTED question still owed — the one the student
+// chose — and the refused one never reaches the chat.
+test('a resume that names the refused question continues at the chosen one instead', async () => {
+  const { sid, phone, poolOrders } = openAtSelector({ pool: 3, compulsory: 1, answerCount: 2 });
+  const cap = captureWa();
+  try {
+    await examSvc.handleInbound(phone, 'START');
+    await examSvc.handleInbound(phone, 'answer to the compulsory one');
+    const refused = poolOrders[0]; // left behind at the selector
+    const chosen = poolOrders[1];
+    await examSvc.handleInbound(phone, '', { replyId: `sel:b:${chosen}` });
+    await examSvc.handleInbound(phone, 'CONTINUE');
+    cap.sent.length = 0;
+
+    const session = sessionRow(sid);
+    const student = db.prepare('SELECT * FROM students WHERE id = ?').get(session.student_id);
+    await examSvc.sendQuestionTo(session, student, refused);
+
+    assert.ok(
+      !questionBubbles(cap.sent).some((t) => t.includes(drawnText(sid, refused))),
+      'the refused question is never delivered, however the chat comes back to it'
+    );
+    assert.ok(
+      questionBubbles(cap.sent).some((t) => t.includes(drawnText(sid, chosen))),
+      'and the chosen one takes its place'
+    );
+  } finally { cap.restore(); }
+});
+
+// A crash can leave a replay queued against a question the student has since
+// refused. recoverQueuedSends must retire that debt instead of paying it —
+// otherwise the refused question returns to the chat after the choice closed.
+test('a queued replay of a refused question is retired on recovery, not delivered', async () => {
+  const { sid, phone, poolOrders } = openAtSelector({ pool: 3, compulsory: 1, answerCount: 2 });
+  const cap = captureWa();
+  try {
+    await examSvc.handleInbound(phone, 'START');
+    await examSvc.handleInbound(phone, 'answer to the compulsory one');
+    const refused = poolOrders[0];
+    await examSvc.handleInbound(phone, '', { replyId: `sel:b:${poolOrders[1]}` });
+    await examSvc.handleInbound(phone, 'CONTINUE');
+
+    // The replay was written before the choice was made and never confirmed.
+    const qid = db.prepare(
+      'SELECT question_id FROM session_questions WHERE session_id = ? AND q_order = ?'
+    ).get(sid, refused).question_id;
+    const queued = db.prepare(
+      `INSERT INTO message_outbox(session_id, question_id, q_order, kind, recipient, state)
+       VALUES (?, ?, ?, 'question', ?, 'queued')`
+    ).run(sid, qid, refused, phone);
+    cap.sent.length = 0;
+
+    await examSvc.recoverQueuedSends();
+
+    assert.equal(
+      db.prepare('SELECT state FROM message_outbox WHERE id = ?').get(queued.lastInsertRowid).state,
+      'sent', 'the debt against a refused question is retired, not retried'
+    );
+    assert.ok(
+      !questionBubbles(cap.sent).some((t) => t.includes(drawnText(sid, refused))),
+      'and the refused question never reaches the chat'
+    );
+  } finally { cap.restore(); }
+});
+
+// The same refusal retires everything still queued for the question in the
+// same breath: a queued figure would otherwise put its diagram alone above
+// whatever the student is answering by then, minutes after the choice closed.
+test('the commit retires queued sends still owed to a refused question', async () => {
+  const { sid, phone, poolOrders } = openAtSelector({ pool: 3, compulsory: 1, answerCount: 2 });
+  const cap = captureWa();
+  try {
+    await examSvc.handleInbound(phone, 'START');
+    await examSvc.handleInbound(phone, 'answer to the compulsory one');
+    const refused = poolOrders[0];
+    const qid = db.prepare(
+      'SELECT question_id FROM session_questions WHERE session_id = ? AND q_order = ?'
+    ).get(sid, refused).question_id;
+    const queuedQuestion = db.prepare(
+      `INSERT INTO message_outbox(session_id, question_id, q_order, kind, recipient, state)
+       VALUES (?, ?, ?, 'question', ?, 'queued')`
+    ).run(sid, qid, refused, phone);
+    const queuedFigure = db.prepare(
+      `INSERT INTO message_outbox(session_id, question_id, q_order, kind, recipient, state)
+       VALUES (?, ?, ?, 'figure', ?, 'queued')`
+    ).run(sid, qid, refused, phone);
+
+    await examSvc.handleInbound(phone, '', { replyId: `sel:b:${poolOrders[1]}` });
+    await examSvc.handleInbound(phone, 'CONTINUE');
+
+    const state = (id) => db.prepare('SELECT state FROM message_outbox WHERE id = ?').get(id).state;
+    assert.equal(state(queuedQuestion.lastInsertRowid), 'sent', 'the refused question’s replay dies with the refusal');
+    assert.equal(state(queuedFigure.lastInsertRowid), 'sent', 'and so does its diagram');
+    assert.ok(
+      !questionBubbles(cap.sent).some((t) => t.includes(drawnText(sid, refused))),
+      'nothing owed to the refused question is delivered'
+    );
+  } finally { cap.restore(); }
+});

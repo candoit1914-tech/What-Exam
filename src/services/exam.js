@@ -475,6 +475,49 @@ function questionDisplayNumbers(sessionId) {
 }
 
 /**
+ * The paper a student actually holds, spelled out once the choice is committed.
+ *
+ * The selector told them what they were choosing; this is what they chose, in
+ * the same numbers the question bubbles carry (objectives 1..N, theory 1..M),
+ * with the compulsory questions named as such — and what the whole sheet is
+ * worth, so "scored out of 100" is a number the student has seen before the
+ * first result rather than one that appears in it.
+ *
+ * Empty when nothing about the paper is selective: a paper with no rule was
+ * never a choice, and a confirmation of a choice nobody made is noise.
+ */
+function answerSheetMessage(session) {
+  const plan = selection.sessionPlan(session.id);
+  if (!plan.some((s) => s.quota > 0 || s.toAnswer > 0)) return '';
+  const seq = sessionQuestionSequence(session);
+  if (!seq.length) return '';
+  const numbers = displayNumbersFromSequence(seq);
+  // A question is compulsory only inside a section the paper priced: everywhere
+  // else `is_compulsory` is just the column default and means nothing to a
+  // student who was never offered the choice.
+  const forced = new Set();
+  for (const s of plan) {
+    if (s.toAnswer <= 0) continue;
+    for (const q of s.compulsory) forced.add(q.question_id);
+  }
+  const lines = ['✅ Locked in — here is your paper:'];
+  for (const [type, label] of [['objective', 'OBJECTIVE'], ['theory', 'THEORY']]) {
+    const qs = seq.filter((q) => (q.type === 'theory' ? 'theory' : 'objective') === type);
+    if (!qs.length) continue;
+    lines.push('', `*${label}*`);
+    lines.push(qs.map((q) => `Q${numbers.get(q.id)}${forced.has(q.id) ? ' (compulsory)' : ''}`).join(', '));
+  }
+  const total = Number(selection.computePaperTotal(session.id) || 0);
+  const count = seq.length;
+  lines.push(
+    '',
+    `Total: ${count} question${count === 1 ? '' : 's'}, ${total} mark${total === 1 ? '' : 's'}. ` +
+    `Your score is out of ${total}.`
+  );
+  return lines.join('\n');
+}
+
+/**
  * The question a session presents after `question`, in presentation order.
  * Returns null when the current question is last. If the current question is
  * not part of the sequence (should not happen), falls back to q_order + 1 so
@@ -894,14 +937,31 @@ function formatExamIntro(exam, questionCount, { started = false, opening = false
       return `${selection.sectionLabel(s) || s.section_key}: answer ${s.toAnswer} of the ${total} questions${forced}.`;
     });
   const ruleLines = rules.length ? `${rules.join('\n')}\n\n` : '';
+  // The count the student will be held to. A paper with live rules owes its
+  // rule-priced questions — compulsory ones included — not every question the
+  // pool happens to hold, so this block never promises more questions than the
+  // chat will actually send.
+  const answerable = selection.answerableCount(exam.id) || questionCount;
+  // A paper whose rules price every mark of itself says so up front: the
+  // compulsory questions plus the chosen ones are the whole paper, so a student
+  // who answers them all scores 100%. Only printed when the pricing is exact —
+  // a section whose optional questions carry different marks cannot honestly
+  // promise one number before the student has chosen.
+  const pricing = selection.pricingSummary(exam.id);
+  const totalLine =
+    rules.length && pricing.exact && pricing.priced > 0
+      ? `Your paper is worth *${pricing.priced} marks* — the compulsory questions plus the ones you choose add up to the full paper.\n\n`
+      : '';
   return (
     `*${String(exam.title).toUpperCase()}*\n\n` +
     `Subject: *${exam.subject || 'General'}*\n` +
     `Exam type: *${type}*\n` +
     `Duration: *${exam.duration_minutes} minute${exam.duration_minutes === 1 ? '' : 's'}*\n` +
-`Number of questions: *${questionCount}*\n` +
+    `Number of questions: *${answerable}*` +
+    (answerable !== questionCount ? ` (the ones you will answer)` : '') + '\n' +
     `Pass mark: *${exam.pass_percentage}%\n\n` +
     ruleLines +
+    totalLine +
     startLine +
     chaseLine +
     `*INSTRUCTIONS*\n${instructions}`
@@ -1113,12 +1173,24 @@ async function oweQuestionFigure(session, student, question) {
  * exists is retired too — a debt nobody can pay is not a retry loop.
  */
 async function deliverOwedFigures(session) {
+  // Oldest question first: a retry must never reorder the paper, so the
+  // diagrams a student missed arrive in the order the questions that refer to
+  // them were sent.
   const owed = db
-    .prepare("SELECT * FROM message_outbox WHERE session_id = ? AND kind = 'figure' AND state = 'queued'")
+    .prepare(
+      `SELECT * FROM message_outbox
+        WHERE session_id = ? AND kind = 'figure' AND state = 'queued'
+        ORDER BY COALESCE(q_order, 0), id`
+    )
     .all(session.id);
   for (const entry of owed) {
     const question = getSessionQuestion(session.id, entry.q_order);
-    if (!question) {
+    const dropped = db
+      .prepare('SELECT is_selected FROM session_questions WHERE session_id = ? AND q_order = ?')
+      .get(session.id, entry.q_order);
+    // A debt against a question the student refused is a debt nobody owes: the
+    // diagram must never arrive above some unrelated question minutes later.
+    if (!question || (dropped && Number(dropped.is_selected) === 0)) {
       outbox.markSent(entry.id);
       continue;
     }
@@ -1139,6 +1211,21 @@ async function sendQuestionTo(session, student, qOrder = null) {
   if (!question) {
     await finalize(session, student);
     return false;
+  }
+  // A resume, a nudge or a replay can still name a question the student refused
+  // at the selector — current_q_order is only a position, not a promise. Such a
+  // question is never delivered: the walk simply continues at the first
+  // SELECTED question that is still owed, which is what the student chose.
+  const drawn = db
+    .prepare('SELECT is_selected FROM session_questions WHERE session_id = ? AND q_order = ?')
+    .get(session.id, question.q_order);
+  if (drawn && Number(drawn.is_selected) === 0) {
+    const next = firstUnansweredSelected(session);
+    if (!next || Number(next.q_order) === Number(question.q_order)) {
+      await finalize(session, student);
+      return false;
+    }
+    return sendQuestionTo(session, student, next.q_order);
   }
   // Delivery has reached an optional question of a selective section: the student
   // picks from it before seeing it, so the selector replaces this question rather
@@ -1287,6 +1374,16 @@ async function recoverQueuedSends() {
     if (entry.kind !== 'question') continue;
     const session = db.prepare('SELECT * FROM sessions WHERE id = ?').get(entry.session_id);
     if (!session) continue;
+    // A queued replay of a question the student has since refused at the
+    // selector would put that question back in the chat. The choice already
+    // answered what happens to it: it is retired, never sent.
+    const dropped = db
+      .prepare('SELECT is_selected FROM session_questions WHERE session_id = ? AND q_order = ?')
+      .get(session.id, entry.q_order);
+    if (dropped && Number(dropped.is_selected) === 0) {
+      outbox.markSent(entry.id);
+      continue;
+    }
     const student = { id: session.student_id, phone: entry.recipient };
     try {
       await sendQuestionTo(session, student, entry.q_order);
@@ -1665,6 +1762,12 @@ async function processAnswer(session, student, body, meta = {}) {
       // outbox: without that record `questionSent` stays false and the invite
       // branch above would hand the student question 1 again on their next reply.
       const fresh = getActiveSession(student.id) || session;
+      // The student's own sheet comes first: the exact question numbers they
+      // will now be asked (compulsory included) and what the paper is worth —
+      // so nobody only discovers what they signed up for when the questions
+      // start arriving.
+      const sheet = answerSheetMessage(fresh);
+      if (sheet) await wa.sendText(student.phone, sheet);
       const nextQ = firstUnansweredSelected(fresh);
       if (nextQ) await advanceAndSend(fresh, student, nextQ);
       else await finalize(fresh, student, 'completed');
@@ -2710,6 +2813,7 @@ module.exports = {
   nextInSequence,
   firstUnansweredSelected,
   questionDisplayNumbers,
+  answerSheetMessage,
   deadline,
   timeRemaining,
   markAllPendingTheory,

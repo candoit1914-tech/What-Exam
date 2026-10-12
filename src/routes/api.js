@@ -336,6 +336,10 @@ router.get('/exams/:id', (req, res) => {
   res.json({
     exam: examSummary(exam), questions, recipients, results: resultsList,
     sections, selection: selection.sectionPlan(exam.id),
+    // Whether the compulsory questions plus each section's quota still add up
+    // to every mark the paper carries — the check that keeps a scored paper
+    // out of 100 rather than out of whatever the rules happened to leave.
+    pricing: selection.pricingSummary(exam.id),
     // Empty for a free exam, so the dashboard can branch on exam.pricing alone.
     payments: payments.listFor(exam.id),
   });
@@ -570,6 +574,7 @@ router.patch('/exams/:id/sections', (req, res) => {
   res.json({
     ok: true,
     sections: db.prepare('SELECT * FROM exam_sections WHERE exam_id = ? ORDER BY position, id').all(exam.id),
+    pricing: selection.pricingSummary(exam.id),
   });
 });
 

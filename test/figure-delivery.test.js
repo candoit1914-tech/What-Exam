@@ -141,6 +141,100 @@ test('a question with one figure still sends it, and only it', async () => {
   });
 });
 
+// ── owed figures (retried on the student's next message) ──────────────
+
+test('owed figures arrive in the paper’s order, oldest question first', async () => {
+  const eid = db
+    .prepare("INSERT INTO exams(title,duration_minutes,status) VALUES ('OwedOrder',30,'live')")
+    .run().lastInsertRowid;
+  const studentId = db.prepare('INSERT INTO students(phone) VALUES (?)').run(phone()).lastInsertRowid;
+  for (const [order, file] of [[1, 'ow-1.png'], [2, 'ow-2.png']]) {
+    const qid = db
+      .prepare(
+        `INSERT INTO questions(exam_id,q_order,type,text,marks,image,section_key)
+         VALUES (?,?,'theory',?,5,?,'')`
+      )
+      .run(eid, order, `Study figure ${order}.`, file).lastInsertRowid;
+    db.prepare("INSERT INTO question_images(question_id,position,image,kind) VALUES (?,0,?,'figure')").run(qid, file);
+  }
+  const session = exam.createSession(eid, studentId);
+
+  // The two figures are owed OUT of order — a retry must put them back into
+  // the paper's own sequence, not replay the order they happened to fail in.
+  for (const order of [2, 1]) {
+    const { question_id } = db
+      .prepare('SELECT question_id FROM session_questions WHERE session_id = ? AND q_order = ?')
+      .get(session.id, order);
+    db.prepare(
+      `INSERT INTO message_outbox(session_id, question_id, q_order, kind, recipient, state)
+       VALUES (?, ?, ?, 'figure', ?, 'queued')`
+    ).run(session.id, question_id, order, '+233queued');
+  }
+
+  await withChat(async (calls) => {
+    await exam.deliverOwedFigures(session);
+    assert.deepEqual(
+      calls.filter((c) => c.type === 'image').map((c) => path.basename(c.file)),
+      ['ow-1.png', 'ow-2.png'],
+      'question order wins over insertion order'
+    );
+  });
+});
+
+test('the diagram of a question the student refused is retired, never delivered alone', async () => {
+  const eid = db
+    .prepare("INSERT INTO exams(title,duration_minutes,status) VALUES ('OwedDrop',30,'live')")
+    .run().lastInsertRowid;
+  const studentId = db.prepare('INSERT INTO students(phone) VALUES (?)').run(phone()).lastInsertRowid;
+  for (const [order, file] of [[1, 'keep-fig.png'], [2, 'drop-fig.png']]) {
+    const qid = db
+      .prepare(
+        `INSERT INTO questions(exam_id,q_order,type,text,marks,image,section_key)
+         VALUES (?,?,'theory',?,5,?,'')`
+      )
+      .run(eid, order, `Study figure ${order}.`, file).lastInsertRowid;
+    db.prepare("INSERT INTO question_images(question_id,position,image,kind) VALUES (?,0,?,'figure')").run(qid, file);
+  }
+  const session = exam.createSession(eid, studentId);
+  // The student refused question 2 at the selector; its figure was still owed
+  // from an earlier attempt.
+  db.prepare('UPDATE session_questions SET is_selected = 0 WHERE session_id = ? AND q_order = 2').run(session.id);
+  const poolIdOf = (order) => db
+    .prepare('SELECT question_id FROM session_questions WHERE session_id = ? AND q_order = ?')
+    .get(session.id, order).question_id;
+  const debtId = db
+    .prepare(
+      `INSERT INTO message_outbox(session_id, question_id, q_order, kind, recipient, state)
+       VALUES (?, ?, 2, 'figure', ?, 'queued')`
+    )
+    .run(session.id, poolIdOf(2), '+233queued').lastInsertRowid;
+  const keptId = db
+    .prepare(
+      `INSERT INTO message_outbox(session_id, question_id, q_order, kind, recipient, state)
+       VALUES (?, ?, 1, 'figure', ?, 'queued')`
+    )
+    .run(session.id, poolIdOf(1), '+233queued').lastInsertRowid;
+
+  await withChat(async (calls) => {
+    await exam.deliverOwedFigures(session);
+    assert.deepEqual(
+      calls.filter((c) => c.type === 'image').map((c) => path.basename(c.file)),
+      ['keep-fig.png'],
+      'only the diagram of a question still in the paper goes out'
+    );
+  });
+  assert.equal(
+    db.prepare('SELECT state FROM message_outbox WHERE id = ?').get(debtId).state,
+    'sent',
+    'the refused question’s debt is retired — a diagram alone above an unrelated question is worse than none'
+  );
+  assert.equal(
+    db.prepare('SELECT state FROM message_outbox WHERE id = ?').get(keptId).state,
+    'sent',
+    'while the owed figure of a question still in the paper pays out'
+  );
+});
+
 // ── report ────────────────────────────────────────────────────────────
 
 test('the report prints every figure above the question it belongs to', () => {

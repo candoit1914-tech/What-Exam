@@ -185,3 +185,95 @@ test('the answer-N count is recovered from the instruction wording', () => {
     0
   );
 });
+
+// ── what the paper owes ───────────────────────────────────────────────
+//
+// Both helpers answer the questions an admin (and a student) must be able to
+// see BEFORE the paper runs: how many questions the rules really leave to
+// answer, and what those questions are worth together.
+
+/** Two objectives with no section at all, plus a selective theory section. */
+function pricedPaper() {
+  const eid = db.prepare("INSERT INTO exams(title,duration_minutes,status) VALUES ('Owed',30,'live')").run().lastInsertRowid;
+  for (let i = 1; i <= 2; i++) {
+    db.prepare(
+      `INSERT INTO questions(exam_id,q_order,type,text,marks,section_key) VALUES (?,?,'objective',?,5,'')`
+    ).run(eid, i, `Objective ${i}`);
+  }
+  for (let i = 1; i <= 4; i++) {
+    db.prepare(
+      `INSERT INTO questions(exam_id,q_order,type,text,marks,is_compulsory,section_key)
+       VALUES (?,?,'theory',?,5,?,'section-b')`
+    ).run(eid, i + 2, `Theory ${i}`, i === 1 ? 1 : 0);
+  }
+  db.prepare(
+    `INSERT INTO exam_sections(exam_id,section_key,title,instructions,position,answer_count)
+     VALUES (?, 'section-b', 'SECTION B', 'Answer any THREE questions', 0, 3)`
+  ).run(eid);
+  return eid;
+}
+
+test('the answerable count is what the rules leave to answer, not the pool', () => {
+  const eid = pricedPaper();
+  // The 2 objectives are answered in full; SECTION B owes the compulsory one
+  // plus 2 of the 3 it leaves on offer. "Number of questions: 6" over a paper
+  // the student only answers 5 questions of is a promise the chat then breaks.
+  assert.equal(selection.answerableCount(eid), 5);
+
+  // With no rule at all the count is every question, exactly as before.
+  const plain = db.prepare("INSERT INTO exams(title,duration_minutes,status) VALUES ('Plain',30,'live')").run().lastInsertRowid;
+  db.prepare(
+    `INSERT INTO questions(exam_id,q_order,type,text,marks,section_key) VALUES (?,1,'theory',?,5,'')`
+  ).run(plain, 'One question');
+  assert.equal(selection.answerableCount(plain), 1);
+});
+
+test('the pricing says what a result is scored out of before the paper runs', () => {
+  const eid = pricedPaper();
+  const pricing = selection.pricingSummary(eid);
+  assert.equal(pricing.exact, true, 'every optional question carries the same marks');
+  assert.equal(pricing.priced, 25, '2×5 objectives + the compulsory 5 + 2 of the 3 optional');
+  assert.equal(pricing.poolTotal, 30, 'the pool counts the question a student may refuse');
+  assert.equal(pricing.complete, false, 'a selective paper is deliberately not the whole pool');
+  assert.equal(pricing.leftOut, 5, 'and exactly one question’s worth is what a refusal holds back');
+});
+
+test('a paper whose rules price all of itself is complete', () => {
+  const eid = db.prepare("INSERT INTO exams(title,duration_minutes,status) VALUES ('Full',30,'live')").run().lastInsertRowid;
+  for (let i = 1; i <= 2; i++) {
+    db.prepare(
+      `INSERT INTO questions(exam_id,q_order,type,text,marks,section_key) VALUES (?,?,'theory',?,5,'')`
+    ).run(eid, i, `Question ${i}`);
+  }
+  const pricing = selection.pricingSummary(eid);
+  assert.equal(pricing.exact, true);
+  assert.equal(pricing.priced, 10, 'with no rule refusing anything, every mark is owed');
+  assert.equal(pricing.complete, true, 'so the rules price the whole paper');
+  assert.equal(pricing.leftOut, 0);
+});
+
+test('optional questions of different marks price as a range, never a guess', () => {
+  const eid = db.prepare("INSERT INTO exams(title,duration_minutes,status) VALUES ('Range',30,'live')").run().lastInsertRowid;
+  // A compulsory 2-mark question, then a 2-mark and an 8-mark question on offer:
+  // what the paper is worth cannot be known before the student picks, and the
+  // one thing that must never happen is inventing a single number.
+  const marks = [2, 2, 8];
+  marks.forEach((m, i) => {
+    db.prepare(
+      `INSERT INTO questions(exam_id,q_order,type,text,marks,is_compulsory,section_key)
+       VALUES (?,?,'theory',?,?,?,'section-b')`
+    ).run(eid, i + 1, `Theory ${i + 1}`, m, i === 0 ? 1 : 0);
+  });
+  db.prepare(
+    `INSERT INTO exam_sections(exam_id,section_key,title,instructions,position,answer_count)
+     VALUES (?, 'section-b', 'SECTION B', 'Answer any TWO questions', 0, 2)`
+  ).run(eid);
+
+  const pricing = selection.pricingSummary(eid);
+  assert.equal(pricing.exact, false, 'picking 1 of a 2-mark and an 8-mark question cannot be priced upfront');
+  assert.equal(pricing.priced, null, 'so no single number is invented');
+  assert.equal(pricing.from, 4, 'the compulsory 2 plus the cheap 2');
+  assert.equal(pricing.to, 10, 'the compulsory 2 plus the dear 8');
+  assert.equal(pricing.leftOut, null, 'and nothing is promised about what a refusal holds back');
+  assert.equal(pricing.poolTotal, 12, 'the pool is still every mark on the paper');
+});

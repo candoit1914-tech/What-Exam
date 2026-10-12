@@ -1225,10 +1225,15 @@ test('a selective paper is walked end to end: compulsory first, then the choice'
 
     // Every question on offer is named while the student is choosing — that IS
     // the choice — so "never delivered" has to be measured from the commit on.
+    // It is measured on the question BUBBLES: the answer sheet that follows the
+    // commit prints display numbers, and after a refusal the paper is
+    // renumbered over what remains — the fifth question here legitimately
+    // becomes "Q4" on the sheet while its own text stays "Q5".
     const lockAt = cap.sent.findIndex((m) => /Locked in/.test(m.text || ''));
     assert.ok(lockAt >= 0, 'the commit is acknowledged to the student');
     const afterChoice = cap.sent.slice(lockAt + 1)
-      .map((m) => m.text || m.body || '').join('\n');
+      .filter((m) => /\*QUESTION \d+\*/.test(m.text || ''))
+      .map((m) => m.text).join('\n');
     assert.ok(
       !afterChoice.includes(skippedText),
       'the unchosen question is never delivered'

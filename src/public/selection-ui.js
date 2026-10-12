@@ -118,6 +118,27 @@
     };
   }
 
+  // One line saying what the rules price the paper at: the compulsory questions
+  // plus the quota a student picks. Empty when the paper has no marks. A
+  // selective paper is deliberately not the whole pool — refusing questions is
+  // the choice — so the honest line is what a result is scored out of, never
+  // the pool's total.
+  function pricingNote(pricing) {
+    if (!pricing || !Number(pricing.poolTotal)) return '';
+    var total = Number(pricing.poolTotal);
+    if (!pricing.exact) {
+      return 'Priced: ' + Number(pricing.from || 0) + '–' + Number(pricing.to || 0) + ' of ' + total +
+        ' marks — the optional questions in a section carry different marks, so the paper\u2019s worth depends on the choice.';
+    }
+    var priced = Number(pricing.priced) || 0;
+    if (pricing.complete) {
+      return 'Priced: ' + priced + ' of ' + total +
+        ' marks — the compulsory questions plus the chosen ones add up to the full paper.';
+    }
+    return 'Priced: ' + priced + ' of ' + total + ' marks — the questions a student may refuse hold the other ' +
+      Number(pricing.leftOut || 0) + ', and a result is scored out of ' + priced + '.';
+  }
+
   // <option> pairs for the per-question Section select: every section the exam
   // knows about, plus the question's current value so editing an old question
   // never silently drops its section when that section has no rule yet.
@@ -150,6 +171,7 @@
     ruleRows: ruleRows,
     rowHint: rowHint,
     summaryLines: summaryLines,
+    pricingNote: pricingNote,
     rulesPayload: rulesPayload,
     sectionOptions: sectionOptions,
     sectionSlug: sectionSlug,

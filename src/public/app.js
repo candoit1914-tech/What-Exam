@@ -693,7 +693,7 @@ function setTab(tab) {
 // everything after it — every `const` below stayed in the temporal dead zone,
 // which is how the Recipients tab ended up rendering nothing.
 /** <summary>for a rule row, using the resolved pool the server reported. */
-function selectionRulesCardHTML(examId, sections, selection, questions) {
+function selectionRulesCardHTML(examId, sections, selection, questions, pricing) {
   const rows = SelectionUI.ruleRows(sections, selection, questions);
   if (!rows.length) {
     return `<div class="card" style="margin-top:14px">
@@ -703,9 +703,14 @@ function selectionRulesCardHTML(examId, sections, selection, questions) {
     </div>`;
   }
   const editable = examState.data.exam && !['live', 'ended'].includes(examState.data.exam.status);
+  // Whether the compulsory questions plus the quota still add up to the whole
+  // paper's marks. Computed server-side, so it is the same number the student
+  // is priced against — never a second opinion from the browser.
+  const note = SelectionUI.pricingNote(pricing || (examState.data || {}).pricing);
   return `<div class="card" style="margin-top:14px">
     <h3 style="margin-bottom:4px">SELECTION <span class="gr">RULES</span></h3>
     <p class="muted qmeta">Students choose which questions to answer. Compulsory questions are always answered, and the number you set counts them too — "Answer any 4" in a section of five means four questions answered, not four chosen.</p>
+    ${note ? `<p class="muted qmeta" data-pricing-note>${esc(note)}</p>` : ''}
     ${rows.map((r) => `<div class="row" style="margin-top:12px;gap:10px;align-items:flex-end;flex-wrap:wrap">
       <div class="field" style="flex:1;min-width:180px"><label>Section</label>
         <input type="text" data-skey="${esc(r.section_key)}" value="${esc(r.title)}" ${editable ? '' : 'disabled'}></div>
@@ -757,7 +762,7 @@ async function renderTab() {
         <button class="btn btn-ghost" onclick="aiGenerateForm(${id})">${I.spark} AI Generate</button>
         <button class="btn btn-ghost" onclick="pdfUploadForm(${id})">${I.doc} Upload PDF</button>
       </div>
-      ${selectionRulesCardHTML(id, examState.data.sections || [], examState.data.selection || [], examState.data.questions || [])}
+      ${selectionRulesCardHTML(id, examState.data.sections || [], examState.data.selection || [], examState.data.questions || [], examState.data.pricing)}
       ${questions.length === 0 ? `<div class="empty-state">${I.empty}<p>No questions yet. Add manually, generate with AI, or upload a PDF.</p></div>` : ''}
       ${questions.map((q, i) => {
         const prev = i > 0 ? questions[i - 1] : null;

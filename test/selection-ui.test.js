@@ -132,6 +132,35 @@ test('the summary falls back to the key when a section has no title', () => {
   );
 });
 
+// The pricing note reads the payload GET /api/exams/:id returns for `pricing`
+// (src/services/selection.js pricingSummary): what the rules price the paper
+// at, never the pool a selective paper deliberately leaves unanswered.
+test('the pricing note states what the rules price the paper at', () => {
+  // A complete paper: the rules price every mark the pool carries.
+  assert.match(
+    ui.pricingNote({ priced: 100, from: 100, to: 100, exact: true, poolTotal: 100, complete: true, leftOut: 0 }),
+    /add up to the full paper/,
+    'the promise a paper makes when nothing can be refused'
+  );
+
+  // A selective paper: honest about what a result is scored out of — the
+  // price, never the pool the refused questions live in.
+  const selective = ui.pricingNote({ priced: 80, from: 80, to: 80, exact: true, poolTotal: 100, complete: false, leftOut: 20 });
+  assert.match(selective, /Priced: 80 of 100 marks/);
+  assert.match(selective, /may refuse hold the other 20/);
+  assert.match(selective, /scored out of 80/);
+
+  // Optional questions of different marks: a range, and the reason for it.
+  const range = ui.pricingNote({ priced: null, from: 70, to: 90, exact: false, poolTotal: 100, complete: false, leftOut: null });
+  assert.match(range, /Priced: 70–90 of 100 marks/);
+  assert.match(range, /depends on the choice/);
+
+  // No marks to add up: no note, rather than a note about nothing.
+  assert.equal(ui.pricingNote({ priced: 0, from: 0, to: 0, exact: true, poolTotal: 0, complete: false, leftOut: 0 }), '');
+  assert.equal(ui.pricingNote(null), '');
+  assert.equal(ui.pricingNote(undefined), '');
+});
+
 test('a blank quota is sent as 0, never dropped', () => {
   // Omitting the key would leave the stored rule untouched, so an admin who
   // cleared the field would watch it come back on reload.
@@ -200,14 +229,25 @@ test('the exam page renders a selection-rules card and a save path', () => {
   assert.match(app, /selectionRulesCardHTML\(id,/, 'the card is rendered in the questions tab');
   assert.match(
     app,
-    /selectionRulesCardHTML\(id, examState\.data\.sections \|\| \[\], examState\.data\.selection \|\| \[\], examState\.data\.questions \|\| \[\]\)/,
-    'the questions are passed in: a section with no stored rule has no row without them'
+    /selectionRulesCardHTML\(id, examState\.data\.sections \|\| \[\], examState\.data\.selection \|\| \[\], examState\.data\.questions \|\| \[\], examState\.data\.pricing\)/,
+    'the questions are passed in: a section with no stored rule has no row without them, and the server-priced total rides along'
   );
   assert.match(
     app,
     /max="\$\{r\.pool \+ r\.compulsory\}"/,
     'the ceiling is the whole section: answer_count counts the compulsory questions too'
   );
+});
+
+test('the selection rules card carries the server-priced note', () => {
+  // The note must come from the payload, never be re-derived in the browser:
+  // a second opinion would drift from the number the student is priced against.
+  assert.match(
+    app,
+    /SelectionUI\.pricingNote\(pricing \|\| \(examState\.data \|\| \{\}\)\.pricing\)/,
+    'the card reads the pricing the API reported'
+  );
+  assert.match(app, /data-pricing-note/, 'and marks it so a test (and an admin) can find it');
 });
 
 test('a compulsory question is badged in the list', () => {
