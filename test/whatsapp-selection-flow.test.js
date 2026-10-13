@@ -10,9 +10,26 @@ process.env.DB_PATH = path.join(tmp, 'test.db');
 process.env.UPLOADS_DIR = path.join(tmp, 'uploads');
 process.env.DOTENV_CONFIG_PATH = path.join(tmp, '.env');
 process.env.SEED_ON_BOOT = 'false';
+// The repo root's .env carries REAL AI credentials, and src/config.js loads it
+// at require time — dotenv.config() ignores DOTENV_CONFIG_PATH above. Without
+// this, a theory answer that reaches finalize would generate marking schemes
+// against a live provider: real money spent, and a suite whose duration
+// depends on the network. Neutralize dotenv and drop the credentials before
+// any src module loads, exactly like test/helpers/isolate.js.
+require('dotenv').config = () => ({ parsed: {} });
+for (const name of Object.keys(process.env)) {
+  if (/^(AI_|CLAUDE_|XAI_|PUTER_|WHATSAPP_|PAYSTACK_)/.test(name)) delete process.env[name];
+}
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const db = require('../src/db');
+// aiConfigured() is true whenever a baseUrl exists — and the shipped default
+// always does — so the default has to go too. Then finalize marks theory with
+// the heuristic fallback instead of calling out to a provider.
+require('../src/config').ai.baseUrl = '';
+// Belt and braces: any fetch that slips past the stubs fails loudly instead of
+// quietly reaching a real service.
+global.fetch = async () => { throw new Error('Unexpected network request in isolated test'); };
 
 after(() => {
   db.close();
@@ -500,5 +517,142 @@ test('the commit retires queued sends still owed to a refused question', async (
       !questionBubbles(cap.sent).some((t) => t.includes(drawnText(sid, refused))),
       'nothing owed to the refused question is delivered'
     );
+  } finally { cap.restore(); }
+});
+
+// The reported exam, walked exactly as it was reported: six theory questions,
+// the student taps the numbers for three of them (positions 1, 2 and 4), and
+// everything that follows — the sheet, every question bubble, the score
+// denominator — must be the objectives plus those three and nothing else,
+// priced at the paper's full 100 marks.
+test('choosing questions 1, 2 and 4 delivers only those, and the paper totals 100', async () => {
+  const eid = db.prepare(
+    "INSERT INTO exams(title,duration_minutes,status) VALUES ('Mixed Paper',30,'live')"
+  ).run().lastInsertRowid;
+  const options = JSON.stringify([{ key: 'A', text: 'Yes' }, { key: 'B', text: 'No' }]);
+  // Section A: four objectives at 10 marks — answered in full, no choice.
+  for (let i = 1; i <= 4; i++) {
+    db.prepare(
+      `INSERT INTO questions(exam_id,q_order,type,text,marks,options,correct_answer,section_key)
+       VALUES (?,?,'objective',?,10,?,'A','a')`
+    ).run(eid, i, `Objective question ${i}?`, options);
+  }
+  // Section B: six theory questions at 20 marks, answer any three — 4×10 + 3×20
+  // = 100, which is the price the student must end up graded against. Real
+  // sentence-shaped texts: a short "Theory 2 body" line reads as a section
+  // heading (isSectionHeader) and would travel as its own header bubble.
+  for (let i = 1; i <= 6; i++) {
+    db.prepare(
+      `INSERT INTO questions(exam_id,q_order,type,text,marks,is_compulsory,section_key)
+       VALUES (?,?,'theory',?,20,0,'b')`
+    ).run(eid, i + 4, `Theory question ${i}: explain it in detail with a labelled diagram.`);
+  }
+  db.prepare(
+    `INSERT INTO exam_sections(exam_id,section_key,title,instructions,position,answer_count)
+     VALUES (?, 'a', 'SECTION A', '', 0, 0)`
+  ).run(eid);
+  db.prepare(
+    `INSERT INTO exam_sections(exam_id,section_key,title,instructions,position,answer_count)
+     VALUES (?, 'b', 'SECTION B', 'Answer any THREE questions', 1, 3)`
+  ).run(eid);
+
+  // The admin's side: the rules must price the paper at its full 100 marks
+  // before a single student sits it.
+  const pricing = selection.pricingSummary(eid);
+  assert.equal(pricing.exact, true, 'every theory question on offer carries the same marks, so any pick costs the same');
+  assert.equal(pricing.priced, 100, 'the rules price the paper at its full 100 marks');
+  assert.equal(pricing.poolTotal, 160, 'the pool holds every question, but no student is graded against it');
+  assert.equal(selection.answerableCount(eid), 7, 'four objectives plus three chosen theory questions');
+
+  const phone = `233555${String(++phoneSeq).padStart(6, '0')}`;
+  const studentId = db.prepare('INSERT INTO students(phone) VALUES (?)').run(phone).lastInsertRowid;
+  db.prepare('INSERT INTO exam_recipients(exam_id,student_id) VALUES (?,?)').run(eid, studentId);
+  const sid = examSvc.createSession(eid, studentId).id;
+  db.prepare(
+    `INSERT INTO message_outbox(session_id, question_id, q_order, kind, recipient, state)
+     VALUES (?, 0, NULL, 'intro', ?, 'sent')`
+  ).run(sid, phone);
+  const poolOrders = selection.sessionPlan(sid).find((s) => s.section_key === 'b').optional
+    .map((q) => q.q_order);
+  // Positions 1, 2 and 4 of the six on offer: q_orders 5, 6 and 8 — leaving
+  // 7, 9 and 10 behind.
+  const picks = [poolOrders[0], poolOrders[1], poolOrders[3]];
+  const refused = [poolOrders[2], poolOrders[4], poolOrders[5]];
+  assert.equal(poolOrders.length, 6, 'all six theory questions are on offer');
+
+  const cap = captureWa();
+  try {
+    // What the chat promises before the paper opens: seven questions, 100
+    // marks — never the ten questions the pool happens to hold.
+    const examRow = db.prepare('SELECT * FROM exams WHERE id = ?').get(eid);
+    const intro = examSvc.formatExamIntro(examRow, 10);
+    assert.match(intro, /Number of questions: \*7\* \(the ones you will answer\)/,
+      'the intro promises the questions the student will answer, not the pool');
+    assert.match(intro, /Your paper is worth \*100 marks\*/,
+      'and says what the paper is worth before the student commits to anything');
+
+    await examSvc.handleInbound(phone, 'START');
+    // Objectives first, every one of them.
+    for (let i = 1; i <= 4; i++) await examSvc.handleInbound(phone, 'A');
+    const picker = pickers(cap.sent)[0];
+    assert.ok(picker, 'the theory choice opens once the objectives are done');
+    assert.match(picker.body, /exactly 3 of the 6 questions below/);
+
+    for (const q of picks) await examSvc.handleInbound(phone, '', { replyId: `sel:b:${q}` });
+    await examSvc.handleInbound(phone, 'CONTINUE');
+
+    // The commit re-prices the paper: the full draw was 160, the choice is 100.
+    assert.equal(sessionRow(sid).paper_total, 100, 'the paper is re-priced to what was actually chosen');
+    const sheet = cap.sent.find((m) => /here is your paper/.test(m.text || ''));
+    assert.ok(sheet, 'the commit prints the student their own sheet');
+    assert.match(sheet.text, /Total: 7 questions, 100 marks\. Your score is out of 100\./,
+      'the sheet says the score is out of the 100 the rules priced');
+
+    // Nothing after the commit may name a refused question — the picker and
+    // the cards named them all before it, which is the choice itself.
+    const lockAt = cap.sent.indexOf(sheet);
+    const afterCommit = cap.sent.slice(lockAt + 1).map((m) => m.text || '').join('\n');
+    for (const q of refused) {
+      assert.ok(
+        !afterCommit.includes(drawnText(sid, q)),
+        `question ${q} was not chosen, so it never reaches the chat again`
+      );
+    }
+
+    // Each answer moves on to the next CHOSEN question, in paper order.
+    for (const expected of picks.slice(1)) {
+      const mark = cap.sent.length;
+      await examSvc.handleInbound(phone, `answer to ${expected}`);
+      const asked = questionBubbles(cap.sent.slice(mark))[0];
+      assert.ok(asked, `answering produced question ${expected}`);
+      assert.ok(asked.includes(drawnText(sid, expected)), `and it is question ${expected}, in full — got: ${JSON.stringify(cap.sent.slice(mark))}`);
+    }
+
+    // The last chosen answer completes the paper.
+    const finalMark = cap.sent.length;
+    await examSvc.handleInbound(phone, 'final answer');
+
+    // Whole-chat check: every objective and every chosen question was
+    // delivered — the paper the student walked is exactly the seven.
+    const allText = cap.sent.map((m) => m.text || '').join('\n');
+    for (let q = 1; q <= 10; q++) {
+      const shouldDeliver = q <= 4 || picks.includes(q);
+      assert.equal(
+        allText.includes(drawnText(sid, q)), shouldDeliver,
+        `question ${q} ${shouldDeliver ? 'must be' : 'must never be'} in the chat`
+      );
+    }
+
+    // And exactly those seven were ANSWERED — the refused three hold no rows.
+    const answeredOrders = db.prepare('SELECT q_order FROM answers WHERE session_id = ?')
+      .all(sid).map((r) => r.q_order).sort((a, b) => a - b);
+    assert.deepEqual(answeredOrders, [1, 2, 3, 4, 5, 6, 8],
+      'only the objectives and the chosen questions hold answers');
+
+    // The grade is out of 100, because the objectives plus the choices ARE 100.
+    const resultText = cap.sent.slice(finalMark).map((m) => m.text || '').join('\n');
+    assert.match(resultText, /Score: \*\d+ \/ 100\*/,
+      'the result message grades out of the 100 marks the paper was priced at');
+    assert.match(resultText, /Percentage: \*\d+(\.\d+)?%\*/);
   } finally { cap.restore(); }
 });
