@@ -431,14 +431,14 @@ function sessionQuestionSequence(session) {
     questions.sort((a, b) => {
       const pa = position.has(a.section_key) ? position.get(a.section_key) : 9999;
       const pb = position.has(b.section_key) ? position.get(b.section_key) : 9999;
-      return pa !== pb ? pa - pb : (a.q_order || 0) - (b.q_order || 0);
+      return pa !== pb ? pa - pb : selection.compulsoryFirst(a, b);
     });
   } else {
     // Hard sort: ALL objective questions first, then ALL theory questions.
-    // Within each type, preserve q_order.
+    // Within each type the paper's compulsory question still leads, then q_order.
     questions.sort((a, b) => {
       if (a.type !== b.type) return a.type === 'objective' ? -1 : 1;
-      return (a.q_order || 0) - (b.q_order || 0);
+      return selection.compulsoryFirst(a, b);
     });
   }
   // is_selected defaults to 1, so an exam with no quota loses nothing here.
@@ -509,11 +509,20 @@ function answerSheetMessage(session) {
   }
   const total = Number(selection.computePaperTotal(session.id) || 0);
   const count = seq.length;
+  // A paper carrying both question types is graded out of 100 — theory worth
+  // 60 of it and objectives 40 — so the sheet must name THAT denominator, not
+  // the marks the paper happens to print beside its questions.
+  const weighting = results.weightingFor(session.id);
   lines.push(
     '',
     `Total: ${count} question${count === 1 ? '' : 's'}, ${total} mark${total === 1 ? '' : 's'}. ` +
-    `Your score is out of ${total}.`
+    `Your score is out of ${weighting ? weighting.totalMarks : total}.`
   );
+  if (weighting) {
+    lines.push(
+      `Scoring: theory is worth ${weighting.theory.weight} points and objectives ${weighting.objective.weight}.`
+    );
+  }
   return lines.join('\n');
 }
 
@@ -952,6 +961,23 @@ function formatExamIntro(exam, questionCount, { started = false, opening = false
     rules.length && pricing.exact && pricing.priced > 0
       ? `Your paper is worth *${pricing.priced} marks* — the compulsory questions plus the ones you choose add up to the full paper.\n\n`
       : '';
+  // A paper carrying BOTH question types is scored out of 100 points: theory —
+  // the compulsory question plus the ones chosen — is worth 60 of them and the
+  // objectives 40. Stated here so the split is learned before the first
+  // question rather than met, unexplained, in a result.
+  const scoringLine = (() => {
+    const types = db
+      .prepare('SELECT DISTINCT type FROM questions WHERE exam_id = ?')
+      .all(exam.id)
+      .map((r) => String(r.type || '').toLowerCase());
+    if (!types.includes('theory') || !types.includes('objective')) return '';
+    const theory = Math.round(config.exam.theoryWeight * 100);
+    const objective = Math.round(config.exam.objectiveWeight * 100);
+    return (
+      `Scoring: theory questions are worth *${theory} points* and objectives *${objective} points* — ` +
+      `they add up to *100*.\n\n`
+    );
+  })();
   return (
     `*${String(exam.title).toUpperCase()}*\n\n` +
     `Subject: *${exam.subject || 'General'}*\n` +
@@ -962,6 +988,7 @@ function formatExamIntro(exam, questionCount, { started = false, opening = false
     `Pass mark: *${exam.pass_percentage}%\n\n` +
     ruleLines +
     totalLine +
+    scoringLine +
     startLine +
     chaseLine +
     `*INSTRUCTIONS*\n${instructions}`
@@ -1562,18 +1589,11 @@ async function sendPaidStartTemplate(session, student, exam, firstQ) {
   let questionText;
   if (selection.needsChoice(session, firstQ)) {
     selection.beginChoice(session.id, firstQ.section_key);
-    // Session space, not template space: sectionPlan reads the admin's
-    // questions, and a drawn attempt can hold a different set. The student
-    // must only ever be offered what they were actually drawn.
-    const plan = selection.sessionPlan(session.id).find((item) => item.section_key === firstQ.section_key);
-    const quota = plan?.quota || 1;
-    const card = plan ? selection.selectionCard(plan, new Set()) : '';
-    const label = selection.sectionLabel(plan);
-    questionText =
-      `${label ? `${label}\n\n` : ''}` +
-      `You must choose exactly ${quota} of the ${plan?.optional.length || 0} questions below.\n` +
-      `Tap a question number to select or deselect it.\n\n${card}\n\n` +
-      `Reply with the numbers you choose, e.g. 1,3 — then CONTINUE.`;
+    // The same words the chat's own selector uses — session space, never
+    // template space: sectionPlan reads the admin's questions, and a drawn
+    // attempt can hold a different set. The student must only ever be offered
+    // what they were actually drawn.
+    questionText = selection.choiceText(session.id, firstQ.section_key);
   } else {
     const sequence = sessionQuestionSequence(session);
     const index = sequence.findIndex((q) => q.id === firstQ.id);

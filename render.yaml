@@ -35,6 +35,14 @@ services:
       # it is a no-op after the first boot. It cannot re-seed over real data.
       - key: SEED_ON_BOOT
         value: "true"
+      # A paper with both theory and objectives scores out of 100: theory is
+      # worth this many of the 100 points, objectives the rest. Optional — the
+      # app defaults to 60/40 when they are absent, and a single-type paper
+      # still scores on its raw marks.
+      - key: THEORY_WEIGHT
+        value: "60"
+      - key: OBJECTIVE_WEIGHT
+        value: "40"
       # ── AI provider (AshnaAI) ──────────────────────────────────────────
       - key: AI_BASE_URL
         value: https://api.ashna.ai/v1/api

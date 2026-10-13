@@ -39,6 +39,17 @@ const DEFAULT_AI_MODEL = 'gpt-5-mini';
 // to omit the field.
 const DEFAULT_REASONING_EFFORT = 'low';
 
+// The two halves of a paper's 100 points, read once and normalised so a pair
+// that does not sum to 100 (THEORY_WEIGHT=70 alone, say) still describes a
+// whole paper rather than one that can never reach 100%.
+const paperWeights = (() => {
+  const theory = parseFloat(process.env.THEORY_WEIGHT || '60');
+  const objective = parseFloat(process.env.OBJECTIVE_WEIGHT || '40');
+  const sum = theory + objective;
+  if (!(sum > 0)) return { theoryWeight: 0.6, objectiveWeight: 0.4 };
+  return { theoryWeight: theory / sum, objectiveWeight: objective / sum };
+})();
+
 const config = {
   port: parseInt(process.env.PORT || '3000', 10),
   appUrl: (process.env.APP_URL || `http://localhost:${process.env.PORT || 3000}`).replace(/\/$/, ''),
@@ -185,6 +196,12 @@ const config = {
 
   exam: {
     passPercentage: parseFloat(process.env.PASS_PERCENTAGE || '50'),
+    // How a paper carrying BOTH question types adds up to 100: theory — the
+    // compulsory question plus whatever the student chose — is worth 60 of the
+    // points and objectives 40, whatever marks the paper happens to print
+    // beside each question. A paper with only one question type is that type
+    // in full (see results.weightedScore).
+    ...paperWeights,
     defaultDurationMinutes: parseInt(process.env.DEFAULT_DURATION_MINUTES || '30', 10),
     sendAnswerKey: process.env.SEND_ANSWER_KEY !== 'false',
     allowResendResults: process.env.ALLOW_RESEND_RESULTS !== 'false',

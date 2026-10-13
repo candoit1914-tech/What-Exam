@@ -179,6 +179,33 @@ function isSelective(sessionId, sectionKey) {
 }
 
 /**
+ * The tie-break inside one section — and inside one question type.
+ *
+ * The paper's COMPULSORY question leads whatever number the paper printed it
+ * under, so it is the first theory question the student meets and it carries
+ * theory question 1. Printed order follows behind it. Two things downstream
+ * depend on this:
+ *
+ *   - the forced question's number can never move, so the selector can name it
+ *     ("Compulsory — you will answer Q1") instead of quoting its text, and
+ *   - delivery reaches it BEFORE the picker ever opens, so the student answers
+ *     what the paper owes before being asked what they would like to choose.
+ *
+ * An optional question's number can still move — it depends on which of its
+ * siblings get chosen — which is why only the compulsory one is ever named.
+ *
+ * q_order is the printed order (drawSessionQuestions assigns it from the
+ * paper), so this reorders PRESENTATION, never the draw: the questions a
+ * session holds, and the answers already recorded against them, are untouched.
+ */
+function compulsoryFirst(a, b) {
+  const ca = Number(a && a.is_compulsory) ? 0 : 1;
+  const cb = Number(b && b.is_compulsory) ? 0 : 1;
+  if (ca !== cb) return ca - cb;
+  return (Number(a && a.q_order) || 0) - (Number(b && b.q_order) || 0);
+}
+
+/**
  * Sections whose rule owes ONLY the compulsory questions.
  *
  * "Answer any 1, question 1 is compulsory" leaves no choice to make, so a
@@ -455,8 +482,9 @@ function stem(q) {
  *
  * Computed locally: selection.js must not require exam.js, which loads this
  * module. The rows are walked in sessionQuestionSequence's own order —
- * section position, then q_order — because this map exists only for a
- * section with a quota, and a quota exam is delivered in that order.
+ * section position, then the compulsory question leading its section, then
+ * q_order — because this map exists only for a section with a quota, and a
+ * quota exam is delivered in that order.
  * Numbering off raw q_order instead would describe a different paper from
  * the one the bubbles come from.
  *
@@ -487,7 +515,10 @@ function displayNumberMap(sessionId, sectionKey) {
     .sort((a, b) => {
       const pa = position.has(a.section_key) ? position.get(a.section_key) : 9999;
       const pb = position.has(b.section_key) ? position.get(b.section_key) : 9999;
-      return pa !== pb ? pa - pb : (a.q_order || 0) - (b.q_order || 0);
+      // The same walk sessionQuestionSequence takes — section, then the
+      // compulsory question leading its section — or this map would promise a
+      // number the bubble does not print.
+      return pa !== pb ? pa - pb : compulsoryFirst(a, b);
     });
 
   const committed = sectionCommitted(sessionId, sectionKey);
@@ -566,6 +597,12 @@ function selectorBody(plan, numbers, chosen) {
   }
   lines.push(`You must choose exactly ${plan.quota} of the ${plan.optional.length} questions below.`);
   lines.push('Tap a question number to select or deselect it.');
+  // The one number a student wants before they start: how many questions this
+  // section ends up being. The compulsory question is already theirs, so the
+  // choice is only ever about the rest.
+  if (locked.length) {
+    lines.push(`That is ${locked.length + plan.quota} questions in total here.`);
+  }
   lines.push('');
   lines.push(selectionCard(plan, chosen));
   return lines.join('\n');
@@ -611,6 +648,27 @@ async function sendSelector(phone, sessionId, sectionKey) {
       `${body}\n\nReply with the numbers you choose, e.g. 1,3 — then CONTINUE.`
     );
   }
+}
+
+/**
+ * The picker as one block of text, for a surface that cannot send a list.
+ *
+ * The approved payment template carries the opening bubble of a paid paper —
+ * the choice that has to be made before any question can be sent — inside a
+ * single message. Building it from the same words as the chat's own selector
+ * is what keeps the two indistinguishable: the same quota sentence, the same
+ * compulsory question, the same card. The reply line is the only addition,
+ * because a template message has no button to tap.
+ *
+ * Returns '' when the section owes no choice, so a caller can treat an empty
+ * string as "there is nothing to ask here".
+ */
+function choiceText(sessionId, sectionKey) {
+  const plan = sessionPlan(sessionId).find((s) => s.section_key === sectionKey);
+  if (!plan || plan.quota <= 0) return '';
+  const chosen = new Set(currentChoice(sessionId, sectionKey));
+  const body = selectorBody(plan, displayNumberMap(sessionId, sectionKey), chosen);
+  return `${body}\n\nReply with the numbers you choose, e.g. 1,3 — then CONTINUE.`;
 }
 
 /**
@@ -831,6 +889,7 @@ module.exports = {
   sectionPlan,
   sessionPlan,
   sectionLabel,
+  compulsoryFirst,
   isSelective,
   compulsoryOnlySections,
   hasSelections,
@@ -844,5 +903,6 @@ module.exports = {
   sendSelector,
   sendSelectionState,
   selectionCard,
+  choiceText,
   handleReply,
 };

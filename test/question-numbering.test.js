@@ -4,7 +4,9 @@
 // the result message and the report. The paper numbers its sections, not its
 // draw — objectives count 1..N and theory starts again at 1 — so a theory
 // question is "theory question 1", never "question 41" because forty
-// objectives came first.
+// objectives came first. And within theory the paper's COMPULSORY question
+// always leads, so the one question the student cannot refuse is also the
+// first one they meet.
 //
 // Every test draws its own session: three objectives in SECTION A ahead of a
 // selective SECTION B of theory, which is the shape a paper with a choice has.
@@ -165,26 +167,66 @@ test('the selector names the compulsory question by the number on its bubble', a
   assert.doesNotMatch(body, /\bQ4\b/, 'the raw draw position must not leak into the selector');
 });
 
-test('a number that can still move is shown as text instead', async () => {
-  // The paper prints a compulsory theory question BEHIND two it lets the
-  // student choose between, so its number depends on a reply that has not
-  // arrived: pick both earlier ones and the bubble reads QUESTION 3, pick
-  // neither and it reads QUESTION 1. The text on that bubble cannot move,
-  // so the selector quotes it rather than promising a number it may break.
+test('the compulsory question is theory question 1, whatever the paper printed it as', async () => {
+  // The paper prints its compulsory question BEHIND two it lets the student
+  // choose between. The rule is that the forced question leads its section, so
+  // the student always meets it first: its number is fixed before any choice
+  // can move anything behind it, which is what lets the selector NAME it
+  // instead of quoting its text.
   const theoryRows = [
     ['Explain the water cycle.', 0],
     ['Describe the rock cycle.', 0],
     ['Why do seasons change?', 1],
     ['Give two uses of copper.', 0],
   ];
-  const { sid } = paperFixture(theoryRows);
+  const { sid, theory, objectives } = paperFixture(theoryRows);
+
+  const session = db.prepare('SELECT * FROM sessions WHERE id = ?').get(sid);
+  const seq = exam.sessionQuestionSequence(session);
+  const theorySeq = seq.filter((q) => q.type === 'theory');
+  assert.equal(
+    theorySeq[0].id, theory[2],
+    'the compulsory question is presented first, after nothing but the objectives'
+  );
+
+  const numbers = exam.questionDisplayNumbers(sid);
+  assert.equal(numbers.get(theory[2]), 1, 'so it carries theory question 1');
+  assert.equal(numbers.get(theory[0]), 2, 'the printed first question moves back a place');
+  assert.equal(numbers.get(objectives[0]), 1, 'the objectives keep their own count');
+
   const sent = await capturing('sendInteractiveList', () =>
     selection.sendSelector('23300000001', sid, 'sec-b')
   );
 
   const body = sent[0][2];
-  assert.doesNotMatch(body, /you will answer Q/, 'no number is promised while the count can move');
-  assert.match(body, /you will answer "Why do seasons change\?"/, 'the bubble text identifies it instead');
+  assert.match(
+    body,
+    /Compulsory — you will answer Q1\./,
+    'the number is promised because nothing the student replies can move it'
+  );
+  assert.doesNotMatch(body, /\bQ6\b/, 'the raw draw position must not leak into the selector');
+});
+
+test('a paid paper opens with the same choice the chat opens with', () => {
+  // The approved start template has no button, so the picker travels as one
+  // block of text. It must say exactly what the chat says — a student who paid
+  // meets the same compulsory question and the same quota sentence as one who
+  // did not, rather than a shortened copy that has already drifted from it.
+  const { sid } = paperFixture();
+  const text = selection.choiceText(sid, 'sec-b');
+  assert.match(text, /Compulsory — you will answer Q1\./);
+  assert.match(text, /You must choose exactly 2 of the 3 questions below\./);
+  assert.match(text, /That is 3 questions in total here\./);
+  assert.match(text, /☐ 1\. /, 'the card travels with it');
+  assert.match(text, /Reply with the numbers you choose, e.g. 1,3 — then CONTINUE\./);
+});
+
+test('a section that owes no choice has no text to send', () => {
+  const { sid } = paperFixture();
+  assert.equal(
+    selection.choiceText(sid, 'sec-a'), '',
+    'SECTION A is answered in full, so there is nothing to ask about it'
+  );
 });
 
 test('the result message marks theory by section, not by draw position', async () => {

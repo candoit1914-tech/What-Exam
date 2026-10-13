@@ -9,6 +9,112 @@ const { buildZip } = require('./zip');
 const FINISHED_STATUSES = "('completed','ended','expired')";
 const isFinished = (status) => FINISHED_STATUSES.includes(`'${status}'`);
 
+// ── Weighting ─────────────────────────────────────────────────────────
+//
+// A paper that carries BOTH question types is worth 100 points: theory — the
+// compulsory question plus the ones the student chose — is worth
+// config.exam.theoryWeight of them (60 by default) and objectives the rest
+// (40). The marks printed beside each question stay the paper's own currency
+// for everything per-question: AI marking, "3 / 5" on a card, the answer
+// breakdown. The weighting is applied only where the two halves become ONE
+// number, which is what makes "theory is 60% of this exam" true no matter how
+// the printed marks happen to be distributed.
+//
+// A paper with only ONE type is that type in full — there is no other half to
+// share the points with, and scoring a theory-only paper at 60% of its own
+// marks would make a perfect paper fail any sensible pass mark. That is why
+// every existing single-type exam grades exactly as it did before.
+
+const typeKey = (type) => (String(type || '').toLowerCase() === 'theory' ? 'theory' : 'objective');
+
+/**
+ * The marks a session is owed and the marks it was awarded, split by type.
+ *
+ * Totals come from the questions the attempt actually holds (selected drawn
+ * questions; the template when nothing was drawn), never from the answers —
+ * an unanswered question still belongs on the denominator, which is the whole
+ * point of pricing the paper up front. Answers to questions this student
+ * refused at the selector are excluded from both halves: they are not part of
+ * their paper, so they must not be able to move the score.
+ */
+function markSplit(sessionId, examId) {
+  const split = {
+    theory: { total: 0, awarded: 0 },
+    objective: { total: 0, awarded: 0 },
+  };
+  let totals = db
+    .prepare(
+      `SELECT qp.type AS type, COALESCE(SUM(qp.marks), 0) AS total
+         FROM session_questions sq
+         JOIN question_pool qp ON qp.id = sq.question_id
+        WHERE sq.session_id = ? AND sq.is_selected <> 0
+        GROUP BY qp.type`
+    )
+    .all(sessionId);
+  if (!totals.length) {
+    totals = db
+      .prepare('SELECT type, COALESCE(SUM(marks), 0) AS total FROM questions WHERE exam_id = ? GROUP BY type')
+      .all(examId);
+  }
+  for (const row of totals) split[typeKey(row.type)].total += Number(row.total || 0);
+
+  const awarded = db
+    .prepare(
+      `SELECT COALESCE(p.type, q.type) AS type, COALESCE(SUM(a.marks_awarded), 0) AS total
+         FROM answers a
+         LEFT JOIN session_questions sq ON sq.session_id = a.session_id AND sq.q_order = a.q_order
+         LEFT JOIN question_pool p ON p.id = sq.question_id
+         LEFT JOIN questions q ON q.id = a.question_id AND p.id IS NULL
+        WHERE a.session_id = ? AND COALESCE(sq.is_selected, 1) <> 0
+        GROUP BY COALESCE(p.type, q.type)`
+    )
+    .all(sessionId);
+  for (const row of awarded) split[typeKey(row.type)].awarded += Number(row.total || 0);
+  return split;
+}
+
+/**
+ * The 100-point reading of a paper, or null when the paper is not weighted.
+ *
+ * `null` means "score this exactly as the marks say" — a theory-only or an
+ * objective-only paper, where the raw ratio already IS the whole exam. A
+ * non-null result carries the percentage plus each half's raw marks, its
+ * weight in points and the points it contributed, so every surface can show
+ * where the number came from rather than presenting an unexplained total.
+ */
+function weightedScore(split) {
+  if (!split || split.theory.total <= 0 || split.objective.total <= 0) return null;
+  const weight = {
+    theory: config.exam.theoryWeight,
+    objective: config.exam.objectiveWeight,
+  };
+  let points = 0;
+  const halves = {};
+  for (const type of ['theory', 'objective']) {
+    const s = split[type];
+    const part = weight[type] * 100 * (s.awarded / s.total);
+    halves[type] = {
+      awarded: s.awarded,
+      total: s.total,
+      weight: Math.round(weight[type] * 100),
+      points: Math.round(part * 10) / 10,
+    };
+    points += part;
+  }
+  return {
+    percentage: Math.round(points * 10) / 10,
+    totalMarks: 100,
+    theory: halves.theory,
+    objective: halves.objective,
+  };
+}
+
+/** The weighting of one session, or null when its paper needs no weighting. */
+function weightingFor(sessionId) {
+  const session = db.prepare('SELECT exam_id FROM sessions WHERE id = ?').get(sessionId);
+  return session ? weightedScore(markSplit(sessionId, session.exam_id)) : null;
+}
+
 function computeForSession(sessionId) {
   const session = db.prepare('SELECT * FROM sessions WHERE id = ?').get(sessionId);
   const exam = db.prepare('SELECT * FROM exams WHERE id = ?').get(session.exam_id);
@@ -63,6 +169,10 @@ function computeForSession(sessionId) {
       passed: !!session.passed,
       answered,
       questionCount,
+      // Null on purpose: this is a grade already published on the raw-mark
+      // scale, so advertising the 60/40 split next to it would describe a
+      // paper this student was never scored against.
+      weighting: null,
       priceSource: 'stored',
     };
   }
@@ -72,17 +182,25 @@ function computeForSession(sessionId) {
   // Falling back to the answered marks would grade a 1-of-2 attempt as a perfect
   // score, which is the exact bug this change exists to remove — so it must not
   // be reintroduced for legacy rows.
-  const totalMarks = priced > 0 ? priced : (drawnTotal > 0 ? drawnTotal : answeredTotal);
-  const percentage = totalMarks > 0 ? Math.round((awarded / totalMarks) * 1000) / 10 : 0;
+  const rawTotal = priced > 0 ? priced : (drawnTotal > 0 ? drawnTotal : answeredTotal);
+  // Both halves present: the paper is the 100 points the exam is scored out of,
+  // and this attempt's share of them. score and totalMarks move together with
+  // the percentage so "score / total" can never contradict it.
+  const weighting = weightedScore(markSplit(sessionId, exam.id));
+  const totalMarks = weighting ? weighting.totalMarks : rawTotal;
+  const percentage = weighting
+    ? weighting.percentage
+    : rawTotal > 0 ? Math.round((awarded / rawTotal) * 1000) / 10 : 0;
   return {
     sessionId,
     exam,
-    score: awarded,
+    score: weighting ? weighting.percentage : awarded,
     totalMarks,
     percentage,
     passed: percentage >= (exam.pass_percentage ?? config.exam.passPercentage),
     answered,
     questionCount,
+    weighting,
     priceSource: priced > 0 ? 'priced' : (drawnTotal > 0 ? 'drawn' : 'answers'),
   };
 }
@@ -112,8 +230,19 @@ async function sendResultMessage(sessionId, phone, reason) {
     `📝 ${r.exam.title}${r.exam.subject ? ` — ${r.exam.subject}` : ''}\n` +
     `⏱️ ${reason === 'expired' ? 'Time expired' : reason === 'ended' ? 'Ended by administrator' : 'All questions answered'}\n\n` +
     `🎯 Score: *${r.score} / ${r.totalMarks}*\n` +
-    `📊 Percentage: *${r.percentage}%*\n` +
-    `Result: ${r.passed ? '✅ *PASS*' : '❌ *FAIL*'} (pass mark ${passMark}%)\n`;
+    `📊 Percentage: *${r.percentage}%*\n`;
+  // A paper scored out of 100 shows where its 100 points came from: the marks
+  // each half earned and the points that earned them. Without this line the
+  // student is handed a total that cannot be reconciled with the per-question
+  // marks printed further down.
+  if (r.weighting) {
+    const t = r.weighting.theory;
+    const o = r.weighting.objective;
+    msg +=
+      `📖 Theory: ${t.awarded}/${t.total} marks → *${t.points}/${t.weight}*\n` +
+      `📋 Objectives: ${o.awarded}/${o.total} marks → *${o.points}/${o.weight}*\n`;
+  }
+  msg += `Result: ${r.passed ? '✅ *PASS*' : '❌ *FAIL*'} (pass mark ${passMark}%)\n`;
 
   const key = db
     .prepare(
@@ -354,6 +483,7 @@ function reportHTML(sessionId) {
   .stat .v.green{color:var(--green-dark)}
   .stat .v.pass{color:var(--green-dark)}.stat .v.fail{color:var(--red)}
   .stat .l{font-size:.75rem;font-weight:700;letter-spacing:1.2px;text-transform:uppercase;color:var(--muted);margin-top:4px}
+  .weight-note{margin:16px 0 0;font-size:.85rem;line-height:1.5;color:var(--muted);background:var(--card);border:1px dashed var(--line);border-radius:12px;padding:10px 14px}
   h2{font-size:1.1rem;font-weight:800;margin:34px 0 14px;letter-spacing:-.2px}
   .q-card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:20px;margin-bottom:14px;box-shadow:0 6px 18px rgba(15,23,42,.05);break-inside:avoid}
   .q-head{display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap}
@@ -433,6 +563,11 @@ function reportHTML(sessionId) {
     <div class="stat"><div class="v">${r.answered}<span style="font-size:1rem;color:#94a3b8"> / ${r.questionCount}</span></div><div class="l">Answered</div></div>
     <div class="stat"><div class="v ${r.passed ? 'pass' : 'fail'}">${r.passed ? 'PASS' : 'FAIL'}</div><div class="l">Result</div></div>
   </section>
+${r.weighting ? `
+  <p class="weight-note">Scoring: this paper is out of 100 — theory is worth ${r.weighting.theory.weight} points
+  (${r.weighting.theory.awarded}/${r.weighting.theory.total} marks → ${r.weighting.theory.points}) and objectives
+  ${r.weighting.objective.weight} (${r.weighting.objective.awarded}/${r.weighting.objective.total} marks →
+  ${r.weighting.objective.points}).</p>` : ''}
 
   <h2>Question-by-question breakdown</h2>
   ${rows || '<p style="color:#64748b">No answers recorded for this session yet.</p>'}
@@ -1216,4 +1351,4 @@ function rosterDocx(roster, section, watermarkPngBuffer) {
   ]);
 }
 
-module.exports = { computeForSession, persistSessionTotals, sendResultMessage, sendResultAndCertificate, bulkResendResults, reportHTML, buildParticipantRoster, rosterPrintHTML, rosterDocx, FINISHED_STATUSES, ROSTER_SECTIONS, normalizeSection, sectionGroups, sectionStamp, sectionSlug, ROSTER_FINISHED_COLS, ROSTER_SIMPLE_COLS, rosterColumns, rosterBlocks };
+module.exports = { computeForSession, persistSessionTotals, weightingFor, sendResultMessage, sendResultAndCertificate, bulkResendResults, reportHTML, buildParticipantRoster, rosterPrintHTML, rosterDocx, FINISHED_STATUSES, ROSTER_SECTIONS, normalizeSection, sectionGroups, sectionStamp, sectionSlug, ROSTER_FINISHED_COLS, ROSTER_SIMPLE_COLS, rosterColumns, rosterBlocks };
