@@ -62,26 +62,30 @@ test('failed math render rejects and never writes a successful white placeholder
   assert.equal(logs.warn[0][1].page, 3);
 });
 
-test('render detail and real blank-pixel check are gated by PDF_DIAG', async () => {
+test('a blank render is always rejected; PDF_DIAG only gates the diagnostic detail', async () => {
   for (const enabled of [false, true]) {
     const r = renderer({ enabled });
-    await r.service.renderMathRegion(Buffer.alloc(0), { page: 2, x: 1, y: 1, w: 10, h: 10 }, 'math.png');
-    assert.equal(r.pixelReads(), enabled ? 1 : 0);
-    assert.equal(r.logs.log.length, enabled ? 1 : 0);
-    assert.equal(r.logs.warn.length, enabled ? 1 : 0);
+    await assert.rejects(
+      r.service.renderMathRegion(Buffer.alloc(0), { page: 2, x: 1, y: 1, w: 10, h: 10 }, 'math.png'),
+      /blank math render/,
+      'an empty crop is never written, in any mode — it would reach the student as an empty image'
+    );
+    assert.equal(r.writes.length, 0, 'no file is created for a blank render');
+    assert.equal(r.pixelReads(), 1, 'the pixel check itself always runs');
+    assert.equal(r.logs.log.length, enabled ? 1 : 0, 'diag detail stays gated');
+    assert.equal(r.logs.warn.length, enabled ? 1 : 0, 'and so does the warning');
     if (enabled) assert.equal(r.logs.warn[0][1].blank, true);
   }
 });
 
-test('missing raster never attaches an unrelated decoded logo', async () => {
+test('missing raster never attaches an unrelated decoded logo, nor an empty crop', async () => {
   const r = renderer();
-  await r.service.renderImage(Buffer.alloc(0), { page: 1, rasterId: 'missing', x: 10, y: 10, w: 10, h: 10 }, 'image.png');
-  const { loadImage, createCanvas } = require('@napi-rs/canvas');
-  const image = await loadImage(r.writes[0].bytes);
-  const canvas = createCanvas(image.width, image.height);
-  const ctx = canvas.getContext('2d');
-  ctx.drawImage(image, 0, 0);
-  assert.equal(ctx.getImageData(0, 0, 1, 1).data[3], 0, 'empty page crop must not become the red logo');
+  await assert.rejects(
+    r.service.renderImage(Buffer.alloc(0), { page: 1, rasterId: 'missing', x: 10, y: 10, w: 10, h: 10 }, 'image.png'),
+    /blank image render/,
+    'the page-crop fallback painted nothing visible — refused, not persisted'
+  );
+  assert.equal(r.writes.length, 0, 'no empty PNG is persisted to reach WhatsApp as an empty image');
 });
 
 test('math attachment errors are counted, warn, and retain contiguous successful positions', async () => {

@@ -1167,10 +1167,20 @@ async function oweQuestionFigure(session, student, question) {
 }
 
 /**
- * Deliver every figure still owed to this student. Safe to call on every
- * inbound message: only rows recorded as owed are ever sent, each retires
- * itself the moment it goes through, and a row whose question no longer
- * exists is retired too — a debt nobody can pay is not a retry loop.
+ * Pay every figure still owed to this student, keeping each picture glued to
+ * the question it belongs to. Safe to call on every inbound message.
+ *
+ * A figure can only mean something directly above its own question, so the
+ * debt resolves two ways and never a third:
+ *
+ *   - the student has not answered that question yet → the figure goes out
+ *     and the question is re-shown with it, restoring the pair;
+ *   - the pairing is gone (they already answered, the question was refused,
+ *     the exam is over, the question no longer exists) → the debt is retired,
+ *     never dumped above whatever message comes next.
+ *
+ * The report still prints every figure on its question either way, so a
+ * retired debt hides nothing from the marker.
  */
 async function deliverOwedFigures(session) {
   // Oldest question first: a retry must never reorder the paper, so the
@@ -1183,6 +1193,13 @@ async function deliverOwedFigures(session) {
         ORDER BY COALESCE(q_order, 0), id`
     )
     .all(session.id);
+  if (!owed.length) return;
+  const exam = db.prepare('SELECT status FROM exams WHERE id = ?').get(session.exam_id);
+  const examActive = !!exam && ['published', 'live'].includes(exam.status);
+  const answered = new Set(
+    db.prepare('SELECT q_order FROM answers WHERE session_id = ?').all(session.id)
+      .map((r) => Number(r.q_order))
+  );
   for (const entry of owed) {
     const question = getSessionQuestion(session.id, entry.q_order);
     const dropped = db
@@ -1194,9 +1211,36 @@ async function deliverOwedFigures(session) {
       outbox.markSent(entry.id);
       continue;
     }
+    // The pairing moment has passed: the student moved on without the picture
+    // (or the paper is over). Paying it out now would put it above the NEXT
+    // message — exactly the stray image at the top of some unrelated question.
+    if (!examActive || answered.has(Number(entry.q_order))) {
+      console.warn(
+        `[exam] retiring owed figure for question ${entry.q_order} (session ${session.id}): ` +
+        (examActive ? 'the student has already answered that question' : 'the exam is no longer active')
+      );
+      outbox.markSent(entry.id);
+      continue;
+    }
     const res = await sendQuestionImageBubbles(question, entry.recipient);
-    if (res.ok) outbox.markSent(entry.id);
-    else outbox.markFailed(entry.id, res.error, Math.max(1, config.exam.sendRetries));
+    if (!res.ok) {
+      outbox.markFailed(entry.id, res.error, Math.max(1, config.exam.sendRetries));
+      continue;
+    }
+    outbox.markSent(entry.id);
+    // The debt is paid — restore what it was owed for: re-show the question
+    // this figure belongs to, so the chat gets [figure][its own question]
+    // rather than a picture floating above an unrelated message. The figure
+    // row is already retired, so sendQuestionTo's own figure pass returns
+    // early and nothing is sent twice; current_q_order is untouched, so no
+    // delivery position moves.
+    try {
+      await sendQuestionTo(session, { id: session.student_id, phone: entry.recipient }, entry.q_order);
+    } catch (err) {
+      console.error(
+        `[exam] figure for question ${entry.q_order} delivered, but its question could not be re-shown: ${err.message}`
+      );
+    }
   }
 }
 

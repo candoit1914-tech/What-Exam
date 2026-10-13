@@ -129,12 +129,122 @@ test('one figure record per question, and nothing left owed after it is sent', a
   assert.equal(rows.c, 1, 'one record per question, not one per attempt');
 });
 
+// ── the pairing: a figure only ever appears with its own question ─────
+
+test('an owed figure is paid out together with its own question, never floating above the next message', async () => {
+  const { session, student } = fixture('FigPair');
+  const originalText = wa.sendText;
+  const originalImage = wa.sendImage;
+  try {
+    wa.sendText = async () => {};
+    wa.sendImage = async () => { throw new Error('Media API refused the upload'); };
+    await exam.sendQuestionTo(session, student);
+  } finally {
+    wa.sendText = originalText;
+    wa.sendImage = originalImage;
+  }
+
+  // The retry succeeds: the picture goes out, and the question it belongs to
+  // is re-shown with it — [figure][its own question], in that order — instead
+  // of a stray image landing above whatever message comes next.
+  await withChat(async (calls) => {
+    await exam.deliverOwedFigures(session);
+    const imageAt = calls.findIndex((c) => c.type === 'image');
+    const questionAt = calls.findIndex((c) => c.type === 'text' && /Study the diagram\./.test(c.text));
+    assert.ok(imageAt >= 0, 'the owed figure went out');
+    assert.ok(questionAt >= 0, 'the question it belongs to is re-shown with it');
+    assert.ok(imageAt < questionAt, 'picture first, question directly below it');
+  });
+  const row = db
+    .prepare("SELECT * FROM message_outbox WHERE session_id = ? AND kind = 'figure'")
+    .get(session.id);
+  assert.equal(row.state, 'sent', 'the debt is retired exactly once');
+  const figures = db
+    .prepare("SELECT COUNT(*) c FROM message_outbox WHERE session_id = ? AND kind = 'figure'")
+    .get(session.id).c;
+  assert.equal(figures, 1, 'the re-shown question does not enqueue a second figure');
+});
+
+test('a figure owed to a question the student already answered is retired, not dumped above the next message', async () => {
+  const { qid, session, student } = fixture('FigRetire');
+  const originalText = wa.sendText;
+  const originalImage = wa.sendImage;
+  try {
+    wa.sendText = async () => {};
+    wa.sendImage = async () => { throw new Error('Media API refused the upload'); };
+    await exam.sendQuestionTo(session, student);
+  } finally {
+    wa.sendText = originalText;
+    wa.sendImage = originalImage;
+  }
+  // The student answered without ever seeing the picture: the pairing moment
+  // is gone. The chat must not receive it above the following question.
+  db.prepare(
+    `INSERT INTO answers (session_id, question_id, q_order, answer_text, is_correct, marks_awarded, max_marks)
+     VALUES (?,?,1,'answered blind',0,0,5)`
+  ).run(session.id, qid);
+
+  await withChat(async (calls) => {
+    await exam.deliverOwedFigures(session);
+    assert.equal(calls.filter((c) => c.type === 'image').length, 0, 'no stray picture above an unrelated message');
+    assert.equal(
+      calls.filter((c) => c.type === 'text' && /Study the diagram\./.test(c.text)).length, 0,
+      'and the passed question is not re-shown either'
+    );
+  });
+  const row = db
+    .prepare("SELECT * FROM message_outbox WHERE session_id = ? AND kind = 'figure'")
+    .get(session.id);
+  assert.equal(row.state, 'sent', 'the unpairable debt is retired, not retried forever');
+});
+
 // ── the bytes themselves ──────────────────────────────────────────────
 
 test('a figure whose file is gone says so, instead of blaming WhatsApp', async () => {
   const missing = path.join(config.uploadsDir, `never-written-${Date.now()}.png`);
   await assert.rejects(() => wa.sendImage('233000000001', missing), /missing from disk/);
   await assert.rejects(() => wa.sendImage('233000000001', Buffer.alloc(0)), /empty/);
+});
+
+test('a figure with nothing visible in it is refused, never sent as an empty image', async () => {
+  const sharp = require('sharp');
+  const fs = require('node:fs');
+  const name = `blank-${Date.now()}.png`;
+  const file = path.join(config.uploadsDir, name);
+  fs.writeFileSync(file, await sharp({
+    create: { width: 64, height: 64, channels: 3, background: { r: 255, g: 255, b: 255 } },
+  }).png().toBuffer());
+
+  // WhatsApp would accept these bytes and the student would see an empty
+  // picture: accepted, blank on screen, no error anywhere. Refused here, so
+  // the figure is recorded as owed with the reason instead.
+  await assert.rejects(
+    () => wa.sendImage('233000000001', file, { publicUrl: 'https://example.invalid/figure/x' }),
+    /blank \(no visible ink\)/
+  );
+
+  try { fs.unlinkSync(file); } catch {}
+});
+
+test('hasVisibleInk separates a real drawing from blank paper', async () => {
+  const sharp = require('sharp');
+  const blank = await sharp({
+    create: { width: 32, height: 32, channels: 4, background: { r: 255, g: 255, b: 255, alpha: 1 } },
+  }).png().toBuffer();
+  const transparent = await sharp({
+    create: { width: 32, height: 32, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 0 } },
+  }).png().toBuffer();
+  const drawn = await sharp({
+    create: { width: 32, height: 32, channels: 3, background: { r: 255, g: 255, b: 255 } },
+  }).composite([{ input: Buffer.from(
+    '<svg width="32" height="32"><path d="M2 2 L30 30" stroke="black" stroke-width="2"/></svg>'
+  ) }]).png().toBuffer();
+
+  assert.equal(await wa.hasVisibleInk(blank), false, 'all white is blank');
+  assert.equal(await wa.hasVisibleInk(transparent), false, 'fully transparent is blank once flattened');
+  assert.equal(await wa.hasVisibleInk(drawn), true, 'a line drawing has ink');
+  assert.equal(await wa.hasVisibleInk(Buffer.from('not an image at all')), true,
+    'unreadable bytes are left to the upload to reject, not misreported as blank');
 });
 
 test('imageMediaType reads what the bytes actually are', () => {

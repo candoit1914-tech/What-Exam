@@ -226,6 +226,29 @@ async function toSendableJpeg(buf) {
   return out && out.length ? out : buf;
 }
 
+/**
+ * Does this picture contain anything a student could see? White-on-white or
+ * fully transparent bytes upload happily and render as an EMPTY image in the
+ * chat: accepted by the API, blank on screen, invisible in every log. One
+ * grey value below 250 anywhere counts as ink, so a pale-but-real diagram
+ * passes and only genuinely blank pixels are refused. Unreadable bytes return
+ * true — the upload's own format rejection is the better error for those.
+ */
+async function hasVisibleInk(buf) {
+  try {
+    const sharp = require('sharp');
+    const { data } = await sharp(buf, { limitInputPixels: 1024 * 1024 * 512 })
+      .flatten({ background: '#ffffff' })
+      .greyscale()
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+    for (let i = 0; i < data.length; i++) if (data[i] < 250) return true;
+    return false;
+  } catch {
+    return true;
+  }
+}
+
 async function uploadMedia(buffer, mime) {
   const form = new FormData();
   const name = mime === 'image/jpeg' ? 'figure.jpg' : mime === 'image/png' ? 'figure.png' : 'figure.img';
@@ -310,6 +333,14 @@ async function sendImage(to, image, opts = {}) {
   if (!mime || buffer.length > MEDIA_MAX_BYTES) {
     buffer = await toSendableJpeg(buffer);
     mime = 'image/jpeg';
+  }
+
+  // A figure is the only send carrying `publicUrl`, and the only one with a
+  // debt record behind it. Blank bytes would be accepted here and arrive as an
+  // empty image on the student's screen — refused instead, so the caller
+  // records the figure as owed WITH the reason, and the log names the file.
+  if (opts.publicUrl && !(await hasVisibleInk(buffer))) {
+    throw new Error(`Figure file is blank (no visible ink): ${label}`);
   }
 
   let mediaId = null;
@@ -474,6 +505,7 @@ module.exports = {
   sendText,
   sendImage,
   imageMediaType,
+  hasVisibleInk,
   linkUsable,
   sendInteractiveButtons,
   sendInteractiveList,

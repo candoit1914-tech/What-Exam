@@ -7,21 +7,32 @@ function diag(event, details) {
   if (process.env.PDF_DIAG === '1') console.log('[pdf:diag]', event, details);
 }
 
-// PNG byte size does not establish whether a small formula is blank. Inspect
-// actual pixels only in diagnostic mode, treating white/transparent as paper.
-function diagnoseRender(canvas, page, kind) {
-  if (process.env.PDF_DIAG !== '1') return;
+// PNG byte size does not establish whether a small formula is blank. Read the
+// actual pixels, treating white/transparent as paper: any visible mark is ink.
+function canvasHasInk(canvas) {
   const pixels = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data;
-  let visible = false;
   for (let i = 0; i < pixels.length; i += 4) {
-    if (pixels[i + 3] > 0 && Math.min(pixels[i], pixels[i + 1], pixels[i + 2]) < 250) {
-      visible = true;
-      break;
-    }
+    if (pixels[i + 3] > 0 && Math.min(pixels[i], pixels[i + 1], pixels[i + 2]) < 250) return true;
   }
+  return false;
+}
+
+/**
+ * Gate a rendered crop before its bytes are written. A blank crop that gets
+ * persisted reaches the student as an image that arrives EMPTY — accepted by
+ * WhatsApp, blank on screen, invisible in every log. Throwing instead turns it
+ * into a counted render failure whose reason lands in the import note the admin
+ * reads, and the file is simply never created. PDF_DIAG keeps the diagnostic
+ * DETAIL (sizes, blank flag); the check itself is always on.
+ */
+function assertRendered(canvas, page, kind) {
+  const visible = canvasHasInk(canvas);
   const details = { page, kind, width: canvas.width, height: canvas.height, blank: !visible };
-  diag('render', details);
-  if (!visible) console.warn('[pdf] blank render', details);
+  if (process.env.PDF_DIAG === '1') {
+    diag('render', details);
+    if (!visible) console.warn('[pdf] blank render', details);
+  }
+  if (!visible) throw new Error(`blank ${kind} render on page ${page} (nothing visible to send)`);
 }
 
 let pdfjs = null;
@@ -1295,6 +1306,10 @@ async function renderImage(buffer, image, outPath) {
         throw err;
       }
     }
+    // The missing-raster fallback above crops whatever the page replay draws in
+    // the figure box — often nothing. That empty crop must never become the
+    // PNG the student is sent.
+    assertRendered(out, image.page, 'image');
     fs.writeFileSync(outPath, out.toBuffer('image/png'));
     return outPath;
   } finally {
@@ -1607,7 +1622,7 @@ async function renderVectorRegion(buffer, image, outPath) {
       (image.x - pad) * k, (image.y - pad) * k, (image.w + pad * 2) * k, (image.h + pad * 2) * k,
       0, 0, cw, ch
     );
-    diagnoseRender(out, image.page, 'vector');
+    assertRendered(out, image.page, 'vector');
     fs.writeFileSync(outPath, out.toBuffer('image/png'));
     return outPath;
   } finally {
@@ -1648,7 +1663,7 @@ async function renderMathRegion(buffer, expr, outPath, scale = 4, pageCache) {
       console.warn('[pdf] math region render failed', { page: expr.page });
       throw err;
     }
-    diagnoseRender(out, expr.page, 'math');
+    assertRendered(out, expr.page, 'math');
     fs.writeFileSync(outPath, out.toBuffer('image/png'));
     return outPath;
   } finally {
