@@ -18,6 +18,11 @@ function markFailed(id, error, maxAttempts) {
     updated_at=datetime('now') WHERE id=?`).run(String(error?.message || error).slice(0, 500), maxAttempts, id);
 }
 
+/** The row as it stands now, after whatever markSent/markFailed just wrote. */
+function get(id) {
+  return db.prepare('SELECT * FROM message_outbox WHERE id=?').get(id);
+}
+
 function pending() {
   return db.prepare(`SELECT o.* FROM message_outbox o
     JOIN sessions s ON s.id=o.session_id JOIN exams e ON e.id=s.exam_id
@@ -25,4 +30,4 @@ function pending() {
     ORDER BY o.id`).all();
 }
 
-module.exports = { enqueue, markSent, markFailed, pending };
+module.exports = { enqueue, markSent, markFailed, get, pending };

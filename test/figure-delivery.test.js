@@ -79,6 +79,81 @@ test('a limb hands its figures up to the question the parts are read from', () =
   assert.deepEqual(out[0].figureIndices, [2, 5], 'and the second travels with it');
 });
 
+// ── orphans: a marker no question kept verbatim ───────────────────────
+//
+// The model is told to preserve every [IMG:n] marker in the question it belongs
+// to, but a rewritten line drops the marker with it. Those orphans used to land
+// on the block's FIRST question, which is how a paper ends up with five
+// diagrams stacked over question 1 and four questions answered blind.
+
+const orphan = (n) => Array.from({ length: n }, (_, idx) => ({ idx }));
+
+test('an orphaned figure goes to the question that names a figure, not to the block’s first', () => {
+  const qs = [
+    { text: 'Define photosynthesis.' },
+    { text: 'Study the diagram below and label the parts.' },
+    { text: 'Explain the process of erosion.' },
+  ];
+  ai.attachMarkers([qs], [orphan(2)], [[]]);
+
+  assert.deepEqual(qs[0].figureIndices, undefined, 'the first question is not a dustbin for every orphan');
+  assert.deepEqual(qs[1].figureIndices, [0, 1], 'both orphans land on the one question that talks about a figure');
+  assert.equal(qs[1].markerIndex, 0, 'the first of them names the question');
+});
+
+test('orphaned figures are spread across the questions that name one', () => {
+  const qs = [
+    { text: 'Study the graph below. What does it show?' },
+    { text: 'Using the map below, name two towns.' },
+    { text: 'What is photosynthesis?' },
+    { text: 'Refer to the chart below and describe the trend.' },
+  ];
+  ai.attachMarkers([qs], [orphan(3)], [[]]);
+
+  assert.deepEqual(qs[0].figureIndices, [0]);
+  assert.deepEqual(qs[1].figureIndices, [1]);
+  assert.equal(qs[2].figureIndices, undefined, 'a question with no figure of its own is passed over');
+  assert.deepEqual(qs[3].figureIndices, [2], 'one orphan each, instead of three stacked on question 1');
+});
+
+test('a figure-naming question that already has a figure is passed over for one that has none', () => {
+  const qs = [
+    { text: 'Study the diagram below.', figureIndices: [7], markerIndex: 7 },
+    { text: 'Refer to the chart below and describe the trend.' },
+  ];
+  ai.attachMarkers([qs], [orphan(1)], [[]]);
+  assert.deepEqual(qs[0].figureIndices, [7], 'the question that already carries a figure keeps only it');
+  assert.deepEqual(qs[1].figureIndices, [0], 'the orphan goes to the question still answering blind');
+});
+
+test('a verbatim marker still wins over the orphan heuristic', () => {
+  const qs = [
+    { text: 'Study the diagram below.' },
+    { text: 'Refer to [IMG:0] and describe it.' },
+  ];
+  ai.attachMarkers([qs], [orphan(1)], [[]]);
+  assert.equal(qs[0].figureIndices, undefined, 'the question that actually kept the marker owns it');
+  assert.deepEqual(qs[1].figureIndices, [0]);
+});
+
+test('with no figure-naming question in the block, an orphan still falls back to the first', () => {
+  const qs = [{ text: 'Define photosynthesis.' }, { text: 'Explain erosion.' }];
+  ai.attachMarkers([qs], [orphan(1)], [[]]);
+  assert.deepEqual(qs[0].figureIndices, [0], 'the old fallback, kept for papers that name no figure at all');
+  assert.equal(qs[1].figureIndices, undefined);
+});
+
+test('the spread resets per block, so a later block is not starved', () => {
+  const first = [{ text: 'Study the diagram below.' }, { text: 'Refer to the map below.' }];
+  const second = [{ text: 'Study the chart below.' }];
+  // Markers carry their index in the whole document, so block two's orphan is
+  // numbered after block one's — but the spread is per block all the same.
+  ai.attachMarkers([first, second], [[{ idx: 0 }, { idx: 1 }], [{ idx: 2 }]], [[], []]);
+  assert.deepEqual(first[0].figureIndices, [0]);
+  assert.deepEqual(first[1].figureIndices, [1]);
+  assert.deepEqual(second[0].figureIndices, [2], 'block two gets its own orphan, in its own right');
+});
+
 // ── delivery ──────────────────────────────────────────────────────────
 
 test('every bubble a question carries is sent above its text, in reading order', async () => {

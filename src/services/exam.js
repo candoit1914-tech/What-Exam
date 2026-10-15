@@ -1126,32 +1126,65 @@ function figureLink(file) {
 }
 
 /**
+ * A figure failure no retry can fix.
+ *
+ * "Blank on screen" is permanent by definition — the bytes reached WhatsApp
+ * and a student would have seen an empty picture, so sending them again
+ * changes nothing. A missing or empty file stays retryable: the import can
+ * still be writing it, and the next attempt finds it on disk.
+ */
+function permanentFigureError(err) {
+  return /blank \(no visible ink\)/i.test(String(err?.message || err || ''));
+}
+
+/**
  * Send a question's figures in order, ABOVE the question text.
  *
  * A failed bubble is logged and does not stop the ones behind it, but the
- * result reports the failure so a caller that OWES the figure — a paid paper
- * whose question went out in a template before the service window was open —
- * can keep it queued and retry on the student's next message. Callers that
- * are mid-question ignore the result: the question matters more than its
- * picture, and it must still be delivered.
+ * result reports the failure — including whether it is the kind a retry could
+ * ever fix — so a caller that OWES the figure can keep it queued, and a caller
+ * that has not yet shown the question can hold the question back with it.
  */
 async function sendQuestionImageBubbles(question, phone) {
   let error = null;
+  let permanent = false;
   for (const file of questionImageFiles(question)) {
     try {
       await wa.sendImage(phone, path.join(config.uploadsDir, file), { publicUrl: figureLink(file) });
     } catch (err) {
       error = error || err;
+      permanent = permanent || permanentFigureError(err);
       // The ONLY record of a figure that never arrived. Without it the failure
-      // is invisible: the question text goes out normally, the student simply
-      // answers a diagram they cannot see, and nothing in the log names the
-      // file that was lost.
+      // is invisible: the question is delivered without its picture, and
+      // nothing in the log names the file that was lost. The send is
+      // continued rather than thrown so one bad bubble never costs the rest of
+      // the batch — the caller decides what the failure means for the question.
       console.error(
         `[exam] question image send failed (continued) — question ${question.id}, file ${file}: ${err.message}`
       );
     }
   }
-  return { ok: !error, error };
+  return { ok: !error, error, permanent };
+}
+
+/**
+ * Write down, before a single bubble of the question goes out, that it owes
+ * its figures.
+ *
+ * The row is the only thing a retry, a restart or the student's next message
+ * can look for, so it is written first: a crash between the send and the
+ * record is otherwise a figure nobody knows was owed. Enqueue is idempotent
+ * (UNIQUE on session/question/kind), so a later attempt does not duplicate it.
+ */
+function openFigureDebt(session, student, question) {
+  if (!questionImageFiles(question).length) return null;
+  return outbox.enqueue({
+    sessionId: session.id,
+    questionId: question.id,
+    qOrder: question.q_order,
+    kind: 'figure',
+    recipient: student.phone,
+  });
 }
 
 /**
@@ -1160,23 +1193,24 @@ async function sendQuestionImageBubbles(question, phone) {
  *
  * Every question goes through here, not just the paid-template path: a figure
  * that failed once (Media API hiccup, file written a moment after the send) is
- * retried by deliverOwedFigures() on the student's next message, and the error
- * stays in message_outbox where it can be read afterwards.
+ * retried on the student's next message or by the pair retry timer, and the
+ * error stays in message_outbox where it can be read afterwards.
+ *
+ * `owed` is the result the delivery contract turns on: the figures are still
+ * expected, and the caller must not put the question text underneath a picture
+ * that is not there.
  */
 async function deliverQuestionFigures(session, student, question) {
-  if (!questionImageFiles(question).length) return { ok: true, error: null };
-  const entry = outbox.enqueue({
-    sessionId: session.id,
-    questionId: question.id,
-    qOrder: question.q_order,
-    kind: 'figure',
-    recipient: student.phone,
-  });
-  if (entry.state === 'sent') return { ok: true, error: null };
+  if (!questionImageFiles(question).length) return { ok: true, error: null, owed: false };
+  const entry = openFigureDebt(session, student, question);
+  if (entry.state === 'sent') return { ok: true, error: null, owed: false };
   const res = await sendQuestionImageBubbles(question, student.phone);
+  // A picture that can never arrive is retired at once instead of spending the
+  // whole retry budget: the delay it buys teaches nobody anything.
+  const budget = res.permanent ? 1 : Math.max(1, config.exam.sendRetries);
   if (res.ok) outbox.markSent(entry.id);
-  else outbox.markFailed(entry.id, res.error, Math.max(1, config.exam.sendRetries));
-  return res;
+  else outbox.markFailed(entry.id, res.error, budget);
+  return { ok: res.ok, error: res.error, owed: outbox.get(entry.id).state === 'queued' };
 }
 
 /**
@@ -1191,6 +1225,135 @@ async function deliverQuestionFigures(session, student, question) {
  */
 async function oweQuestionFigure(session, student, question) {
   return deliverQuestionFigures(session, student, question);
+}
+
+// ── the figure/question pair ──────────────────────────────────────────
+
+// A question and its figures are one delivery, never two. These guard the unit:
+// `deliveringPairs` stops two callers (the retry timer and the student's next
+// message) sending the same picture twice, and `pairRetryTimers` keeps a
+// question waiting on its figure from arming a second timer for the same wait.
+const deliveringPairs = new Set();
+const pairRetryTimers = new Map();
+const FIGURE_PAIR_RETRY_MS = 4000;
+
+const pairKey = (sessionId, qOrder) => `${sessionId}:${qOrder}`;
+
+/**
+ * Ask for this pair to be delivered again in a moment.
+ *
+ * A student waiting four seconds for their picture is a delay; a picture that
+ * arrives after the question is a question answered blind, which is worse. The
+ * timer is only armed where WhatsApp is configured — with no gateway there is
+ * nothing a retry could reach, and the student's next message still runs the
+ * same delivery through deliverOwedFigures().
+ */
+function scheduleQuestionPairRetry(session, student, question) {
+  if (!wa.waConfigured()) return;
+  const key = pairKey(session.id, question.q_order);
+  if (pairRetryTimers.has(key)) return;
+  const timer = setTimeout(() => {
+    pairRetryTimers.delete(key);
+    retryQuestionPair(session.id, question.q_order).catch((err) =>
+      console.error(
+        `[exam] figure retry for question ${question.q_order} (session ${session.id}) failed: ${err.message}`
+      )
+    );
+  }, FIGURE_PAIR_RETRY_MS);
+  // The retry must never be the reason a process stays alive.
+  if (typeof timer.unref === 'function') timer.unref();
+  pairRetryTimers.set(key, timer);
+}
+
+/**
+ * Deliver a question that is owed its figures as ONE unit — the picture, then
+ * the question directly under it — and retire both outbox rows when it lands.
+ *
+ * This is what a withheld question is waiting for. Sending the text first and
+ * the picture later gives the student a question they cannot answer and a
+ * picture glued to whatever comes next; holding the text until the picture is
+ * there (or provably cannot be) is the whole point of the pair.
+ *
+ * Returns true once the pair has been delivered, false while the figures are
+ * still owed — the wait is re-armed — or the pairing is gone.
+ */
+async function retryQuestionPair(sessionId, qOrder) {
+  const session = db.prepare('SELECT * FROM sessions WHERE id = ?').get(sessionId);
+  if (!session || session.status !== 'in_progress') return false;
+  const exam = db.prepare('SELECT * FROM exams WHERE id = ?').get(session.exam_id);
+  if (!exam || (exam.status !== 'published' && exam.status !== 'live')) return false;
+  const question = getSessionQuestion(session.id, qOrder);
+  if (!question) return false;
+  const dropped = db
+    .prepare('SELECT is_selected FROM session_questions WHERE session_id = ? AND q_order = ?')
+    .get(session.id, qOrder);
+  // A question the student refused at the selector owes nothing to the chat.
+  if (dropped && Number(dropped.is_selected) === 0) return false;
+  // A question whose selector is still open is one the student has not chosen
+  // yet: pushing its body would answer the choice for them. The debt stays
+  // queued, and the commit retires whatever the refusal leaves behind.
+  if (selection.needsChoice(session, question)) return false;
+
+  const key = pairKey(sessionId, qOrder);
+  if (deliveringPairs.has(key)) return false;
+  deliveringPairs.add(key);
+  try {
+    const recipient = pairRecipient(sessionId, question.id);
+    const student = { id: session.student_id, phone: recipient };
+    const qRow = outbox.enqueue({
+      sessionId,
+      questionId: question.id,
+      qOrder,
+      kind: 'question',
+      recipient,
+    });
+    // The text may already be out — a paid-paper template carried it, or an
+    // earlier delivery was recorded after the send. Only its picture is owed,
+    // and the pair must not put the same question in the chat twice.
+    const textDelivered = qRow.state === 'sent';
+
+    const res = await deliverQuestionFigures(session, student, question);
+    if (res.owed) {
+      scheduleQuestionPairRetry(session, student, question);
+      return false;
+    }
+    if (res.error) {
+      console.warn(
+        `[exam] question ${qOrder} (session ${sessionId}) delivered without its figure: ${res.error.message || res.error}`
+      );
+    }
+    if (!textDelivered) {
+      await sendQuestionBody(session, student, exam, question, questionStemParts(exam, question, session).parts);
+      recordAcceptance(session);
+    }
+    // The question this student was advancing to has now actually landed, so
+    // the position moves with it — otherwise their next answer is read against
+    // the question before it. A re-show behind an owed figure (at or below the
+    // position) retires its row and moves nothing, exactly as before.
+    if (Number(qOrder) > Number(session.current_q_order)) {
+      commitAdvance(session.id, qOrder, qRow.id);
+    } else {
+      outbox.markSent(qRow.id);
+    }
+    return true;
+  } finally {
+    deliveringPairs.delete(key);
+  }
+}
+
+/** Who a retried pair belongs to: whoever the owed rows were addressed to. */
+function pairRecipient(sessionId, questionId) {
+  const row = db
+    .prepare(
+      `SELECT recipient FROM message_outbox
+        WHERE session_id = ? AND question_id = ? AND kind IN ('question', 'figure')
+        ORDER BY id LIMIT 1`
+    )
+    .get(sessionId, questionId);
+  if (row && row.recipient) return row.recipient;
+  const s = db.prepare('SELECT student_id FROM sessions WHERE id = ?').get(sessionId);
+  const student = s && db.prepare('SELECT phone FROM students WHERE id = ?').get(s.student_id);
+  return student ? student.phone : '';
 }
 
 /**
@@ -1249,28 +1412,61 @@ async function deliverOwedFigures(session) {
       outbox.markSent(entry.id);
       continue;
     }
-    const res = await sendQuestionImageBubbles(question, entry.recipient);
-    if (!res.ok) {
-      outbox.markFailed(entry.id, res.error, Math.max(1, config.exam.sendRetries));
-      continue;
-    }
-    outbox.markSent(entry.id);
-    // The debt is paid — restore what it was owed for: re-show the question
-    // this figure belongs to, so the chat gets [figure][its own question]
-    // rather than a picture floating above an unrelated message. The figure
-    // row is already retired, so sendQuestionTo's own figure pass returns
-    // early and nothing is sent twice; current_q_order is untouched, so no
-    // delivery position moves.
-    try {
-      await sendQuestionTo(session, { id: session.student_id, phone: entry.recipient }, entry.q_order);
-    } catch (err) {
-      console.error(
-        `[exam] figure for question ${entry.q_order} delivered, but its question could not be re-shown: ${err.message}`
-      );
-    }
+    // The debt is paid as a PAIR — the picture and the question it belongs to —
+    // through the same delivery the retry timer uses, so a question that is
+    // still owed its figure is re-shown with it (never above an unrelated
+    // message) and two callers can never send the same picture twice.
+    await retryQuestionPair(session.id, entry.q_order);
   }
 }
 
+/**
+ * A question's own text as the parts that join into the one bubble carrying it
+ * — stem, then the answer (options or follow-ups). The meta bubbles that
+ * precede it (section intro, type header, heading, passage) come back
+ * separately: a first delivery sends each of them as its own message, while a
+ * retried pair drops them, because the passage above a question that is already
+ * in the chat must not be printed twice.
+ */
+function questionStemParts(exam, question, session) {
+  const sequence = sessionQuestionSequence(session);
+  const index = sequence.findIndex((q) => q.id === question.id);
+  const bubbles = buildQuestionBubbles(exam, question, sequence, index, session);
+  const questionBubble = bubbles.pop();
+  const parts = [questionBubble];
+  if (question.type === 'objective') {
+    const options = safeParseOptions(question.options);
+    parts.push(options.map((o) => `${o.key}. ${o.text}`).join('\n'));
+  }
+  const subQuestions = formatSubQuestions(question, displayNumbersFromSequence(sequence).get(question.id));
+  if (subQuestions) parts.push(subQuestions);
+  return { meta: bubbles, parts };
+}
+
+/**
+ * Send the question itself: full stem, then the answer (options or follow-ups),
+ * then the timer — nothing omitted.
+ */
+async function sendQuestionBody(session, student, exam, question, parts) {
+  // Place the timer BELOW the answer options so students see the question,
+  // options, then time remaining — not buried in the question text. The parts
+  // are joined by a blank line already, so the timer carries no separators of
+  // its own; giving it its own put two blank lines above it.
+  const combined = [...parts, `Time remaining: *${timeRemaining(session, exam)}*`].join('\n\n');
+  if (combined.trim()) {
+    await wa.sendText(student.phone, combined);
+  }
+}
+
+/**
+ * Deliver one question to one student, figures above the text.
+ *
+ * Returns true once the question text has gone out, false when nothing was
+ * sent, and 'withheld' when the question's figure failed and the text is being
+ * held back with it — see the figure pass below. Callers must treat
+ * 'withheld' as "not delivered, and not failed": the row stays queued, the
+ * position does not move, and the pair is retried.
+ */
 async function sendQuestionTo(session, student, qOrder = null) {
   session = db.prepare('SELECT * FROM sessions WHERE id = ?').get(session.id);
   const exam = db.prepare('SELECT * FROM exams WHERE id = ?').get(session.exam_id);
@@ -1306,48 +1502,48 @@ async function sendQuestionTo(session, student, qOrder = null) {
     await selection.openChoice(student.phone, session.id, question.section_key);
     return false;
   }
-  const sequence = sessionQuestionSequence(session);
-  const index = sequence.findIndex((q) => q.id === question.id);
+  // The figure debt is written BEFORE the first bubble: a crash mid-send must
+  // still leave something a retry can find, and it costs nothing when the send
+  // goes through (the same row is retired a few lines below).
+  openFigureDebt(session, student, question);
 
   // Every bubble that is not the question itself is meta content — section
   // intro, type header, heading, reading passage — and goes out as its OWN
   // WhatsApp message. An instruction and a question never share a chat bubble
   // (per product requirement), and the paper's own instructions are not sent
   // at all: the app writes the instructions, the PDF only supplies questions.
-  const bubbles = buildQuestionBubbles(exam, question, sequence, index, session);
-  const questionBubble = bubbles.pop();
-  for (const bubble of bubbles) {
+  const { meta, parts } = questionStemParts(exam, question, session);
+  for (const bubble of meta) {
     await wa.sendText(student.phone, bubble);
   }
 
   // Diagram/image bubbles go directly ABOVE the question so the student sees
   // the figure first, then the full question that refers to it. Every surface
   // obeys the same rule — chat, dashboard and report all show the figure on
-  // top of the question it belongs to. The attempt is recorded: a picture that
-  // fails to send is retried on the student's next message instead of being
-  // logged once and lost.
-  await deliverQuestionFigures(session, student, question);
-
-  // Question bubble: full stem, then the answer (options or follow-ups), then
-  // the timer — nothing omitted.
-  const parts = [questionBubble];
-  if (question.type === 'objective') {
-    const options = safeParseOptions(question.options);
-    parts.push(options.map((o) => `${o.key}. ${o.text}`).join('\n'));
+  // top of the question it belongs to.
+  //
+  // A picture that will not go out withholds the QUESTION, not just itself: a
+  // student who reads a diagram question they cannot see answers it blind, and
+  // a figure that arrives afterwards is glued to whatever message comes next.
+  // 'withheld' therefore means nothing further was sent and the pair is still
+  // owed — the retry timer (or the student's next message) sends
+  // [figure][question] as one unit, and only then does the position move.
+  const figures = await deliverQuestionFigures(session, student, question);
+  if (figures.owed) {
+    console.warn(
+      `[exam] question ${question.q_order} (session ${session.id}) held back: its figure is still owed`
+    );
+    scheduleQuestionPairRetry(session, student, question);
+    return 'withheld';
   }
-  const subQuestions = formatSubQuestions(question, displayNumbersFromSequence(sequence).get(question.id));
-  if (subQuestions) parts.push(subQuestions);
-
-  // Place the timer BELOW the answer options so students see the question,
-  // options, then time remaining — not buried in the question text. The parts
-  // are joined by a blank line already, so the timer carries no separators of
-  // its own; giving it its own put two blank lines above it.
-  parts.push(`Time remaining: *${timeRemaining(session, exam)}*`);
-
-  const combined = parts.join('\n\n');
-  if (combined.trim()) {
-    await wa.sendText(student.phone, combined);
+  if (figures.error) {
+    console.warn(
+      `[exam] question ${question.q_order} (session ${session.id}) delivered without its figure: ` +
+      `${figures.error.message || figures.error}`
+    );
   }
+
+  await sendQuestionBody(session, student, exam, question, parts);
 
   recordAcceptance(session);
   return true;
@@ -1363,6 +1559,9 @@ async function sendQuestionTo(session, student, qOrder = null) {
  * the question is sent, and only a successful send advances the position. A
  * crash or outage in between leaves a queued row that recoverQueuedSends()
  * replays exactly once.
+ *
+ * A question whose figure failed is neither sent nor failed: it is withheld,
+ * and the retry delivers [figure][question] before the position moves.
  */
 /**
  * The next question this student should see: the first selected question in
@@ -1401,7 +1600,12 @@ async function advanceAndSend(session, student, nextQ) {
     return;
   }
   try {
-    await sendQuestionTo(session, student, nextQ.q_order);
+    const sent = await sendQuestionTo(session, student, nextQ.q_order);
+    // The question's figure would not go out, so the text was held back with it:
+    // the row stays queued, the position stays where the student is, and the
+    // pair is retried. Failing here is not an error — an error would mark the
+    // row failed and lose the question from the replay queue.
+    if (sent === 'withheld') return;
     commitAdvance(session.id, nextQ.q_order, entry.id);
   } catch (err) {
     outbox.markFailed(entry.id, err, Math.max(1, config.exam.sendRetries));
@@ -1457,7 +1661,11 @@ async function recoverQueuedSends() {
     }
     const student = { id: session.student_id, phone: entry.recipient };
     try {
-      await sendQuestionTo(session, student, entry.q_order);
+      const sent = await sendQuestionTo(session, student, entry.q_order);
+      // Withheld: the question is waiting on its figure, and it is the pair
+      // retry — not this replay — that delivers them together. The row must
+      // stay queued, or nothing could ever replay it again.
+      if (sent === 'withheld') continue;
       commitAdvance(session.id, entry.q_order, entry.id);
       recovered++;
     } catch (err) {
@@ -1807,7 +2015,11 @@ async function maybeStartSession(student, preferredExamId = null) {
       db.prepare(`UPDATE sessions SET retry_count = ?, last_active_at = datetime('now') WHERE id = ?`).run(retries, session.id);
     }
   }
-  return { ok: sent, reason: sent ? 'started' : 'send_failed' };
+  // 'withheld' is a started exam whose first question is waiting on its figure,
+  // not a failed send: the intro is out, the clock is running, and the pair
+  // retry delivers the question. Reporting it as a failure would abandon a
+  // session the student is sitting in front of.
+  return { ok: !!sent, reason: sent === 'withheld' ? 'started_figure_pending' : (sent ? 'started' : 'send_failed') };
 }
 
 // ── Answer processing ──────────────────────────────────────────────────
@@ -2868,6 +3080,10 @@ module.exports = {
   sendQuestionTo,
   deliverOwedFigures,
   deliverQuestionFigures,
+  // Exported so a held pair can be re-driven from the outside (the timer arms
+  // it, tests drive it): [figure][question] as one delivery, or false while
+  // the figure is still owed.
+  retryQuestionPair,
   restartSession,
   getSessionQuestion,
   getSessionQuestionCount,

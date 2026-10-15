@@ -5,8 +5,9 @@ require('./helpers/isolate');
 // file pins the two halves of "the student can see the diagram":
 //
 //   delivery — a picture that fails to send is RECORDED as owed (with its
-//     error), retried on the next attempt, and sent with a signed public link
-//     behind it so a Media-API refusal is not the end of the road;
+//     error) and the QUESTION IS HELD BACK with it (see figure-pair-hold.test.js
+//     for the hold itself), retried on the next attempt, and sent with a signed
+//     public link behind it so a Media-API refusal is not the end of the road;
 //   import   — the note after an upload reports what was ATTACHED, which is a
 //     different number from what the page scan found, and says in words when
 //     a student's diagram quietly did not make it.
@@ -61,7 +62,7 @@ function fixture(title) {
 
 // ── delivery ──────────────────────────────────────────────────────────
 
-test('a figure that fails to send is owed, not lost — and the question still goes out', async () => {
+test('a figure that fails to send HOLDS its question — the pair goes out together, never text first', async () => {
   const { session, student } = fixture('FigSendFails');
   const originalText = wa.sendText;
   const originalImage = wa.sendImage;
@@ -69,28 +70,34 @@ test('a figure that fails to send is owed, not lost — and the question still g
   try {
     wa.sendText = async (p, text) => { texts.push(text); };
     wa.sendImage = async () => { throw new Error('Media API refused the upload'); };
-    await exam.sendQuestionTo(session, student);
+    assert.equal(
+      await exam.sendQuestionTo(session, student),
+      'withheld',
+      'the send reports the question is being held back, not delivered'
+    );
   } finally {
     wa.sendText = originalText;
     wa.sendImage = originalImage;
   }
 
-  assert.ok(texts.some((t) => /Study the diagram\./.test(t)), 'the question text still reached the student');
+  assert.ok(
+    !texts.some((t) => /Study the diagram\./.test(t)),
+    'the question text was NOT sent — a student must never read a diagram question they cannot see'
+  );
   const row = db
     .prepare("SELECT * FROM message_outbox WHERE session_id = ? AND kind = 'figure'")
     .get(session.id);
   assert.ok(row, 'the failed attempt was recorded');
-  assert.equal(row.state, 'queued', 'queued so the next message can carry it');
+  assert.equal(row.state, 'queued', 'queued so the retry and the next message can carry it');
   assert.match(row.error, /Media API refused the upload/, 'with the reason it failed');
 
   // ...and the retry that follows once the gateway works again.
   await withChat(async (calls) => {
     await exam.deliverOwedFigures(session);
-    assert.deepEqual(
-      calls.filter((c) => c.type === 'image').map((c) => path.basename(c.file)),
-      ['fig-sent.png'],
-      'the owed figure goes out on the next attempt'
-    );
+    const imageAt = calls.findIndex((c) => c.type === 'image');
+    const questionAt = calls.findIndex((c) => c.type === 'text' && /Study the diagram\./.test(c.text));
+    assert.equal(imageAt, 0, 'the owed figure goes out on the next attempt');
+    assert.ok(questionAt > imageAt, 'with its own question directly under it, never before it');
   });
   const after = db
     .prepare("SELECT * FROM message_outbox WHERE session_id = ? AND kind = 'figure'")
@@ -138,7 +145,11 @@ test('an owed figure is paid out together with its own question, never floating 
   try {
     wa.sendText = async () => {};
     wa.sendImage = async () => { throw new Error('Media API refused the upload'); };
-    await exam.sendQuestionTo(session, student);
+    assert.equal(
+      await exam.sendQuestionTo(session, student),
+      'withheld',
+      'the question waits for the figure that was owed to it'
+    );
   } finally {
     wa.sendText = originalText;
     wa.sendImage = originalImage;

@@ -685,6 +685,51 @@ async function mapLimit(items, limit, fn) {
 }
 
 /**
+ * A question that talks about a picture it was never given.
+ *
+ * The extractor is told to preserve every [IMG:n] marker in the question it
+ * belongs to, but a model that rewrites the line drops the marker with it —
+ * and a marker nothing names verbatim is an orphan. "Study the diagram below"
+ * is the fingerprint of the question it actually belongs to, so an orphan is
+ * matched to the questions that reference a figure rather than to whatever
+ * happens to sit first in the block.
+ */
+const ORPHAN_FIGURE_REF =
+  /\b(?:figure|diagram|illustration|graph|chart|picture|photograph|drawing|plate|map|table)\b/i;
+const ORPHAN_FIGURE_CONTEXT =
+  /\b(?:above|below|shown|shows|given|overleaf|opposite|labelled|labeled|study|studies|examine|refer|referred|depicted|illustrat\w*)\b/i;
+
+function namesAFigure(q) {
+  const text = `${q.text || ''} ${q.passage || ''}`;
+  return ORPHAN_FIGURE_REF.test(text) && ORPHAN_FIGURE_CONTEXT.test(text);
+}
+
+/**
+ * Where an orphaned figure goes: a question that references a figure, chosen by
+ * round-robin.
+ *
+ * Piling every orphan onto the block's first question is how a paper ends up
+ * with five diagrams stacked over question 1 and four questions answered blind.
+ * The round-robin spreads them, and a question that has already been given a
+ * figure is passed over — a second picture on a question that has one is
+ * usually the next question's, and the question with none is the one being
+ * answered blind. Only when no question in the block mentions a figure at all
+ * does the old first-question fallback apply.
+ */
+function orphanFigureTarget(qs, gifts) {
+  const candidates = qs.filter(namesAFigure);
+  const pool = candidates.length ? candidates : [qs[0]];
+  const bare = pool.filter((q) => !(q.figureIndices || []).length);
+  const choices = bare.length ? bare : pool;
+  let best = choices[0];
+  for (const q of choices) {
+    if ((gifts.get(q) || 0) < (gifts.get(best) || 0)) best = q;
+  }
+  gifts.set(best, (gifts.get(best) || 0) + 1);
+  return best;
+}
+
+/**
  * Attach figure and math markers to questions after extraction.
  *
  * `questionsByBlock[b]` is the list of questions parsed from block `b`;
@@ -692,14 +737,16 @@ async function mapLimit(items, limit, fn) {
  * inside that block; `mathByBlock[b]` the matching `[MATH:n]` markers. A
  * marker is gifted to the question whose `text`/`passage` (for figures) or
  * `text`/`passage`/`options` (for math, which can ride inside option text)
- * contains its verbatim marker line — the AI is told to preserve them; a
- * marker that no question kept falls back to the block's FIRST question.
- * Figures attach as `q.markerIndex` (the first one, kept for every caller
- * that means "the figure") plus `q.figureIndices` — a paper can put a map AND
- * a timetable under one question, and dropping the second leaves the student
- * answering half a question they cannot see. Math markers are recorded as
- * `q.markerIndices` in document order. Attach is recorded on the question
- * object only — never as a stored text field.
+ * contains its verbatim marker line — the AI is told to preserve them. A
+ * marker no question kept is an ORPHAN: it goes to a question that references
+ * a figure, spread across them (see orphanFigureTarget), rather than all
+ * landing on the block's first question. Figures attach as `q.markerIndex`
+ * (the first one, kept for every caller that means "the figure") plus
+ * `q.figureIndices` — a paper can put a map AND a timetable under one question,
+ * and dropping the second leaves the student answering half a question they
+ * cannot see. Math markers are recorded as `q.markerIndices` in document
+ * order. Attach is recorded on the question object only — never as a stored
+ * text field.
  *
  * Returns { used:Set, unused:[], unusedMath:[] } — `unused`/`unusedMath` hold
  * markers whose block yielded no questions at all (skipped blocks), so the
@@ -712,6 +759,9 @@ function attachMarkers(questionsByBlock, markersByBlock, mathByBlock) {
   const allMath = [];
   for (let b = 0; b < questionsByBlock.length; b++) {
     const qs = questionsByBlock[b] || [];
+    // Orphan gifts reset per block: the spread is within a block, which is
+    // where the markers and the questions they belong to actually live.
+    const orphanGifts = new Map();
     for (const m of markersByBlock[b] || []) {
       allMarkers.push(m);
       let target = null;
@@ -719,7 +769,7 @@ function attachMarkers(questionsByBlock, markersByBlock, mathByBlock) {
         const textQ = String(q.text || '') + ' ' + String(q.passage || '');
         if (textQ.includes(`[IMG:${m.idx}]`)) { target = q; break; }
       }
-      if (!target && qs.length) target = qs[0];
+      if (!target && qs.length) target = orphanFigureTarget(qs, orphanGifts);
       if (target) {
         // Every figure the question names, in document order. `markerIndex`
         // stays the first one — a single field cannot hold a second figure,
