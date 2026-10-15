@@ -1771,7 +1771,7 @@ Rules:
   // Instrumentation only. `blockStats` accumulates what each block cost and why
   // it failed so a slow or lossy import can be explained from real numbers
   // instead of inferred from a comment. It changes no control flow.
-  const blockStats = { blocks: 0, ok: 0, dropped: 0, requested: 0, returned: 0, reasons: {} };
+  const blockStats = { blocks: 0, ok: 0, dropped: 0, toppedUp: 0, requested: 0, returned: 0, reasons: {} };
   // `parseCounters` is a never-reset module singleton, so the import's own
   // parse outcomes have to be read as a delta from here, not as a total.
   const parseBaseline = parseStats();
@@ -1881,10 +1881,66 @@ Rules:
   if (failed.length) {
     const rerun = await mapLimit(failed.map((i) => blockPrompts[i]), 1, (bp) => runBlock(bp, BLOCK_RETRIES));
     for (let k = 0; k < rerun.length; k++) if (rerun[k]) settled[failed[k]] = rerun[k];
-    const stillFailed = failed.filter((_, k) => !rerun[k]);
-    if (stillFailed.length && onWarning) {
+  }
+
+  // ── Last-resort recovery: an uploaded paper never loses a block ──────
+  //
+  // Above, a block that fails every AI call used to be DROPPED — up to 15
+  // questions gone from the import with one apology line. Nothing of an
+  // uploaded exam is disposable, so a block that is still missing after both
+  // passes is recovered in two steps:
+  //   1. split it at its own question boundaries and parse the halves, each a
+  //      much smaller ask (the usual failure is "this block is too big / too
+  //      weird", which half a block fixes);
+  //   2. parse whatever is left with the deterministic parser below — no AI
+  //      required, so a provider outage costs quality, never questions.
+  // Step 1 is skipped when NOT ONE block parsed: the endpoint is down, and
+  // more calls against it would only stall the import before step 2 anyway.
+  const stillFailed = [];
+  for (let i = 0; i < settled.length; i++) if (!settled[i]) stillFailed.push(i);
+  let recoveredBlocks = 0;
+  let recoveredLocally = 0;
+  if (stillFailed.length) {
+    const endpointAlive = blockStats.ok > 0;
+    const recovered = await mapLimit(stillFailed.map((i) => blockPrompts[i]), 2, async (bp) => {
+      if (endpointAlive) {
+        const parts = splitBlockInHalf(bp.block);
+        if (parts.length === 2) {
+          const questions = [];
+          let viaLocal = false;
+          for (const part of parts) {
+            const half = await runBlock({ ...bp, block: part }, 1);
+            if (half) {
+              questions.push(...(Array.isArray(half) ? half : half.questions || []));
+            } else {
+              const local = parseQuestionsLocally(part, bp.header);
+              if (local.length) {
+                questions.push(...local);
+                viaLocal = true;
+              }
+            }
+          }
+          if (questions.length) return { questions, local: viaLocal };
+        }
+      }
+      const local = parseQuestionsLocally(bp.block, bp.header);
+      if (local.length) return { questions: local, local: true };
+      return null;
+    });
+    for (let k = 0; k < recovered.length; k++) {
+      if (!recovered[k]) continue;
+      settled[stillFailed[k]] = recovered[k];
+      recoveredBlocks++;
+      if (recovered[k].local) recoveredLocally += recovered[k].questions.length;
+    }
+    const gone = stillFailed.filter((_, k) => !recovered[k]);
+    if (gone.length && onWarning) {
       onWarning(
-        `${stillFailed.length} question block(s) could not be parsed — some questions may be missing. Retry the upload to recover them.`
+        `${gone.length} question block(s) could not be parsed — some questions may be missing. Retry the upload to recover them.`
+      );
+    } else if (recoveredLocally && onWarning) {
+      onWarning(
+        `${recoveredLocally} question(s) were recovered with basic text parsing — review them after import.`
       );
     }
   }
@@ -1902,11 +1958,54 @@ Rules:
       .map(([k, v]) => `${k}=${v}`).join(' ') || 'none';
     console.log(
       `[ai] extraction summary: blocks=${blockStats.blocks} ok=${blockStats.ok} dropped=${blockStats.dropped} ` +
+      `recovered=${recoveredBlocks} (basicParse=${recoveredLocally}) toppedUp=${blockStats.toppedUp} ` +
       `shortBlocks=${blockStats.reasons.short || 0} ` +
       `questions=${blockStats.returned}/${blockStats.requested} ` +
       `parse(ok=${ps.ok} repaired=${ps.repaired} failed=${ps.failed}) reasons: ${reasonStr}`
     );
   }
+
+  /**
+   * The questions THIS block's model pass came back missing, recovered from
+   * the block's own text.
+   *
+   * A block can fail loudly (handled above) or quietly: a truncated response
+   * that repaired into fewer questions, a section the model skimmed, a theory
+   * half it summarised. The block still holds every numbered question it was
+   * given, so the difference between the numbers printed on the paper and the
+   * numbers handed back is the exact set of questions to recover — anything
+   * whose number the model already returned is never added twice.
+   *
+   * Guarded three ways, because a question invented here would be a question
+   * the admin never uploaded: only runs when the model returned numbers to
+   * compare against, never adds more than the deficit, and only accepts a
+   * local candidate whose stem is a sentence and says nothing the block
+   * already says.
+   */
+  const topUpMissingQuestions = (bp, list) => {
+    if (!Array.isArray(list) || !list.length) return list;
+    const haveNumbers = new Set(
+      list.map((q) => Number(q && q.number)).filter((n) => Number.isFinite(n) && n > 0)
+    );
+    if (!haveNumbers.size) return list;
+    const deficit = estimateNumberedQuestions(bp.block) - list.length;
+    if (deficit <= 0) return list;
+    const haveText = list.map((q) => String((q && q.text) || '').replace(/\s+/g, ' ').trim().toLowerCase());
+    const extras = [];
+    for (const q of parseQuestionsLocally(bp.block, bp.header)) {
+      if (extras.length >= deficit) break;
+      const n = Number(q.number);
+      if (n && haveNumbers.has(n)) continue;
+      const text = String(q.text || '').replace(/\s+/g, ' ').trim().toLowerCase();
+      if (text.length < 8) continue;
+      if (haveText.some((t) => t && textSimilarity(text, t) > 0.55)) continue;
+      extras.push(q);
+      if (n) haveNumbers.add(n);
+      haveText.push(text);
+    }
+    if (extras.length) blockStats.toppedUp += extras.length;
+    return extras.length ? [...list, ...extras] : list;
+  };
 
   const seen = new Set();
   const all = [];
@@ -1914,7 +2013,7 @@ Rules:
     const result = settled[i];
     if (!result) continue; // skipped block (timed out / failed) — keep the rest
     const bp = blockPrompts[i];
-    const list = Array.isArray(result) ? result : result.questions;
+    const list = topUpMissingQuestions(bp, Array.isArray(result) ? result : result.questions);
     let cur = bp.shared;
     let headerDone = false;
     for (const q of list || []) {
@@ -2168,26 +2267,42 @@ function trailingContext(lines) {
 }
 
 /**
- * Rough count of how many questions a document contains, based on question
- * numbers ("1." / "2)" style) at line starts. Used to warn when an import
- * extracts far fewer questions than the paper clearly holds.
+ * Lines that open a numbered question ("1." / "2)" / "Q3.") — the paper's own
+ * question numbering, counted WITHOUT its sub-questions: "(a) …" and "(i) …"
+ * are parts of the numbered question above them, and the extractor folds them
+ * into that question, so counting them here would make every well-parsed
+ * theory paper look half-extracted.
+ */
+const NUMBERED_QUESTION_LINE = /^\s*(?:Q\s*)?\d{1,3}\s*[.)](?:\s+\S|\s*$)/i;
+
+/**
+ * Rough count of how many questions a document contains, based on the paper's
+ * own question numbers ("1." / "2)" style) at line starts. Used to warn when
+ * an import extracts far fewer questions than the paper clearly holds.
  */
 function estimateQuestionCount(text) {
   const lines = String(text || '').split(/\r?\n/);
-  return lines.filter((l) => QUESTION_START.test(l)).length;
+  return lines.filter((l) => NUMBERED_QUESTION_LINE.test(l)).length;
+}
+
+/** The same count for one block — how many questions this block must yield. */
+function estimateNumberedQuestions(text) {
+  return estimateQuestionCount(text);
 }
 
 /** Human-readable warning, or null when the extraction looks complete. */
 function completenessWarning(estimate, extracted) {
   const count = Array.isArray(extracted) ? extracted.length : 0;
   if (estimate < 3 || count >= estimate) return null;
-  // Warn when clearly fewer questions were extracted than the document holds.
-  // Threshold: warn if less than half were extracted, or if more than 5
-  // questions are missing (generous to avoid false alarms on papers with
-  // unusual numbering or sections the estimator miscounts).
+  // Warn when fewer questions were extracted than the document holds.
+  // Threshold: anything under 90% of the paper, or more than 5 questions
+  // missing outright. The 90% line is what "every question of an uploaded PDF
+  // is imported" means in practice — a paper that lost a question or two of a
+  // long list is not reported (unusual numbering and section furniture can
+  // nudge the estimate), but a paper that lost a slice of itself always is.
   const ratio = count / estimate;
   const missing = estimate - count;
-  if (ratio >= 0.5 && missing <= 5) return null;
+  if (ratio >= 0.9 && missing <= 5) return null;
   return `Extracted ${count} questions, but the document appears to contain ~${estimate}. Some questions (often the theory section) may have been missed.`;
 }
 
@@ -2298,6 +2413,241 @@ function splitIntoBlocks(text, perBlock = BLOCK_QUESTIONS, maxChars = BLOCK_MAX_
     }
   }
   return blocks;
+}
+
+// ── Deterministic question parser (AI-free) ────────────────────────────
+//
+// The AI is the parser of record. This is the floor underneath it: it reads a
+// block the way the paper is printed — a number opens a question, lettered
+// lines are its options, "(a)"/"(i)" lines its parts — and returns the same
+// shape the AI returns. It exists so that a block the model refuses (a
+// timeout, a quota, a provider outage, a response too large to read) is still
+// PARSED rather than dropped: an uploaded exam loses at most the model's
+// wording, never its questions. It is also what tops up a block the model
+// answered for only some of its numbered questions.
+
+/** One line carrying several options: "A. one B. two C. three D. four". */
+const OPTION_RUN = /(^|\s)\(?([A-H])\s*[).:-]\s*(?=\S)/g;
+/** A numbered question line: "1. What is…", "Q2) State…", lone "1." stems. */
+const LOCAL_NUMBERED = /^\s*(?:Q\s*)?(\d{1,3})\s*[.)]\s*(.*)$/i;
+/** A lettered part of the numbered question above: "(a) Define…", "b) Give…". */
+const LOCAL_PART = /^\s*(?:\(\s*)?([a-h])(?:\s*\)|[.:-])\s*(?=\S)(.*)$/;
+/** A roman part: "(ii) Explain…". */
+const LOCAL_ROMAN = /^\s*\(\s*(i{1,3}|iv|v)\s*\)\s*(.*)$/i;
+/** A printed mark allocation: "[4 marks]", "(2 marks)", "5 marks". */
+const MARKS_ON_LINE = /\[(\d+)\s*marks?\]|\((\d+)\s*marks?\)|\b(\d+)\s*marks?\b/i;
+/** Section headers are structure, never question text. */
+const LOCAL_SECTION_LINE = /^(?:section|part|unit|paper|objective|theory|answers?|marking\s+scheme)\s*[A-Za-z0-9]/i;
+
+function marksOnLine(line) {
+  const m = String(line || '').match(MARKS_ON_LINE);
+  return m ? Number(m[1] || m[2] || m[3]) || 0 : 0;
+}
+
+/**
+ * Split a line into the option strings it carries, or null when it is not an
+ * option line. `{ prefix, options }` — the prefix is the stem the run hangs
+ * on ("1. Which instrument measures current?").
+ *
+ * Options run in the paper's own order (A, B, C, D), and that ordering is the
+ * whole check: a stem that happens to name a capital letter — "1. Ask Dr.
+ * Smith about it? A. yes B. no" — reads D, A, B, which is not an option run
+ * and is left alone as the sentence it is. A line that does not OPEN with an
+ * option also has to show a full ordered run and a stem that has finished
+ * speaking, so ordinary prose never parses into options.
+ */
+function splitOptionRun(line) {
+  const text = String(line || '').trim();
+  if (!text) return null;
+  OPTION_RUN.lastIndex = 0;
+  const hits = [];
+  let m;
+  while ((m = OPTION_RUN.exec(text))) {
+    hits.push({ letter: m[2], at: m.index + m[1].length, textAt: OPTION_RUN.lastIndex });
+  }
+  if (!hits.length) return null;
+  const startsLine = hits[0].at === 0;
+  const ordered = () => {
+    for (let i = 1; i < hits.length; i++) {
+      if (hits[i].letter.charCodeAt(0) <= hits[i - 1].letter.charCodeAt(0)) return false;
+    }
+    return true;
+  };
+  if (!startsLine) {
+    if (hits.length < 2 || !ordered()) return null;
+    const stem = text
+      .slice(0, hits[0].at)
+      .replace(/^\s*(?:Q\s*)?\d{1,3}\s*[.)]\s*/i, '')
+      .trim();
+    if (stem && !/[.!?;:)\]]$/.test(stem)) return null;
+  } else if (!ordered()) {
+    return null;
+  }
+  const options = hits
+    .map((h, i) => `${h.letter}. ${text.slice(h.textAt, i + 1 < hits.length ? hits[i + 1].at : text.length).trim()}`)
+    .filter((o) => o.length > 3);
+  if (!options.length || (hits.length > 1 && options.length < 2)) return null;
+  return { prefix: startsLine ? '' : text.slice(0, hits[0].at), options };
+}
+
+/**
+ * Parse a block of exam text into questions without any AI call.
+ *
+ * Returns the same question objects the extractor's prompt asks for, so a
+ * recovered question flows through the rest of the import (answer keys,
+ * figures, marking schemes, section grouping) exactly like a parsed one.
+ * `section` is the block's own leading header, so recovered questions keep
+ * the section they were printed under.
+ */
+function parseQuestionsLocally(text, section = '') {
+  const lines = String(text || '').split(/\r?\n/);
+  const out = [];
+  let cur = null;
+
+  const flush = () => {
+    if (!cur) return;
+    const stem = cur.stem.join(' ').replace(/\s+/g, ' ').trim();
+    if (cur.options.length >= 2 && stem.length >= 2) {
+      out.push({
+        type: 'objective',
+        number: cur.number,
+        section,
+        compulsory: false,
+        text: stem,
+        options: cur.options,
+        correct_answer: '',
+        correct_index: null,
+        passage: '',
+        marks: cur.marks || 1,
+        difficulty: 'medium',
+        learning_objective: '',
+        explanation: '',
+      });
+      cur = null;
+      return;
+    }
+    if (stem.length >= 2 && /[A-Za-z]{2}/.test(stem)) {
+      const parts = cur.parts.filter((p) => p.text.trim());
+      const partMarks = parts.map((p) => p.marks);
+      let total;
+      if (!parts.length) {
+        total = cur.marks || 5;
+      } else if (partMarks.some((v) => v > 0)) {
+        total = partMarks.reduce((s, v) => s + v, 0);
+      } else {
+        // The paper printed no marks per part: give the question its default
+        // and split it evenly, so a recovered question is still worth marks.
+        total = cur.marks || 5;
+        const base = Math.floor(total / parts.length);
+        let rest = total - base * parts.length;
+        for (let i = 0; i < parts.length; i++) {
+          parts[i].marks = base + (rest > 0 ? 1 : 0);
+          if (rest > 0) rest--;
+        }
+      }
+      out.push({
+        type: 'theory',
+        number: cur.number,
+        section,
+        compulsory: false,
+        text: stem,
+        follow_ups: parts.map((p) => ({
+          text: p.text.replace(/\s+/g, ' ').trim(),
+          marks: p.marks,
+        })),
+        passage: '',
+        marks: total,
+        difficulty: 'medium',
+        learning_objective: '',
+        model_answer: '',
+        key_points: [],
+        rubric: [],
+        presentation_marks: 0,
+        grammar_marks: 0,
+      });
+    }
+    cur = null;
+  };
+
+  const append = (chunk) => {
+    const value = String(chunk || '').trim();
+    if (!value || !cur) return;
+    if (cur.target === 'stem') cur.stem.push(value);
+    else if (cur.target.startsWith('part:')) cur.parts[Number(cur.target.slice(5))].text += ' ' + value;
+    else {
+      const i = Number(cur.target.slice(7));
+      if (cur.options[i]) cur.options[i] = `${cur.options[i]} ${value}`;
+    }
+  };
+
+  for (const raw of lines) {
+    const line = String(raw || '').trim();
+    if (!line) continue;
+
+    const num = line.match(LOCAL_NUMBERED);
+    const run = splitOptionRun(line);
+
+    if (num && !(run && run.prefix === '')) {
+      // A number opens a question — unless the line IS an option line, which
+      // can only happen when it does not start with a digit.
+      flush();
+      const inline = run && run.prefix !== '' ? run : null;
+      const stem = inline
+        ? inline.prefix.replace(/^\s*(?:Q\s*)?\d{1,3}\s*[.)]\s*/i, '').trim()
+        : num[2].trim();
+      cur = {
+        number: Number(num[1]),
+        stem: stem ? [stem] : [],
+        parts: [],
+        options: inline ? [...inline.options] : [],
+        marks: marksOnLine(line),
+        target: 'stem',
+      };
+      cur.target = cur.options.length ? `option:${cur.options.length - 1}` : 'stem';
+      continue;
+    }
+
+    if (run && run.prefix === '') {
+      // A line that opens with an option extends the current question's run —
+      // the paper prints each option on its own line (possibly wrapped).
+      if (!cur) continue; // orphan options with no question above them
+      cur.options.push(...run.options);
+      cur.target = `option:${cur.options.length - 1}`;
+      continue;
+    }
+
+    if (!cur) continue;              // leading context / headers: not a question
+
+    if (LOCAL_SECTION_LINE.test(line)) continue;
+
+    if (!cur.options.length) {
+      const part = line.match(LOCAL_PART) || line.match(LOCAL_ROMAN);
+      if (part && (cur.stem.join(' ').trim() || cur.parts.length)) {
+        cur.parts.push({ text: part[2] ? part[2].trim() : '', marks: marksOnLine(line) });
+        cur.target = `part:${cur.parts.length - 1}`;
+        continue;
+      }
+    }
+    append(line);
+  }
+  flush();
+  return out;
+}
+
+/**
+ * Cut a block in half at its own question boundaries, so a block the model
+ * could not handle becomes two smaller asks. Returns [] when the block holds
+ * fewer than two questions (nothing to halve) or when a half would be empty.
+ */
+function splitBlockInHalf(block) {
+  const lines = String(block || '').split(/\r?\n/);
+  const starts = [];
+  for (let i = 0; i < lines.length; i++) if (QUESTION_START.test(lines[i])) starts.push(i);
+  if (starts.length < 2) return [];
+  const cut = starts[Math.floor(starts.length / 2)];
+  const a = lines.slice(0, cut).join('\n').trim();
+  const b = lines.slice(cut).join('\n').trim();
+  return a && b ? [a, b] : [];
 }
 
 // ── Solutions / answer-key section handling ─────────────────────────────
@@ -3291,6 +3641,9 @@ module.exports = {
   leadingSectionHeader,
   trailingContext,
   estimateQuestionCount,
+  estimateNumberedQuestions,
+  parseQuestionsLocally,
+  splitBlockInHalf,
   completenessWarning,
   parseStats,
   splitSolutionSections,

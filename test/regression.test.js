@@ -461,7 +461,7 @@ test('cleanExamText also strips watermark lines from the parseable text', () => 
   assert.match(out, /Q1 text/, 'question kept');
 });
 
-test('estimateQuestionCount counts lone-number stems and lettered sub-questions', () => {
+test('estimateQuestionCount counts the paper’s own numbers, never its parts', () => {
   const text = [
     'PAPER 2',
     'Part A — Writing',
@@ -471,7 +471,12 @@ test('estimateQuestionCount counts lone-number stems and lettered sub-questions'
     '2.',
     'Write a story.',
   ].join('\n');
-  assert.equal(ai.estimateQuestionCount(text), 3);
+  // A lone "1." stem is a question; "(a)" underneath it is a PART of that
+  // question, folded into it by the extractor — counting it would report every
+  // well-parsed theory paper as half-imported, which is exactly the false
+  // alarm the completeness warning must never raise.
+  assert.equal(ai.estimateQuestionCount(text), 2);
+  assert.equal(ai.estimateNumberedQuestions(text), 2);
 });
 
 test('leadingSectionHeader returns the first section/part/unit line or empty', () => {
@@ -1331,15 +1336,107 @@ test('extractQuestionsFromText serially retries a block that failed in the wave'
   }
 });
 
-test('extractQuestionsFromText warns when a block still fails after the serial retry', async () => {
+test('extractQuestionsFromText recovers a block every AI call failed, with no AI at all', async () => {
+  const orig = ai.chatJSON;
+  const calls = { n: 0 };
+  ai.chatJSON = async () => { calls.n++; throw new Error('fetch failed'); };
+  const warnings = [];
+  try {
+    const out = await ai.extractQuestionsFromText('1. Retry Q?\nA. X\nB. Y', null, (w) => warnings.push(w));
+    assert.equal(out.length, 1, 'the block is parsed by the deterministic fallback, not dropped');
+    assert.equal(out[0].type, 'objective');
+    assert.deepEqual(out[0].options, ['A. X', 'B. Y'], 'options still read as options');
+    assert.equal(out[0].number, 1, 'the paper keeps its own numbering');
+    assert.ok(calls.n >= 1, 'the model was still asked before falling back');
+    assert.equal(warnings.length, 1, 'the recovery is reported, once');
+    assert.match(warnings[0], /recovered with basic text parsing/);
+  } finally {
+    ai.chatJSON = orig;
+  }
+});
+
+test('extractQuestionsFromText still warns when a block holds nothing parseable at all', async () => {
   const orig = ai.chatJSON;
   ai.chatJSON = async () => { throw new Error('fetch failed'); };
   const warnings = [];
   try {
-    const out = await ai.extractQuestionsFromText('1. Retry Q?\nA. X\nB. Y', null, (w) => warnings.push(w));
-    assert.equal(out.length, 0, 'no questions parsed');
+    const out = await ai.extractQuestionsFromText(
+      'There are no questions in this document. Please contact the office.',
+      null, (w) => warnings.push(w)
+    );
+    assert.equal(out.length, 0, 'nothing was invented for a block with no questions in it');
     assert.equal(warnings.length, 1, 'warning fired once');
     assert.match(warnings[0], /could not be parsed/);
+  } finally {
+    ai.chatJSON = orig;
+  }
+});
+
+test('a block the model answered for only some of its own numbers is topped up from its text', async () => {
+  const orig = ai.chatJSON;
+  // The model returns questions 1 and 2 of a paper that plainly holds three:
+  // a truncated response, a skimmed section, a summarised half. The missing
+  // NUMBER is the missing question, and it is recovered from the block itself.
+  ai.chatJSON = async () => ({
+    questions: [
+      {
+        type: 'objective', number: 1, text: 'The officer acted bravely.',
+        options: ['A. one', 'B. two', 'C. three', 'D. four'], correct_answer: 'A', correct_index: 0,
+      },
+      {
+        type: 'objective', number: 2, text: 'Iron is a metal.',
+        options: ['A. True', 'B. False'], correct_answer: 'A', correct_index: 0,
+      },
+    ],
+  });
+  const paper = [
+    '1. The officer acted bravely.',
+    'A. one B. two C. three D. four',
+    '2. Iron is a metal.',
+    'A. True',
+    'B. False',
+    '3. The largest planet in the solar system is',
+    'A. Earth',
+    'B. Jupiter',
+    'C. Mars',
+    'D. Venus',
+  ].join('\n');
+  try {
+    const out = await ai.extractQuestionsFromText(paper);
+    assert.equal(out.length, 3, 'the question the model came back without is recovered');
+    assert.equal(out[2].number, 3, 'under the paper’s own numbering');
+    assert.match(out[2].text, /largest planet/);
+    assert.equal(out[2].type, 'objective', 'and typed by its options, like the rest of the paper');
+    assert.deepEqual(out.slice(0, 2).map((q) => q.number), [1, 2], 'the model’s own questions are untouched');
+  } finally {
+    ai.chatJSON = orig;
+  }
+});
+
+test('the top-up stays silent when the model hands back no numbers to compare against', async () => {
+  const orig = ai.chatJSON;
+  ai.chatJSON = async () => ({
+    questions: [
+      {
+        type: 'objective', text: 'Iron is a metal.',
+        options: ['A. True', 'B. False'], correct_answer: 'A', correct_index: 0,
+      },
+    ],
+  });
+  // A response with no numbering cannot honestly say WHICH questions of the
+  // block are missing — only that some may be. Adding the rest from a guess
+  // would put questions in a paper the admin never uploaded.
+  const paper = [
+    '1. Iron is a metal.',
+    'A. True',
+    'B. False',
+    '2. The largest planet in the solar system is',
+    'A. Earth',
+    'B. Jupiter',
+  ].join('\n');
+  try {
+    const out = await ai.extractQuestionsFromText(paper);
+    assert.equal(out.length, 1, 'no numbering back means no topped-up questions');
   } finally {
     ai.chatJSON = orig;
   }

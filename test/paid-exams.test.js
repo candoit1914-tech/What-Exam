@@ -227,11 +227,11 @@ test('a paid exam with no amount is refused rather than sold for free', async ()
 
 // ── free papers are untouched ─────────────────────────────────────────
 
-test('a free exam starts immediately and books nothing', async () => {
+test('a free exam invites first and books nothing', async () => {
   capture();
   paystackStub(); // present only to prove it is never called
   const eid = makeExam();
-  addStudent(eid);
+  const student = addStudent(eid);
 
   const report = await exam.sendExamToRecipients(eid);
 
@@ -240,17 +240,22 @@ test('a free exam starts immediately and books nothing', async () => {
   assert.ok(sent[0].includes('INSTRUCTIONS'), 'the normal invite is delivered');
   assert.ok(!/paystack|payment/i.test(sent[0]), 'no paywall language on a free paper');
   assert.ok(
-    sent.some((m) => m.includes('QUESTION 1')),
-    'question 1 arrives right behind the instructions, with no reply in between'
+    !sent.some((m) => m.includes('QUESTION 1')),
+    'nothing of the paper is shown before the student has entered it'
   );
   assert.ok(
-    !sent.some((m) => m.includes('Reply *START*')),
-    'the invite never tells the student to START a paper that is already on screen'
+    sent.some((m) => m.includes('Reply *START*')),
+    'the invite says exactly what opens the paper'
   );
   assert.equal(paymentsFor(eid).length, 0, 'no payment row is ever created');
+  assert.equal(
+    db.prepare('SELECT started_at FROM sessions WHERE exam_id=? AND student_id=?').get(eid, student.id).started_at,
+    null,
+    'and the clock is still off'
+  );
 });
 
-test('a free exam grades the first real answer instead of re-sending question 1', async () => {
+test('a free exam opens on entry, then grades the first real answer', async () => {
   capture();
   paystackStub();
   const eid = makeExam();
@@ -258,19 +263,20 @@ test('a free exam grades the first real answer instead of re-sending question 1'
   await exam.sendExamToRecipients(eid);
   sent.length = 0;
 
-  // Question 1 is already on screen, so the first reply is read against it —
-  // and a greeting must never be graded as an answer to it.
+  // The student walks in. Entry — not the invitation — is what arms the clock
+  // and puts question 1 on screen, and it must arrive as its own moment rather
+  // than being graded as an answer to a question they had not been shown.
   const opened = await exam.handleInbound(student.phone, 'hello');
-  assert.equal(opened.reason, 'answered');
-  assert.ok(sent.some((m) => m.includes('QUESTION 1')), 'a greeting re-sends the question instead of being marked');
+  assert.equal(opened.reason, 'started');
+  assert.ok(sent.some((m) => m.includes('QUESTION 1')), 'entry is what opens the paper');
   assert.ok(
     db.prepare('SELECT started_at FROM sessions WHERE exam_id=? AND student_id=?').get(eid, student.id).started_at,
-    'the clock arms on that first reply'
+    'the clock arms on entry'
   );
   assert.equal(
     db.prepare(`SELECT COUNT(*) c FROM answers a JOIN sessions s ON s.id = a.session_id WHERE s.exam_id = ? AND s.student_id = ?`).get(eid, student.id).c,
     0,
-    'the greeting is recorded as no answer at all'
+    'the entry is recorded as no answer at all'
   );
   sent.length = 0;
 

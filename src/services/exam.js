@@ -593,6 +593,66 @@ const START_WORDS = new Set([
  */
 const GREETING_WORDS = new Set(['hi', 'hello', 'hey', 'yo', 'exam', 'start', 'begin']);
 
+/**
+ * Words that ENROL a student into an exam — the message that takes them from
+ * "invited" to "sitting the paper".
+ *
+ * The invite sits in the chat with no questions behind it: nothing of the exam
+ * is shown until the student asks for it. This set is what "asks for it".
+ * Deliberately wider than GREETING_WORDS (a student who types "sure" or
+ * "yeah" clearly means to begin) but read with two rules that keep a stray
+ * sentence from opening a paper nobody asked for:
+ *   - a ONE-word message has to be a start word outright ("start", "exam",
+ *     "ready", "hi" — the exact words the invite and the payment flow tell a
+ *     student to type);
+ *   - a longer message qualifies only if it carries one of the core words
+ *     ("let's begin", "yes I'm ready"), so "what exam is this?" — which
+ *     merely contains the word "exam" — gets the entry reminder instead of a
+ *     question the student never asked to see.
+ */
+const ENTRY_WORDS = new Set([
+  ...START_WORDS, 'yeah', 'yep', 'yes', 'sure', 'alright', 'ready', 'lets', "let's", 'proceed', 'y',
+]);
+const ENTRY_CORE = new Set([
+  'start', 'begin', 'ready', 'yes', 'ok', 'okay', 'hi', 'hello', 'hey', 'sure', 'yeah', 'yep', 'go', 'yo', 'alright',
+]);
+
+/** True when this inbound message is the student entering (or re-entering) the exam. */
+function isEntryRequest(body, meta = {}) {
+  // An interactive tap (button / list reply) is as deliberate as typing START.
+  if (meta && meta.replyId) return true;
+  const text = String(body || '').trim().toLowerCase();
+  if (!text) return false;
+  const words = text.split(/[^a-z0-9']+/).filter(Boolean);
+  if (!words.length) return false;
+  if (words.length === 1) return ENTRY_WORDS.has(words[0]);
+  return words.some((w) => ENTRY_CORE.has(w));
+}
+
+/** The reminder a student in the waiting room gets instead of a question. */
+function entryReminderMessage() {
+  return (
+    `🚪 *You are not in the exam yet*\n\n` +
+    `Your paper is ready and waiting — no questions have been released.\n\n` +
+    `✅ Type *START* to enter the exam and receive question 1.\n` +
+    `⏱️ Your timer starts the moment you enter.`
+  );
+}
+
+/** The confirmation that opens the paper — sent the moment entry is accepted. */
+function entryConfirmedMessage(exam) {
+  const minutes = Number(exam && exam.duration_minutes);
+  const clock = Number.isFinite(minutes) && minutes > 0
+    ? `Your ${minutes}-minute timer starts now.`
+    : 'Your timer starts now.';
+  return (
+    `✅ *You're in — good luck!*\n\n` +
+    `📝 *${String((exam && exam.title) || 'Exam').toUpperCase()}*\n` +
+    `⏱️ ${clock}\n\n` +
+    `The questions follow below — read each one carefully.`
+  );
+}
+
 function formatQuestion(exam, question, qCount, body, session, displayNumber = null) {
   // The type banner and any passage/heading are sent as their own bubbles by
   // buildQuestionBubbles, so the question bubble carries just the stem
@@ -912,7 +972,10 @@ function formatExamIntro(exam, questionCount, { started = false, opening = false
         // there is no START to reply to any more, and the clock is armed by the
         // student's first answer (handleInbound re-arms while no answer exists).
         ? 'Your timer starts the moment you send your first answer. The exam ends automatically when time is up.'
-        : 'Reply START to begin — your timer starts the moment you reply.',
+        // The invite already carries the START prompt as its headline; this line
+        // says what that reply is worth — that the paper waits, untimed, until
+        // the student takes their seat.
+        : 'The paper waits for you — the clock only starts once you are in.',
     'Copying AI-written answers (e.g. ChatGPT, Gemini) is cheating — such answers are detected and earn 0 marks.',
   ];
   // The START prompt only makes sense before the student has begun. Telling
@@ -922,16 +985,16 @@ function formatExamIntro(exam, questionCount, { started = false, opening = false
   // question is already arriving behind this message.
   const startLine = started || opening
     ? ''
-    : 'Reply *START* to this chat to open it.\n\n';
+    : '⏳ TO BEGIN\n─────────────────────\nReply *START* to this chat to open it.\n\n';
   // The invite must also say how to pull the exam open by hand. A free-form
   // question can be refused (WhatsApp's 24-hour window) or throttled, and when
   // that happens this invite is the only bubble a waiting student reads — so
-  // it is where the escape hatch belongs. Both words count as a greeting
-  // (START_WORDS / GREETING_WORDS), and handleInbound delivers the owed
-  // question the moment one arrives.
+  // it is where the escape hatch belongs. Both words are entry words
+  // (isEntryRequest), and handleInbound accepts either as the reply that opens
+  // the paper the moment one arrives.
   const chaseLine = started
     ? ''
-    : 'If the questions do not appear automatically, type Hi or Exam in this chat and your exam will start immediately.\n\n';
+    : '💡 If the questions do not appear automatically, type Hi or Exam in this chat and your exam will start immediately.\n\n';
   const instructions = steps.map((s, i) => `${i + 1}. ${s}`).join('\n');
   // A paper that asks the student to choose says so up front, so nobody only
   // discovers the rule when the selector interrupts them mid-exam. The count is
@@ -978,20 +1041,30 @@ function formatExamIntro(exam, questionCount, { started = false, opening = false
       `they add up to *100*.\n\n`
     );
   })();
+  // The card itself. Structure is decorative — dividers, labels, emoji — but
+  // every fact a test (and a student) may rely on is printed verbatim: the
+  // subject, the counts, the marks, the section rules, the START prompt and
+  // the INSTRUCTIONS heading all survive any reskin.
   return (
-    `*${String(exam.title).toUpperCase()}*\n\n` +
-    `Subject: *${exam.subject || 'General'}*\n` +
-    `Exam type: *${type}*\n` +
-    `Duration: *${exam.duration_minutes} minute${exam.duration_minutes === 1 ? '' : 's'}*\n` +
-    `Number of questions: *${answerable}*` +
+    `━━━━━━━━━━━━━━━━━━━━━━\n` +
+    `📝 *EXAM INVITATION*\n` +
+    `━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+    `🎓 *${String(exam.title).toUpperCase()}*\n\n` +
+    `📚 Subject: *${exam.subject || 'General'}*\n` +
+    `🎯 Exam type: *${type}*\n` +
+    `⏱ Duration: *${exam.duration_minutes} minute${exam.duration_minutes === 1 ? '' : 's'}*\n` +
+    `❓ Number of questions: *${answerable}*` +
     (answerable !== questionCount ? ` (the ones you will answer)` : '') + '\n' +
-    `Pass mark: *${exam.pass_percentage}%\n\n` +
-    ruleLines +
+    `🏅 Pass mark: *${exam.pass_percentage}%*\n\n` +
+    (ruleLines
+      ? `━━━ 📋 THE PAPER ━━━\n${ruleLines}`
+      : '') +
     totalLine +
     scoringLine +
     startLine +
     chaseLine +
-    `*INSTRUCTIONS*\n${instructions}`
+    `━━━ 📖 *INSTRUCTIONS* ━━━\n${instructions}\n\n` +
+    `━━━━━━━━━━━━━━━━━━━━━━`
   );
 }
 
@@ -1016,7 +1089,13 @@ async function sendOpeningIntro(student, exam, session, options = {}) {
     db.prepare('SELECT COUNT(*) c FROM questions WHERE exam_id = ?').get(exam.id).c;
   const intro = formatExamIntro(exam, questionCount, options);
   if (!intro) return;
+  // Recorded exactly like the bulk-send invite (sendIntro), because this row
+  // is the paper's GATE: handleInbound reads it to know the student has been
+  // invited and is therefore sitting in the waiting room — no question, no
+  // countdown — until they explicitly ask to come in.
+  const entry = outbox.enqueue({ sessionId: session.id, kind: 'intro', recipient: student.phone });
   await wa.sendText(student.phone, intro);
+  outbox.markSent(entry.id);
 }
 
 /** Resolve a student's objective answer from a tap (replyId), a letter, or full option text. */
@@ -1677,12 +1756,74 @@ async function recoverQueuedSends() {
 
 // ── Entry point for inbound WhatsApp messages ──────────────────────────
 
+/**
+ * Let a student INTO the paper: arm the clock and open question 1.
+ *
+ * This is the single place a free exam's timer starts and its first question
+ * leaves the building, so "invited" and "sitting the exam" can never drift
+ * apart: every entry — the invite's START, a tapped reply, a fresh waiting
+ * room the student just walked into — goes through here.
+ *
+ * The delivery runs through advanceAndSend(), never a bare sendQuestionTo():
+ * question 1 is recorded in the outbox as it goes, which is what stops this
+ * branch firing again on the student's next reply and re-sending question 1
+ * over their answer forever.
+ *
+ * Returns the shape the invite branch has always returned.
+ */
+async function enterExam(session, student) {
+  const exam = db.prepare('SELECT * FROM exams WHERE id = ?').get(session.exam_id);
+  // Stored in the same ISO-8601-Z form as every other write to started_at, so
+  // the column holds one format rather than a mix of SQLite and JS datetimes.
+  const now = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+  db.prepare(
+    `UPDATE sessions SET started_at = ?, last_active_at = datetime('now') WHERE id = ?`
+  ).run(now, session.id);
+  const entered = { ...session, started_at: now };
+  const firstQ = getSessionQuestion(entered.id, entered.current_q_order)
+    || firstUnansweredSelected(entered);
+  if (!firstQ) {
+    await finalize(entered, student, 'completed');
+    return { started: true, ok: true, reason: 'completed' };
+  }
+  // The door closing behind them. Short, warm, and sent BEFORE question 1 so
+  // the student reads it as one moment — you're in, the clock is running, here
+  // is paper — rather than a stray message in front of a question. Never for a
+  // paid paper: its entry moment is the "Payment received" bubble it already
+  // read.
+  if (exam && !payments.isPaidExam(exam)) {
+    await wa.sendText(student.phone, entryConfirmedMessage(exam));
+  }
+  if (entered.selection_state === 'selecting') {
+    await selection.sendSelector(student.phone, entered.id, entered.selection_section);
+    return { started: true, ok: true, reason: 'selecting' };
+  }
+  try {
+    await advanceAndSend(entered, student, firstQ);
+  } catch (err) {
+    // The paper has begun and question 1 is owed, not lost: the outbox row is
+    // still queued (recoverQueuedSends() replays it), so the student is told
+    // plainly and the entry succeeds anyway. Throwing here would surface a
+    // WhatsApp refusal as a failed webhook, on the one message that did
+    // everything right.
+    await wa.sendText(
+      student.phone,
+      '✅ Your exam has started — question 1 is on its way.'
+    ).catch(() => {});
+    return { started: true, ok: true, reason: 'deferred' };
+  }
+  return { started: true, ok: true, reason: 'started' };
+}
+
 async function handleInbound(phone, body, meta = {}) {
   const student = getOrCreateStudent(phone);
   let session = getActiveSession(student.id);
 
   if (!session) {
-    const started = await maybeStartSession(student);
+    // The message that arrives with no session behind it is read as an
+    // invitation attempt: maybeStartSession decides whether it ENTERS the
+    // paper or takes a seat in the waiting room.
+    const started = await maybeStartSession(student, null, { body, meta });
     return { started: true, ok: started.ok, reason: started.reason };
   }
 
@@ -1725,23 +1866,27 @@ async function handleInbound(phone, body, meta = {}) {
   const questionSent = db.prepare("SELECT id FROM message_outbox WHERE session_id=? AND kind='question' AND state='sent'").get(session.id);
   const selectorOpen = session.selection_state === 'selecting';
   if (invited && !questionSent && !selectorOpen && sessionHasNoAnswers(session.id)) {
-    // Stored in the same ISO-8601-Z form as every other write to started_at, so
-    // the column holds one format rather than a mix of SQLite and JS datetimes.
-    const now = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
-    db.prepare('UPDATE sessions SET started_at = ? WHERE id=?').run(now, session.id);
-    session = { ...session, started_at: now };
-    // Question 1 goes out through the normal advance path so the delivery is
-    // recorded in the outbox. A bare sendQuestionTo() leaves no trace, and
-    // this branch would then fire again on the student's next reply —
-    // swallowing their first answer and re-sending question 1 forever.
-    const firstQ = getSessionQuestion(session.id, session.current_q_order)
-      || firstUnansweredSelected(session);
-    if (!firstQ) {
-      await finalize(session, student, 'completed');
-      return { started: true, ok: true, reason: 'completed' };
+    // The waiting room. A FREE paper invites first and opens on request: the
+    // student has the card, and nothing behind it — no question, no ticking
+    // clock — until they say they want to begin. Every other message ("what is
+    // this?", "is this maths?", a stray reply) is answered with how to get in,
+    // and costs them no second of exam time, because the timer is armed inside
+    // enterExam() and nowhere else.
+    //
+    // Two states are deliberately NOT in the room:
+    //   - a paid paper — Paystack already took the student in (the gate above
+    //     refused them before this line), so payment IS the entry;
+    //   - started_at already set — they entered once and the delivery of Q1 is
+    //     what this branch owes them (a refused or held question leaves the
+    //     row unsent), so a retry must go through rather than nag.
+    if (!session.started_at) {
+      const examRow = db.prepare('SELECT * FROM exams WHERE id = ?').get(session.exam_id);
+      if (!payments.isPaidExam(examRow) && !isEntryRequest(body, meta)) {
+        await wa.sendText(student.phone, entryReminderMessage());
+        return { started: false, ok: true, reason: 'awaiting_entry' };
+      }
     }
-    await advanceAndSend(session, student, firstQ);
-    return { started: true, ok: true, reason: 'started' };
+    return enterExam(session, student);
   }
 
   // Bulk-sent sessions are created the moment the admin clicks Send, but the
@@ -1844,7 +1989,7 @@ async function sendPaidStartTemplate(session, student, exam, firstQ) {
   return true;
 }
 
-async function maybeStartSession(student, preferredExamId = null) {
+async function maybeStartSession(student, preferredExamId = null, inbound = {}) {
   const candidates = db
     .prepare(
       `SELECT e.* FROM exams e
@@ -1986,6 +2131,26 @@ async function maybeStartSession(student, preferredExamId = null) {
     session = createSession(exam.id, student.id);
   }
 
+  // ── The waiting room (free papers) ────────────────────────────────────
+  //
+  // A free paper does not open on the student's first word — it opens on
+  // request. The invitation card goes out carrying its Reply *START* prompt
+  // and its escape-hatch line, the clock stays OFF, and question 1 stays in
+  // the building until the student asks to be let in: entry here means the
+  // card is out and the paper opens immediately, anything else means a seat,
+  // a "type START to begin", and not one second of exam time spent.
+  //
+  // A paid paper skips this entirely: ensurePaid() above already took the
+  // student through Paystack, and payment IS the entry — so it falls through
+  // to the old behaviour of arming the clock and sending question 1 at once.
+  if (!payments.isPaidExam(exam)) {
+    const entering = isEntryRequest(inbound.body, inbound.meta);
+    await sendOpeningIntro(student, exam, session, entering ? { started: true } : {});
+    if (!entering) return { ok: true, reason: 'awaiting_start' };
+    const entered = await enterExam(session, student);
+    return { ok: entered.ok, reason: entered.reason };
+  }
+
   // Start the timer NOW — when the student actually engages — not when the
   // admin created or sent the exam. Question generation can take a long time,
   // so the clock must not start until the student is ready.
@@ -1997,8 +2162,9 @@ async function maybeStartSession(student, preferredExamId = null) {
     session = getActiveSession(student.id);
   }
 
-  // Question 1 goes out immediately behind this block, so the block never
-  // tells the student to reply START — there is nothing left to start.
+  // Paid only from here: question 1 goes out immediately behind this block,
+  // so the block never tells the student to reply START — there is nothing
+  // left to start. (The free path returned above, inside the waiting room.)
   await sendOpeningIntro(student, exam, session, { opening: true });
   const sent = await sendQuestionTo(session, student).catch(async (err) => {
     await wa.sendText(student.phone, `Could not start "${exam.title}" right now. Please try again shortly.`);
@@ -2862,39 +3028,28 @@ async function sendIntro(session, student, exam, count, template, { force = fals
 }
 
 /**
- * Start the paper for real: the WhatsApp instructions go out, then question 1
- * follows them immediately — no "Reply *START*" waiting room in between. This
- * is what the admin's Send button does.
+ * Invite the student to the paper — and nothing more.
+ *
+ * The WhatsApp instructions go out and stop there: no question follows behind
+ * them. A free paper opens on request, so this is the waiting room being
+ * handed over — the card carries `Reply *START*` (and the "type Hi or Exam"
+ * escape hatch), and the student's entry runs through handleInbound's invite
+ * branch into enterExam(), which arms the clock and sends question 1 through
+ * the recorded advance path.
  *
  * The invite still leads because it is the message WhatsApp will accept from a
- * number that has not messaged the business in 24 hours. If the free-form
- * question behind it is refused (131047/131026 — template required), nothing
- * is lost or abandoned: the invite is already in the chat, so the student's
- * first reply opens the paper through the existing invite branch, and the
- * queued outbox row keeps the delivery owed (recoverQueuedSends() replays it)
- * rather than marking the recipient unreachable.
+ * number that has not messaged the business in 24 hours — so whatever the
+ * student's first reply is, it arrives inside an open window.
  *
  * A paid paper stops inside sendIntro(): the checkout link is its whole
  * invitation, and there is no paper to push until Paystack says so.
  */
 async function startImmediately(session, student, exam, count, template, report, { force = false } = {}) {
-  await sendIntro(session, student, exam, count, template, { force, opening: true });
+  await sendIntro(session, student, exam, count, template, { force });
   // Counted here rather than after the question: for a paid paper the invite
   // (the checkout link) IS the whole delivery, and the report must still show
   // the recipient as reached.
   report.sent++;
-  if (payments.isPaidExam(exam)) return;
-  const firstQ = getSessionQuestion(session.id, session.current_q_order)
-    || firstUnansweredSelected(session);
-  if (!firstQ) return;
-  try {
-    // Through advanceAndSend, so the delivery is recorded in the outbox: a
-    // bare sendQuestionTo leaves no trace, and nothing could replay it.
-    await advanceAndSend(session, student, firstQ);
-  } catch (err) {
-    // The invite made it out; this is a deferred start, not a failed send.
-    console.warn(`[exam] question 1 deferred for ${student.phone}: ${friendlyError(err)}`);
-  }
 }
 
 async function sendExamToStudent(exam, student, questionCount, template, report) {
@@ -2957,11 +3112,12 @@ async function sendExamToStudent(exam, student, questionCount, template, report)
       // by the student's FIRST reply instead, so the paper can sit unread in
       // the chat without costing anybody a minute of it.
       db.prepare('UPDATE sessions SET started_at=NULL WHERE id=?').run(session.id);
-      // The exam starts with the button: the WhatsApp instructions go out and
-      // question 1 follows them at once, figures above the question as always.
-      // If WhatsApp refuses the free-form question (a number outside the
-      // 24-hour window), the invite behind it is the fallback — the student's
-      // first reply then opens the paper exactly as before.
+      // The invitation goes out with the button: the WhatsApp instructions,
+      // the Reply *START* prompt and the escape hatch. The paper itself opens
+      // on the student's entry — their first reply runs through handleInbound's
+      // invite branch, which arms the clock and sends question 1 — so a number
+      // that has not messaged in 24 hours still gets the invite (the message
+      // WhatsApp will accept), and nothing is lost while it waits.
       await startImmediately(session, student, exam, attemptCount, template, report);
       return;
     }
@@ -3066,6 +3222,13 @@ module.exports = {
   createSession,
   recoverQueuedSends,
   handleInbound,
+  // The waiting room: entry (the one place a free paper's clock arms and Q1
+  // leaves) and the messages around it, exported so the gate itself can be
+  // tested directly.
+  enterExam,
+  isEntryRequest,
+  entryReminderMessage,
+  entryConfirmedMessage,
   // Exported for the paywall: payments.unlock() opens the paper from the
   // webhook, which runs outside any inbound message.
   maybeStartSession,

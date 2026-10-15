@@ -353,26 +353,26 @@ test('extraction falls back to the first question of the block when the AI dropp
   );
 });
 
-test('extraction warns (once) when a marker block yielded no questions', async () => {
+test('extraction recovers a marker block the AI returned nothing for, marker attached', async () => {
   const warnings = [];
+  let qs = [];
   await withStubChatJSON([], async () => {
-    await aiMod.extractQuestionsFromText(
+    qs = await aiMod.extractQuestionsFromText(
       '9. State two uses of a thermometer.\n[IMG:4]\n',
       null, (w) => warnings.push(w),
       { markers: [{ idx: 4, page: 3 }] }
     );
   });
-  // The diagram warning must still fire exactly once. A block that yields
-  // nothing is now additionally reported as skipped, so filter for the
-  // diagram warning rather than counting every warning.
-  assert.equal(
-    warnings.filter((w) => /diagram/i.test(w)).length,
-    1,
-    `expected exactly one diagram warning, got ${JSON.stringify(warnings)}`
-  );
+  assert.equal(qs.length, 1, 'the question is recovered from the block text, not lost');
   assert.ok(
-    warnings.some((w) => /block\(s\) could not be parsed/i.test(w)),
-    `expected the dropped block to be reported, got ${JSON.stringify(warnings)}`
+    warnings.some((w) => /recovered with basic text parsing/i.test(w)),
+    `the recovery is reported, got ${JSON.stringify(warnings)}`
+  );
+  assert.equal(qs[0].markerIndex, 4, 'the diagram still travels with the question it names');
+  assert.ok(!qs[0].text.includes('[IMG:4]'), 'and is stripped from the stored text');
+  assert.ok(
+    !warnings.some((w) => /diagram/i.test(w)),
+    `nothing was dropped, so no unmatched-diagram warning, got ${JSON.stringify(warnings)}`
   );
 });
 
@@ -562,25 +562,26 @@ test('math markers riding in text or options attach as markerIndices and are str
   );
 });
 
-test('a math marker whose block yielded no questions warns', async () => {
+test('a math marker block the AI returned nothing for is recovered, marker attached', async () => {
   const warnings = [];
+  let qs = [];
   await withStubChatJSON([], async () => {
-    await aiMod.extractQuestionsFromText(
+    qs = await aiMod.extractQuestionsFromText(
       '9. Evaluate:\n[MATH:4]\n',
       null, (w) => warnings.push(w),
       { mathMarkers: [4] }
     );
   });
-  // A block that yields nothing is now reported as a skipped block as well as
-  // flagging its unmatched math, so assert on what the user is told rather
-  // than on an exact count.
+  assert.equal(qs.length, 1, 'the question is recovered rather than skipped');
+  assert.deepEqual(qs[0].markerIndices, [4], 'the expression still travels with the question');
+  assert.ok(!qs[0].text.includes('[MATH:4]'), 'and is stripped from the stored text');
   assert.ok(
-    warnings.some((w) => /math/i.test(w)),
-    `expected a math warning, got ${JSON.stringify(warnings)}`
+    warnings.some((w) => /recovered with basic text parsing/i.test(w)),
+    `the recovery is reported, got ${JSON.stringify(warnings)}`
   );
   assert.ok(
-    warnings.some((w) => /block\(s\) could not be parsed/i.test(w)),
-    `expected the dropped block to be reported, got ${JSON.stringify(warnings)}`
+    !warnings.some((w) => /math/i.test(w)),
+    `nothing was dropped, so no lost-math warning, got ${JSON.stringify(warnings)}`
   );
 });
 
