@@ -297,12 +297,28 @@ function drawSessionQuestions(sessionId, examId) {
   // Papers without a quota keep today's objective-first ordering verbatim.
   // Only a paper that actually asks the student to choose switches to
   // section order, because grouping by section is the whole point.
+  //
+  // The order used is the PAPER's: a section starts where its first question
+  // sits in the pool (the import inserts in page order, so the lowest pool id
+  // is the section's opening line). exam_sections.position cannot serve here.
+  // The importer writes no row for an answer-all section — there is no rule to
+  // store — so a position map threw that section into a 9999 bucket and sorted
+  // the paper's OWN opening section last. A quota section then landed at
+  // question 1: the selector opened before the answer-all work had been
+  // answered, and while the card was open every objective reply was read as a
+  // failed pick. Position still orders the sections the dashboard lists — it
+  // just no longer decides where a student's paper begins.
   const plan = selection.sectionPlan(examId);
-  const position = new Map(plan.map((s) => [s.section_key, s.position]));
   if (plan.some((s) => s.quota > 0)) {
+    const sectionStart = new Map();
+    for (const row of uniqueRows) {
+      const key = row.section_key || '';
+      const cur = sectionStart.get(key);
+      if (cur == null || row.id < cur) sectionStart.set(key, row.id);
+    }
     uniqueRows.sort((a, b) => {
-      const pa = position.has(a.section_key) ? position.get(a.section_key) : 9999;
-      const pb = position.has(b.section_key) ? position.get(b.section_key) : 9999;
+      const pa = sectionStart.get(a.section_key || '');
+      const pb = sectionStart.get(b.section_key || '');
       return pa !== pb ? pa - pb : (a.id || 0) - (b.id || 0);
     });
   } else {
@@ -425,12 +441,22 @@ function sessionQuestionSequence(session) {
   }
   // Same rule as drawSessionQuestions, and for the same reason: a quota-free
   // exam must come out byte-identical to how it behaved before this feature.
+  // Sections are walked in the PAPER's order — the lowest q_order in this list
+  // is where a section begins — because exam_sections.position does not exist
+  // for an answer-all section (the import writes no rule for it), and the 9999
+  // bucket it used to fall into sorted the opening section last.
   const plan = selection.sectionPlan(s.exam_id);
-  const position = new Map(plan.map((x) => [x.section_key, x.position]));
   if (plan.some((x) => x.quota > 0)) {
+    const sectionStart = new Map();
+    for (const q of questions) {
+      const key = q.section_key || '';
+      const cur = sectionStart.get(key);
+      const order = Number(q.q_order) || 0;
+      if (cur == null || order < cur) sectionStart.set(key, order);
+    }
     questions.sort((a, b) => {
-      const pa = position.has(a.section_key) ? position.get(a.section_key) : 9999;
-      const pb = position.has(b.section_key) ? position.get(b.section_key) : 9999;
+      const pa = sectionStart.get(a.section_key || '');
+      const pb = sectionStart.get(b.section_key || '');
       return pa !== pb ? pa - pb : selection.compulsoryFirst(a, b);
     });
   } else {
@@ -613,8 +639,14 @@ const GREETING_WORDS = new Set(['hi', 'hello', 'hey', 'yo', 'exam', 'start', 'be
 const ENTRY_WORDS = new Set([
   ...START_WORDS, 'yeah', 'yep', 'yes', 'sure', 'alright', 'ready', 'lets', "let's", 'proceed', 'y',
 ]);
+// Deliberately WITHOUT the greeting words, even though a bare "hi" opens the
+// paper (it is in START_WORDS, one message long). Inside a sentence a greeting
+// is politeness, not intent: "Hi, good morning" must not arm the clock and
+// release question 1 before the student has said they want to begin — the
+// word "hi" appearing in it is not a request to sit the paper. A longer
+// message therefore has to carry a word that only ever means begin.
 const ENTRY_CORE = new Set([
-  'start', 'begin', 'ready', 'yes', 'ok', 'okay', 'hi', 'hello', 'hey', 'sure', 'yeah', 'yep', 'go', 'yo', 'alright',
+  'start', 'begin', 'ready', 'yes', 'ok', 'okay', 'sure', 'yeah', 'yep', 'go', 'alright',
 ]);
 
 /** True when this inbound message is the student entering (or re-entering) the exam. */

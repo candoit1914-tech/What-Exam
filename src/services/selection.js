@@ -502,7 +502,6 @@ function stem(q) {
 function displayNumberMap(sessionId, sectionKey) {
   const session = db.prepare('SELECT exam_id FROM sessions WHERE id = ?').get(sessionId);
   if (!session) return new Map();
-  const position = new Map(sectionsForExam(session.exam_id).map((s) => [s.section_key, s.position]));
   const rows = db
     .prepare(
       `SELECT sq.question_id, sq.q_order, sq.section_key,
@@ -511,15 +510,24 @@ function displayNumberMap(sessionId, sectionKey) {
          JOIN question_pool qp ON qp.id = sq.question_id
         WHERE sq.session_id = ? AND sq.is_selected <> 0`
     )
-    .all(sessionId)
-    .sort((a, b) => {
-      const pa = position.has(a.section_key) ? position.get(a.section_key) : 9999;
-      const pb = position.has(b.section_key) ? position.get(b.section_key) : 9999;
-      // The same walk sessionQuestionSequence takes — section, then the
-      // compulsory question leading its section — or this map would promise a
-      // number the bubble does not print.
-      return pa !== pb ? pa - pb : compulsoryFirst(a, b);
-    });
+    .all(sessionId);
+  // The same walk sessionQuestionSequence takes — the PAPER's section order
+  // (lowest q_order starts the section; exam_sections.position is absent for
+  // an answer-all section) — or this map would promise a number the bubble
+  // does not print.
+  const sectionStart = new Map();
+  for (const r of rows) {
+    const key = r.section_key || '';
+    const cur = sectionStart.get(key);
+    const order = Number(r.q_order) || 0;
+    if (cur == null || order < cur) sectionStart.set(key, order);
+  }
+  rows.sort((a, b) => {
+    const pa = sectionStart.get(a.section_key || '');
+    const pb = sectionStart.get(b.section_key || '');
+    // Section, then the compulsory question leading its section.
+    return pa !== pb ? pa - pb : compulsoryFirst(a, b);
+  });
 
   const committed = sectionCommitted(sessionId, sectionKey);
   const counters = { objective: 0, theory: 0 };

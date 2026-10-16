@@ -53,6 +53,8 @@ test('the words that open a paper, and the sentences that do not', () => {
   }
   assert.equal(exam.isEntryRequest('yes I am ready'), true, 'a whole sentence asking to begin');
   assert.equal(exam.isEntryRequest("let's begin"), true);
+  assert.equal(exam.isEntryRequest('Hi, good morning'), false, 'a greeting sentence is politeness, not entry — it must not arm the clock');
+  assert.equal(exam.isEntryRequest('hello everyone, excited to start'), true, '…but a sentence that carries a word which only means begin still enters');
   assert.equal(exam.isEntryRequest('what exam is this?'), false, 'a question ABOUT the exam is not entry');
   assert.equal(exam.isEntryRequest(''), false, 'an empty tap');
   assert.equal(exam.isEntryRequest('A'), false, 'an answer to a question nobody has been shown');

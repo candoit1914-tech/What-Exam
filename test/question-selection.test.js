@@ -1131,6 +1131,53 @@ test('nextInSequence steps over a question the student deselected', () => {
   assert.equal(next, null, `q_order ${pool[0] + 1} was deselected, so there is nothing after it`);
 });
 
+// ── The import's real shape: a quota section, an answer-all section with no row
+
+test('the paper’s opening section leads even though the import wrote no rule row for it', async () => {
+  // The importer stores a rule only when there is one: an answer-all section
+  // gets NO exam_sections row at all (pinned in selection-rules.test.js —
+  // "answer-all is not a rule"). The draw used to read that missing row as
+  // position 9999 and sorted the quota section FIRST: entry landed straight on
+  // the selector while the opening section's questions were still unanswered,
+  // and while the card was open every answer typed at those questions was
+  // swallowed as a failed pick. Found by walking a real imported paper.
+  const eid = paperExam([
+    { type: 'objective', compulsory: false, section: 'a' },
+    { type: 'objective', compulsory: false, section: 'a' },
+    { type: 'objective', compulsory: false, section: 'a' },
+    { type: 'theory', compulsory: false, section: 'b' },
+    { type: 'theory', compulsory: false, section: 'b' },
+    { type: 'theory', compulsory: false, section: 'b' },
+  ]);
+  rule(eid, 'b', 'SECTION B', 2);
+  assert.equal(
+    db.prepare('SELECT COUNT(*) c FROM exam_sections WHERE exam_id=?').get(eid).c,
+    1,
+    'only the quota section has a row — exactly what an import leaves behind'
+  );
+
+  const studentId = db.prepare('INSERT INTO students(phone) VALUES (?)').run('233lead0001').lastInsertRowid;
+  const sid = examSvc.createSession(eid, studentId);
+
+  const drawn = db
+    .prepare('SELECT section_key FROM session_questions WHERE session_id=? ORDER BY q_order')
+    .all(sid.id)
+    .map((r) => r.section_key);
+  assert.deepEqual(
+    drawn, ['a', 'a', 'a', 'b', 'b', 'b'],
+    'the paper’s own opening section is drawn first, so question 1 is an answer-all question, not the selector'
+  );
+
+  // And what the student meets first: no choice to make at question 1.
+  const first = db.prepare('SELECT question_id, q_order FROM session_questions WHERE session_id=? AND q_order=1').get(sid.id);
+  const poolRow = db.prepare('SELECT * FROM question_pool WHERE id=?').get(first.question_id);
+  assert.equal(poolRow.section_key, 'a', 'the first delivered question belongs to the opening section');
+  assert.equal(
+    selection.needsChoice(sid, poolRow), false,
+    'delivery at question 1 must not open a selector for a later section'
+  );
+});
+
 // ── Task 9: the whole paper, walked end to end ─────────────────────────
 
 test('a selective paper is walked end to end: compulsory first, then the choice', async () => {
