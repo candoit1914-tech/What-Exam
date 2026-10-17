@@ -1719,12 +1719,27 @@ Rules:
 - COMPACT OUTPUT: keep option text short, leave explanation and learning_objective empty, and do not repeat the passage for later questions. Output ONLY the JSON object.
 `;
 
+  // The marking scheme is only useful to a block whose questions it describes.
+  // Quoting it to EVERY block is what made a 300-character literature extract
+  // answer with the solutions of the writing section instead: the model, handed
+  // a large "Question 1 — Letter to your father" quote next to two lines about a
+  // play, returned the quote as question 1. Two conditions keep it where it
+  // belongs — the block must contain a NUMBERED question (a paper's model
+  // answers are keyed by number, and a block of only "(a)"…"(j)" parts cannot
+  // match one), and it must not be an MCQ block (objective answers come from the
+  // answer key above, so the scheme there is pure noise).
+  const schemeApplies = (block) => {
+    if (!markingScheme) return false;
+    if (!/(^|\n)\s*\d{1,3}[.)]/.test(block)) return false;
+    return (block.match(/(^|\n)\s*[A-D][.)]\s/g) || []).length < 4;
+  };
+
   const user = (block, shared) => [
     'Extract every question from the document block below.',
     answerKey
       ? `\nThe document includes this answer key (use it to fill correct_answer — the option LETTER — and correct_index for the matching questions):\n${answerKey}`
       : '',
-    markingScheme
+    schemeApplies(block)
       ? `\nThe document includes this marking scheme / model answers (use it VERBATIM to fill model_answer, key_points and rubric for the matching theory questions):\n${markingScheme}`
       : '',
     shared
@@ -2007,6 +2022,29 @@ Rules:
     return extras.length ? [...list, ...extras] : list;
   };
 
+  // ── The marking scheme is not a source of questions ──────────────────
+  //
+  // The prompt quotes the document's own model answers so the model can fill
+  // model_answer/key_points VERBATIM. It still happens that the model hands
+  // those SOLUTIONS back as if they were questions — "Letter to your father"
+  // arrived as question 1 of a literature block, complete with the writing
+  // section's header, while its passage was a play extract.
+  //
+  // The test is block-local, which makes it precise where a test against the
+  // whole paper is not: "letter to your father" occurs in the PAPER too (inside
+  // the real Question 1 stem), so a paper-wide check would have let the leak
+  // through. A question returned from a block must be written IN that block;
+  // text that is not, but IS one of the quoted solutions, was read out of the
+  // prompt itself and is not a question of this exam.
+  const squash = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  const solutionBody = squash(markingScheme);
+  const isSolutionLeak = (text, block) => {
+    const t = squash(text);
+    if (t.length < 12) return false;                 // too short to judge; limbs decide
+    if (squash(block).includes(t)) return false;     // written in this block -> real
+    return solutionBody.includes(t);
+  };
+
   const seen = new Set();
   const all = [];
   for (let i = 0; i < settled.length; i++) {
@@ -2018,6 +2056,40 @@ Rules:
     let headerDone = false;
     for (const q of list || []) {
       if (q && typeof q === 'object') {
+        // Strip solution text out of the limbs too, then drop an entry whose
+        // stem is a solution line (and, once its limbs are gone, has nothing
+        // left to ask).
+        if (Array.isArray(q.follow_ups)) {
+          const stem = squash(q.text);
+          q.follow_ups = q.follow_ups.filter((fu) => {
+            const ft = squash(fu && fu.text);
+            if (!ft) return false;              // an empty limb renders nothing
+            if (stem && ft === stem) return false; // the stem repeated as its own part
+            return !isSolutionLeak(fu && fu.text, bp.block);
+          });
+        }
+        if (isSolutionLeak(q.text, bp.block)) {
+          continue; // a line of the ANSWER, not a question of the exam
+        }
+        // A literature/extract group is printed as:
+        //   "AUTHOR: Title"
+        //   "Read the following extract carefully and answer Questions 5(c) and 5(d). <extract>"
+        //   "(c) <question>"
+        //   "(d) <question>"
+        // The model is split about which of the first two lines is the "stem": it
+        // sometimes returns the AUTHOR: Title line as text and buries every real
+        // question in the limbs. AUTHOR: Title is a label, not a question — it
+        // never ends in ? or a verb a student could act on — so when it lands as
+        // the stem, promote the extract's own instruction line to the stem. The
+        // questions already survive as limbs either way.
+        if (q.type === 'theory' && Array.isArray(q.follow_ups) && q.follow_ups.length) {
+          const stem = String(q.text || '').replace(/\s+/g, ' ').trim();
+          const isLabel = stem.length > 0 && !/[?]/.test(stem) && /^[^:]{1,60}:\s*\S/.test(stem);
+          if (isLabel && bp.block) {
+            const m = String(bp.block).match(/(Read the following extract[^\n]*)/i);
+            if (m && m[1] && squash(m[1]) !== squash(stem)) q.text = m[1].trim();
+          }
+        }
         // Attach passage/instructions to every question. Prefer the passage the
         // AI attached (first question of a group), then carry that forward to
         // the following questions of the group, and fall back to this block's
@@ -2049,10 +2121,27 @@ Rules:
         .replace(/\s+/g, ' ')
         .trim()
         .toLowerCase();
-      if (t && !seen.has(t)) {
-        seen.add(t);
-        all.push(q);
-        questionsByBlock[i].push(q);
+      // A gap-fill paper repeats the SAME carrier sentence for every blank
+      // ("One can also watch videos of -34-, … -35- …"), so keying the dedupe
+      // on the text alone silently deleted every later question that shared
+      // its wording — Q35 vanished because Q34 said the same sentence. The
+      // number is what makes two identically-worded entries different
+      // questions, so it joins the key. An entry with no stem still has its
+      // limbs to identify it and must be kept: the model folds a heading's
+      // sub-questions under an empty heading, and dropping those threw the
+      // real questions away.
+      const limbs = Array.isArray(q && q.follow_ups) ? q.follow_ups : [];
+      const limbKey = limbs
+        .map((fu) => String((fu && fu.text) || '').replace(/\s+/g, ' ').trim().toLowerCase())
+        .join('');
+      const identity = t || (limbKey ? `limbs:${limbKey}` : '');
+      if (identity) {
+        const dedupeKey = `${q && q.type ? q.type : ''}|${Number(q && q.number) || 0}|${identity}`;
+        if (!seen.has(dedupeKey)) {
+          seen.add(dedupeKey);
+          all.push(q);
+          questionsByBlock[i].push(q);
+        }
       }
     }
   }
@@ -2256,12 +2345,35 @@ const CONTEXT_START =
  * NOT treated as trailing context: a reading passage that follows a group of
  * questions is carried to the next block, but Q5's own options stay with Q5.
  */
+// A section/part/paper header — the line that means "something new starts
+// here", so it is never part of the stem of the number above it.
+const NEW_SECTION_LINE =
+  /^\s*(?:part\s+[A-Za-z]|section\s+[A-Za-z0-9]|unit\s+[ivxIVX0-9]+|paper\s+\d|end of paper)\b/i;
+
 function trailingContext(lines) {
   let i = lines.length;
   while (i > 0) {
     const line = lines[i - 1];
     if (QUESTION_START.test(line) || OPTION_START.test(line)) break;
     i--;
+  }
+  // A paper often prints the question NUMBER on its own line ("3.") and the
+  // stem on the line after it. The walk above stops at the bare number — which
+  // matches QUESTION_START — so the stem reads as "trailing context" and is
+  // handed to the NEXT block, orphaning the number. The model is then asked to
+  // fill a number that has no question, and it answers from the marking scheme
+  // quoted in the prompt (or invents a stem), which is how one question becomes
+  // a duplicate and another turns into a line of the ANSWER. Keep the stem with
+  // its number: only a header/instruction that clearly starts something new is
+  // allowed to travel forward.
+  if (i > 0 && /^\s*\d{1,3}\s*[.)]\s*$/.test(lines[i - 1])) {
+    while (i < lines.length && !lines[i].trim()) i++; // blank lines after the number
+    while (i < lines.length) {
+      const l = lines[i];
+      if (!l.trim()) break;
+      if (QUESTION_START.test(l) || CONTEXT_START.test(l) || NEW_SECTION_LINE.test(l)) break;
+      i++;
+    }
   }
   return lines.slice(i);
 }

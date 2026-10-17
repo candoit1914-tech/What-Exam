@@ -53,6 +53,26 @@ test('trailingContext finds the non-question lines after the last question', () 
   assert.deepEqual(trail, ['', 'Extra note.']);
 });
 
+test('trailingContext keeps a bare question number with the stem printed on the next line', () => {
+  // Papers print "3." alone and the stem underneath. The bare number matches
+  // QUESTION_START, so the old walk stopped right after it and handed the stem
+  // to the NEXT block — orphaning the number, which the model then filled from
+  // the marking scheme (a duplicate) or invented a stem for (an answer line).
+  const lines = [
+    '2. Debate speech for or against the motion.',
+    '3.',
+    'Your best vacation was when you visited a friend in another part of the country.',
+    '',
+    'Part B',
+    'READ THE PASSAGE AND ANSWER ALL QUESTIONS THAT FOLLOW.',
+  ];
+  const trail = ai.trailingContext(lines);
+  // "Part B" and the instruction below it start something new and may travel
+  // forward; the stem of 3. must not.
+  assert.deepEqual(trail, ['', 'Part B', 'READ THE PASSAGE AND ANSWER ALL QUESTIONS THAT FOLLOW.']);
+  assert.ok(!trail.some((l) => /best vacation/.test(l)), 'the stem of Q3 stays with its number');
+});
+
 test('splitIntoBlocks breaks at section instructions so they lead the next block', () => {
   const paper = [
     '1. One plus one?',
@@ -1388,6 +1408,60 @@ test('extractQuestionsFromText recovers a block every AI call failed, with no AI
     assert.ok(calls.n >= 1, 'the model was still asked before falling back');
     assert.equal(warnings.length, 1, 'the recovery is reported, once');
     assert.match(warnings[0], /recovered with basic text parsing/);
+  } finally {
+    ai.chatJSON = orig;
+  }
+});
+
+test('extractQuestionsFromText never returns a marking-solutions line as a question', async () => {
+  // The prompt quotes the paper's model answers so the model can fill
+  // model_answer VERBATIM. A small theory block tempts it to hand one back as a
+  // question — but a real question is written IN its own block, while a
+  // solutions line appears only in the quoted scheme. The guard is block-local
+  // on purpose: "Letter to your father" also occurs inside the real Q1 stem
+  // elsewhere in the paper, so a paper-wide check would have let it through.
+  const doc = [
+    '1. Which town hosts the school feast?',
+    'A. Kumasi B. Accra C. Tamale D. Sunyani',
+    '2. The school feast is held in _____.',
+    'A. April B. May C. June D. July',
+    '3.',
+    'Write a letter to your father asking for an extension of TV time.',
+    '',
+    'MODEL SOLUTIONS',
+    'Question 1 - Letter to your father. Use the informal-letter format with a salutation, a suitable subscription and your first name.',
+    'Question 2 - Debate speech. Open with vocatives and address the panel of judges.',
+  ].join('\n');
+
+  const orig = ai.chatJSON;
+  const prompts = [];
+  ai.chatJSON = async (messages) => {
+    const body = messages.map((m) => m.content).join('\n');
+    prompts.push(body);
+    // Q1's real stem (a question the paper actually prints) must survive even
+    // though the phrase also appears in the quoted scheme.
+    if (/Which town hosts the school feast/.test(body)) {
+      return { questions: [{ type: 'objective', number: 1, text: 'Which town hosts the school feast?', options: ['A. Kumasi', 'B. Accra', 'C. Tamale', 'D. Sunyani'], correct_answer: 'A', correct_index: 0 }] };
+    }
+    if (/Write a letter to your father/.test(body)) {
+      // The model returns a SOLUTIONS line that was never written in this block.
+      return { questions: [{ type: 'theory', number: 3, text: 'Question 1 - Letter to your father. Use the informal-letter format with a salutation, a suitable subscription and your first name.', follow_ups: [] }] };
+    }
+    return { questions: [] };
+  };
+  try {
+    const out = await ai.extractQuestionsFromText(doc);
+    const theory = out.filter((q) => q.type === 'theory');
+    assert.equal(theory.length, 0, 'the solutions line is dropped, not imported as a question');
+    const kept1 = out.find((q) => q.number === 1);
+    assert.ok(kept1, 'the real Q1 stem, though it shares wording with the scheme, is kept');
+    assert.match(kept1.text, /Which town hosts the school feast/);
+    // The scheme is quoted only to a block that can match it by number and is
+    // not an MCQ block, so a solutions quote must reach the theory block.
+    assert.ok(
+      prompts.some((p) => /Letter to your father/.test(p)),
+      'the scheme is still quoted where it can apply'
+    );
   } finally {
     ai.chatJSON = orig;
   }
