@@ -518,6 +518,44 @@ test('stripSourceWatermarks collapses the vertically-arranged one-word-per-line 
   assert.match(out, /Question one\?/, 'question text kept');
 });
 
+test('stripSourceWatermarks removes a watermark set one LETTER per vertical line', () => {
+  // A print-site watermark stacked one letter per line spells DOWNLOADED FROM.
+  const letters = 'D\nO\nW\nN\nL\nO\nA\nD\nE\nD\nF\nR\nO\nM'.split('\n');
+  const input = ['Study the diagram.', ...letters, 's r o n u .', 'c o m', '1. What is photosynthesis?'].join('\n');
+  const out = stripSourceWatermarks(input);
+  assert.doesNotMatch(out, /sronu/i, 'spaced site name removed');
+  assert.doesNotMatch(out, /\bc\b|\bo\b|\bm\b/i, 'spaced com fragment removed');
+  // The lone-letter run is gone because it spells a watermark word.
+  assert.doesNotMatch(out, /^D$/m, 'vertical letter D removed');
+  assert.match(out, /Study the diagram\./, 'question stem kept');
+  assert.match(out, /What is photosynthesis/, 'the real question kept');
+});
+
+test('stripSourceWatermarks keeps a lone-letter column that is not a watermark', () => {
+  // A legitimate stacked list (A/B/C answers, chemistry symbols) must survive:
+  // it does not spell DOWNLOADED/SRONU.
+  const input = 'Label the steps.\nA\nB\nC\n3. Order the steps.';
+  const out = stripSourceWatermarks(input);
+  assert.match(out, /^A$/m, 'legitimate lone letter A kept');
+  assert.match(out, /^C$/m, 'legitimate lone letter C kept');
+});
+
+test('stripSourceWatermarks cuts a letter-spaced watermark token glued to a real line', () => {
+  // The renderer sometimes glues "c o m" onto the front of genuine content.
+  const out = stripSourceWatermarks('c o m young ones to save them from vices.');
+  assert.doesNotMatch(out, /\bc\s+o\s+m\b/i, 'glued com token removed');
+  assert.match(out, /young ones to save them from vices\./, 'real content behind it kept');
+
+  const out2 = stripSourceWatermarks('s r o n u . 2026 BECE');
+  assert.doesNotMatch(out2, /sronu/i, 'glued sronu token removed');
+  assert.match(out2, /2026 BECE/, 'the page header behind it kept');
+});
+
+test('stripSourceWatermarks never rewrites a line that merely starts with normal words', () => {
+  const out = stripSourceWatermarks('Come to the hall for the meeting.');
+  assert.equal(out, 'Come to the hall for the meeting.', 'ordinary prose untouched');
+});
+
 test('stripSourceWatermarks keeps legitimate prose that merely mentions a website', () => {
   const out = stripSourceWatermarks('The school website www.ghschools.gov.gh published the timetable for this term.');
   assert.match(out, /www\.ghschools\.gov\.gh/, 'mid-sentence URL survives');

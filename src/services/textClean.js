@@ -13,12 +13,76 @@ const FRAGMENT = /^(downloaded|from)$/i;
 const URL_LINE =
   /^(?:https?:\/\/)?(?:www\.)?[a-z0-9][a-z0-9.-]*\.(?:com|org|net|gh|edu|co)(?:\/[\w./-]*)?$/i;
 
+// A print-site watermark set VERTICALLY, one LETTER per line, reads as a run
+// of lone letters — "D" "O" "W" "N" "L" "O" "A" "D" "E" "D" "F" "R" "O" "M"
+// spells DOWNLOADED FROM. No exam content stacks single letters like that, so
+// a run is dropped WHOLE, but only when the letters it spells actually contain
+// a watermark word: a stray "A", a lone "(i)", or a column of chemistry
+// symbols is never touched, because those runs never spell DOWNLOADED/SRONU.
+const LONE_LETTER = /^[A-Za-z]$/;
+const VERTICAL_WATERMARK =
+  /DOWNLOADED|SRONU|CONFIDENTIAL|WATERMARK|PROTECTED|PIRAC|COPYRIGHT|DISTRIBUT/i;
+
+// The same watermark LETTER-SPACED across a line: "s r o n u ." / "c o m" /
+// "p a p e r s .". A line is considered only when it really is letter-spaced
+// (every character separated by blanks), then its spacing/punctuation is
+// collapsed — and the line is dropped only if that collapsed token is itself
+// a watermark/domain word. So "a b c" in a puzzle survives (it collapses to
+// "abc", not a watermark), and ordinary prose is never collapsed at all.
+const LETTER_SPACED = /^(?:[A-Za-z]\s+){2,}[A-Za-z](?:\s*[.,;:!?])?\s*$/;
+const SPACED_TOKEN = /^(?:sronu|papers?|downloaded|from|www|https?|com|net|org|gh|edu|co)$/i;
+
+// The renderer sometimes glues a letter-spaced watermark token onto the FRONT
+// of a real line ("c o m young ones…", "s r o n u . 2026 BECE"). Only a
+// LEADING token is stripped, only when it is letter-spaced AND collapses to a
+// watermark/domain word AND genuine content follows it — so a line that merely
+// begins with normal words is never rewritten.
+const LEADING_SPACED = /^((?:[A-Za-z]\s+){2,}[A-Za-z](?:\s*[.,;:!?])?)\s+/;
+
+function stripLeadingSpacedToken(line) {
+  const m = LEADING_SPACED.exec(line);
+  if (!m) return line;
+  const collapsed = m[1].replace(/[\s.]+/g, '').toLowerCase();
+  if (!SPACED_TOKEN.test(collapsed)) return line;
+  return line.slice(m[0].length);
+}
+
 function stripSourceWatermarks(text) {
   const lines = String(text || '').split(/\r?\n/);
-  const kept = lines.filter((line) => {
+
+  // Pass 1 — mark the lone-letter runs that spell a watermark word. A run is a
+  // maximal stretch of consecutive lone-letter lines; it is removed whole, and
+  // only when the letters it spells contain a watermark term.
+  const dropRun = new Array(lines.length).fill(false);
+  for (let i = 0; i < lines.length; ) {
+    if (!LONE_LETTER.test(lines[i].trim())) { i++; continue; }
+    let j = i;
+    let spelled = '';
+    while (j < lines.length && LONE_LETTER.test(lines[j].trim())) {
+      spelled += lines[j].trim().toUpperCase();
+      j++;
+    }
+    if (spelled.length >= 3 && VERTICAL_WATERMARK.test(spelled)) {
+      for (let k = i; k < j; k++) dropRun[k] = true;
+    }
+    i = j;
+  }
+
+  const kept = lines.filter((line, idx) => {
+    if (dropRun[idx]) return false;
     const l = line.trim();
     if (!l) return true; // blank lines are collapsed below, not dropped
-    return !(WATERMARK.test(l) || FRAGMENT.test(l) || URL_LINE.test(l));
+    if (WATERMARK.test(l) || FRAGMENT.test(l) || URL_LINE.test(l)) return false;
+    if (LETTER_SPACED.test(l)) {
+      const collapsed = l.replace(/[\s.]+/g, '').toLowerCase();
+      if (SPACED_TOKEN.test(collapsed)) return false;
+    }
+    return true;
+  }).map((line) => {
+    // A watermark token glued to the FRONT of a real line is cut away; the
+    // real content behind it survives untouched.
+    const stripped = stripLeadingSpacedToken(line);
+    return stripped.trim() ? stripped : '';
   });
   return kept.join('\n').replace(/\n{2,}/g, '\n').trim();
 }
