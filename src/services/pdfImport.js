@@ -587,6 +587,36 @@ async function startJob(jobId, buffer, opts = {}) {
       updateJob(jobId, { count: filtered.length });
     }
 
+    // An INSTRUCTION is not a question. The paper prints directives — "Answer
+    // all questions in this section", "INSTRUCTIONS: ..." — that the extractor
+    // can hand back as if they were questions. stripPaperFurniture reduces such
+    // a directive to an EMPTY string, and without this check that empty entry
+    // would be saved as a question with no text and sent to the student. Drop
+    // any entry whose cleaned stem is empty AND that carries no limbs (a real
+    // question's parts would survive even if its stem read like an instruction).
+    // This runs BEFORE the answer-key pass so objective indexing stays aligned.
+    const beforeInstructionFilter = filtered.length;
+    filtered = filtered.filter((q) => {
+      const cleaned = stripPaperFurniture(stripSourceWatermarks(String(q.text || '')));
+      if (cleaned.trim()) return true;
+      // Stem was pure instruction — keep it only if it still has real limbs.
+      return Array.isArray(q.follow_ups) && q.follow_ups.length > 0;
+    });
+    const droppedInstructions = beforeInstructionFilter - filtered.length;
+    if (droppedInstructions > 0) {
+      console.log(`[pdfImport] dropped ${droppedInstructions} instruction line(s) parsed as questions`);
+      updateJob(jobId, { count: filtered.length });
+    }
+    // If the extractor handed back NOTHING but instructions, importing an empty
+    // paper would be worse than failing loudly: the admin needs to know the
+    // document had no real questions to extract.
+    if (!filtered.length) {
+      throw new Error(
+        'No real questions could be extracted from this PDF — every entry the parser returned was an instruction line. ' +
+        'Check that the upload is an exam paper with numbered questions.'
+      );
+    }
+
     // Estimate from the parseable (cleaned) text — the raw text still contains
     // the solutions/answer-key section, whose "1. B." lines would inflate the
     // count and produce a false "questions missing" warning. The estimate
