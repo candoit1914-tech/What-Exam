@@ -2,6 +2,7 @@ const db = require('../db');
 const pdf = require('./pdf');
 const ai = require('./ai');
 const marking = require('./marking');
+const selection = require('./selection');
 const path = require('path');
 const config = require('../config');
 const { stripSourceWatermarks, stripPaperFurniture } = require('./textClean');
@@ -914,6 +915,19 @@ async function startJob(jobId, buffer, opts = {}) {
     } catch (err) {
       // A rule we cannot read must never fail an otherwise good import.
       console.error('[pdfImport] selection rules failed (continuing):', err.message);
+    }
+
+    // A paper that never states a choice still gets one: a theory block of
+    // about six or seven questions becomes "question 1 compulsory, answer any
+    // N" — the same default an AI-generated exam receives. Only blocks no
+    // instruction line and no compulsory flag ever spoke for are touched, so a
+    // paper whose rules WERE read keeps them verbatim.
+    try {
+      selection.applyDefaultTheoryRule(job.exam_id);
+    } catch (err) {
+      // Same law as every rule step: a rule we cannot write must never fail an
+      // otherwise good import.
+      console.error('[pdfImport] default theory rule failed (continuing):', err.message);
     }
 
     marking.recomputeExamTotal(job.exam_id);

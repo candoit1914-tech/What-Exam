@@ -363,6 +363,45 @@ New `test/question-selection.test.js` and `test/selection-rules.test.js`, using 
     the right question compulsory, and an extraction with no section data writes no
     rule at all.
 
+## The default theory rule
+
+The rule discovery in §2 depends on the paper *stating* a limit. Two common
+papers never do: an **AI-generated exam** (the generator writes questions, not
+instructions) and an **upload whose paper carries no "Answer any N" line**. For
+those, the platform now writes the default rule itself —
+`selection.applyDefaultTheoryRule(examId)`:
+
+| Theory block | Compulsory | Chosen | Answered |
+|---|---|---|---|
+| 6 questions | question 1 | 3 of the other 5 | **4** |
+| 7 questions | question 1 | 4 of the other 6 | **5** |
+
+Generally `answered = 1 + ⌈n/2⌉`, applied to a block of **5–8** theory
+questions ("about six or seven"). A block of 4 or fewer is small enough to
+answer in full; a longer one is a question bank the admin must rule on by hand.
+
+Guarantees:
+
+- **Two gates, both must be shut.** The default writes nothing when the block
+  already has a live `exam_sections` rule, or when any of its questions is
+  already marked optional — a default fills a silence, it never overwrites a
+  decision made by the paper, an import reconciliation or an admin. An untagged
+  block is checked against the `theory` key too, so a second generation
+  appending to an already-ruled exam never reprices the existing rule.
+- **Objectives are untouched.** Only `type = 'theory'` rows join the block, and
+  section ordering (§3e) still delivers objectives first because a section
+  starts where its first question sits in the paper.
+- **Pool variants join as options**, never as compulsory questions — a variant
+  the paper never numbered must be refuseable like any other choice.
+- **Called from three places:** the generate route (`POST /exams/:id/generate`),
+  the import job (after §2's reconciliation, inside the same "never fail a good
+  import" guard), and the admin one-click `POST /exams/:id/selection-default`,
+  which gives papers created before this rule existed the same behaviour
+  without regenerating or re-uploading them. Live/ended exams are refused —
+  students already in them are priced.
+
+Every value stays overridable on the Selection rules card (§5).
+
 ## Non-goals
 
 - Nested or weighted section hierarchies.

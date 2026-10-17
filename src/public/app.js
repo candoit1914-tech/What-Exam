@@ -695,14 +695,22 @@ function setTab(tab) {
 /** <summary>for a rule row, using the resolved pool the server reported. */
 function selectionRulesCardHTML(examId, sections, selection, questions, pricing) {
   const rows = SelectionUI.ruleRows(sections, selection, questions);
+  const editable = examState.data.exam && !['live', 'ended'].includes(examState.data.exam.status);
+  // The one-click default: a theory block of 5–8 questions that carries no rule
+  // becomes "question 1 compulsory, answer any N of them" — the rule every
+  // upload and every AI generation now gets automatically, offered here for
+  // papers created before that was true.
+  const offerButton = editable
+    ? `<button class="btn btn-ghost" onclick="applyTheoryChoiceRule(${examId})">✨ Offer a choice on the theory questions</button>`
+    : '';
   if (!rows.length) {
     return `<div class="card" style="margin-top:14px">
       <h3 style="margin-bottom:4px">SELECTION <span class="gr">RULES</span></h3>
       <p class="muted qmeta">No section limits which questions a student answers &mdash; everyone answers everything.
       Give some questions a Section above, untick <em>Compulsory</em>, then set a quota here to offer a choice.</p>
+      ${offerButton ? `<div class="row" style="margin-top:10px">${offerButton}</div>` : ''}
     </div>`;
   }
-  const editable = examState.data.exam && !['live', 'ended'].includes(examState.data.exam.status);
   // Whether the compulsory questions plus the quota still add up to the whole
   // paper's marks. Computed server-side, so it is the same number the student
   // is priced against — never a second opinion from the browser.
@@ -722,8 +730,22 @@ function selectionRulesCardHTML(examId, sections, selection, questions, pricing)
     </div>`).join('')}
     ${editable ? `<div class="row" style="margin-top:14px">
       <button class="btn btn-primary" onclick="saveSelectionRules(${examId})">Save selection rules</button>
+      ${offerButton}
     </div>` : '<p class="muted qmeta">This exam is live, so selection rules can no longer be edited.</p>'}
   </div>`;
+}
+
+/** One-click fix: write the default theory choice rule onto this exam. */
+async function applyTheoryChoiceRule(examId) {
+  let out;
+  try {
+    out = await api(`/api/exams/${examId}/selection-default`, { method: 'POST' });
+  } catch (e) { toast(e.message, true); return; }
+  invalidateCache(`/api/exams/${examId}`);
+  toast(out.applied
+    ? 'Theory choice rule applied — question 1 compulsory, the rest chosen.'
+    : 'No theory block of 5–8 questions without a rule was found on this exam.');
+  renderExam(examId);
 }
 
 async function saveSelectionRules(examId) {

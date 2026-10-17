@@ -363,6 +363,128 @@ function pricingSummary(examId) {
   };
 }
 
+// ── The default theory rule ────────────────────────────────────────────
+//
+// A paper that never states a choice still has to behave like the exam it is.
+// A theory block of about six or seven questions is a menu, not a marathon:
+// QUESTION 1 IS COMPULSORY and the student picks from the rest until they are
+// answering roughly two thirds of the block. Two sources never state it — an
+// AI-generated exam (the generator writes questions, not instructions) and an
+// upload whose paper carries no "Answer any N" line — so both get this default
+// written for them, and both remain fully overridable on the Selection rules
+// card afterwards.
+//
+//   n theory questions  ->  answered: 1 + ceil(n / 2)   (6 → 4, 7 → 5)
+//
+// Two gates must BOTH be shut before the default touches a block:
+//
+//   - no live exam_sections rule already covers the block, and
+//   - not one question of the block is marked optional yet.
+//
+// Either gate open means someone — the paper's own instructions, an import
+// reconciliation, an admin — has already spoken for this block, and a default
+// must fill a silence, never overwrite a decision.
+
+const DEFAULT_MIN_THEORY = 5;
+const DEFAULT_MAX_THEORY = 8;
+const THEORY_SECTION_KEY = 'theory';
+
+/** 6 questions → 4 answered (question 1 plus three chosen); 7 → 5. */
+function defaultAnswerCount(n) {
+  return 1 + Math.ceil(n / 2);
+}
+
+/** `section-b` → `SECTION B` — the label a student and an admin both read. */
+function prettySectionTitle(key) {
+  return String(key || '').replace(/[-_]+/g, ' ').trim().toUpperCase();
+}
+
+/**
+ * Write the default theory rule onto every block of an exam that has no rule
+ * of its own. Template space: it edits `questions` (and any pool variants
+ * written before it ran), so every session drawn afterwards inherits the rule
+ * through the normal draw path. Returns the number of blocks ruled.
+ */
+function applyDefaultTheoryRule(examId) {
+  const ruled = new Set(
+    sectionsForExam(examId)
+      .filter((s) => Number(s.answer_count) > 0)
+      .map((s) => s.section_key)
+  );
+  // Group the theory questions the way the paper would: by the section the
+  // import (or an admin) already gave them, with the unsectioned ones — every
+  // AI-generated block — under the empty key.
+  const groups = new Map();
+  for (const q of db
+    .prepare(
+      `SELECT id, q_order, source_number, section_key, is_compulsory
+         FROM questions WHERE exam_id = ? AND type = 'theory' ORDER BY q_order`
+    )
+    .all(examId)) {
+    const key = String(q.section_key || '').trim();
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(q);
+  }
+  // One position past every rule the exam already lists, so the dashboard's
+  // section order still ends with the block this default just created. COALESCE
+  // guarantees a number, so no `||` fallback is needed — `0` is a real position.
+  let position =
+    1 + db.prepare('SELECT COALESCE(MAX(position), -1) p FROM exam_sections WHERE exam_id = ?').get(examId).p;
+
+  let applied = 0;
+  db.exec('BEGIN');
+  try {
+    for (const [key, members] of groups) {
+      if (members.some((q) => Number(q.is_compulsory) === 0)) continue; // gate 2: someone split the block
+      const n = members.length;
+      // "About six or seven": a shorter block is small enough to answer in
+      // full, a longer one is a question bank the admin must rule on by hand.
+      if (n < DEFAULT_MIN_THEORY || n > DEFAULT_MAX_THEORY) continue;
+      // Gate 1, in the key the block will actually live under: the one the
+      // import/admin already gave it, or the one this default names it by. An
+      // untagged block belongs to the THEORY rule if one exists — a second AI
+      // generation appending to an exam that is already ruled must extend the
+      // paper, never silently reprice the rule it was given.
+      const target = key || THEORY_SECTION_KEY;
+      if (ruled.has(target)) continue;
+      // The paper's own question 1 leads the block: printed number first,
+      // paper order when the print never survived extraction.
+      const first = members
+        .slice()
+        .sort((a, b) => (Number(a.source_number) || a.q_order) - (Number(b.source_number) || b.q_order))[0];
+      const setFlag = db.prepare('UPDATE questions SET is_compulsory = ?, section_key = ? WHERE id = ?');
+      for (const q of members) setFlag.run(q.id === first.id ? 1 : 0, target, q.id);
+      // Pool variants written before the rule existed (AI generation's extras)
+      // join the block as OPTIONS, never as compulsory questions: a variant
+      // that arrived compulsory would force a question the paper never
+      // numbered, and every drawn copy of it would be unanswerable-by-refusal.
+      db.prepare(
+        `UPDATE question_pool SET is_compulsory = 0, section_key = ?
+          WHERE exam_id = ? AND type = 'theory' AND COALESCE(section_key, '') = ''`
+      ).run(target, examId);
+      const answerCount = defaultAnswerCount(n);
+      db.prepare(
+        `INSERT INTO exam_sections(exam_id, section_key, title, instructions, position, answer_count)
+         VALUES (?,?,?,?,?,?)
+         ON CONFLICT(exam_id, section_key) DO UPDATE SET answer_count = excluded.answer_count`
+      ).run(
+        examId, target, prettySectionTitle(target),
+        `Question 1 is compulsory — answer any ${answerCount} questions.`,
+        position++, answerCount
+      );
+      applied++;
+    }
+    db.exec('COMMIT');
+  } catch (err) {
+    db.exec('ROLLBACK');
+    throw err;
+  }
+  if (applied) {
+    console.log(`[selection] default theory rule applied to ${applied} section(s) of exam ${examId}`);
+  }
+  return applied;
+}
+
 /**
  * Commit the student's choice for one section and re-price the paper.
  *
@@ -905,6 +1027,11 @@ module.exports = {
   computePaperTotal,
   answerableCount,
   pricingSummary,
+  applyDefaultTheoryRule,
+  DEFAULT_MIN_THEORY,
+  DEFAULT_MAX_THEORY,
+  THEORY_SECTION_KEY,
+  defaultAnswerCount,
   applySelection,
   beginChoice,
   openChoice,

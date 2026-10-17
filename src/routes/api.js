@@ -1100,9 +1100,41 @@ router.post('/exams/:id/generate', asyncWrap(async (req, res) => {
         );
     }
   }
+  // A generated paper carries no "Answer any N" of its own — the generator
+  // writes questions, not instructions — so the theory block gets the default
+  // choice: QUESTION 1 COMPULSORY, the rest chosen from (6 questions → answer
+  // 4, 7 → answer 5). Same rule an upload receives when its paper never states
+  // one, and the admin can still override every value on the Selection rules
+  // card. A rule we cannot write must never fail a good generation.
+  try {
+    selection.applyDefaultTheoryRule(exam.id);
+  } catch (err) {
+    console.error('[generate] default theory rule failed (continuing):', err.message);
+  }
   marking.recomputeExamTotal(exam.id);
   res.json({ ok: true, count: created.length, poolCount: variants.length, questions: created });
 }));
+
+/**
+ * Give an exam the default theory choice rule NOW, without regenerating or
+ * re-uploading anything — the one-click fix for a paper that was created
+ * before the rule existed, or whose upload stated no instruction line.
+ */
+router.post('/exams/:id/selection-default', (req, res) => {
+  const exam = db.prepare('SELECT * FROM exams WHERE id = ?').get(req.params.id);
+  if (!exam) return res.status(404).json({ error: 'Exam not found' });
+  if (exam.status === 'live' || exam.status === 'ended') {
+    return res.status(400).json({ error: 'Exam is already live/ended.' });
+  }
+  const applied = selection.applyDefaultTheoryRule(exam.id);
+  res.json({
+    ok: true,
+    applied,
+    sections: db.prepare('SELECT * FROM exam_sections WHERE exam_id = ? ORDER BY position, id').all(exam.id),
+    selection: selection.sectionPlan(exam.id),
+    pricing: selection.pricingSummary(exam.id),
+  });
+});
 
 // ── Exam paper upload (background job) ─────────────────────────────────
 // One endpoint for every accepted format: PDF, Word (.docx), Excel (.xlsx),
