@@ -98,4 +98,61 @@ function buildZip(entries, now = new Date()) {
   return Buffer.concat([...locals, centralBuf, eocd]);
 }
 
-module.exports = { buildZip };
+/**
+ * Read a ZIP and return its entries as { name: Buffer }. The inverse of
+ * buildZip, used to pull the XML parts out of a .docx/.xlsx upload.
+ *
+ * Walks the central directory (not the local headers) because that is the one
+ * structure every compliant writer — Word, Excel, LibreOffice — puts at a
+ * findable offset: the End Of Central Directory record is the last 22 bytes
+ * (plus an optional comment), scanned back from the end. A file this reader
+ * cannot parse is one we want to fail loudly on rather than guess at.
+ *
+ * @param {Buffer} buf
+ * @returns {Record<string, Buffer>}
+ */
+function readZip(buf) {
+  if (!Buffer.isBuffer(buf) || buf.length < 22) throw new Error('not a ZIP: too short');
+  // EOCD is the last record; scan back over its (bounded) comment field.
+  let p = -1;
+  const scanFrom = Math.max(0, buf.length - 22 - 0xffff);
+  for (let i = buf.length - 22; i >= scanFrom; i--) {
+    if (buf.readUInt32LE(i) === SIG_EOCD) { p = i; break; }
+  }
+  if (p < 0) throw new Error('not a ZIP: no end-of-central-directory record');
+
+  const count = buf.readUInt16LE(p + 10);
+  let q = buf.readUInt32LE(p + 16); // central directory offset
+  const out = {};
+  for (let n = 0; n < count; n++) {
+    if (q + 46 > buf.length || buf.readUInt32LE(q) !== SIG_CENTRAL) {
+      throw new Error('corrupt ZIP: bad central directory entry');
+    }
+    const method = buf.readUInt16LE(q + 10);
+    const compressed = buf.readUInt32LE(q + 20);
+    const nameLen = buf.readUInt16LE(q + 28);
+    const extraLen = buf.readUInt16LE(q + 30);
+    const commentLen = buf.readUInt16LE(q + 32);
+    const localOffset = buf.readUInt32LE(q + 42);
+    const name = buf.toString('utf8', q + 46, q + 46 + nameLen);
+
+    // The local header repeats the name/extra lengths, so its payload start is
+    // not at a fixed offset — read them rather than assuming.
+    if (localOffset + 30 > buf.length || buf.readUInt32LE(localOffset) !== SIG_LOCAL) {
+      throw new Error(`corrupt ZIP: bad local header for ${name}`);
+    }
+    const lNameLen = buf.readUInt16LE(localOffset + 26);
+    const lExtraLen = buf.readUInt16LE(localOffset + 28);
+    const start = localOffset + 30 + lNameLen + lExtraLen;
+    const payload = buf.subarray(start, start + compressed);
+
+    if (method === 0) out[name] = Buffer.from(payload);
+    else if (method === METHOD_DEFLATE) out[name] = zlib.inflateRawSync(payload);
+    else throw new Error(`unsupported ZIP compression method ${method} for ${name}`);
+
+    q += 46 + nameLen + extraLen + commentLen;
+  }
+  return out;
+}
+
+module.exports = { buildZip, readZip };

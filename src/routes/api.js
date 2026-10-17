@@ -8,6 +8,7 @@ const marking = require('../services/marking');
 const selection = require('../services/selection');
 const pdf = require('../services/pdf');
 const pdfImport = require('../services/pdfImport');
+const document = require('../services/document');
 const examService = require('../services/exam');
 const studentsService = require('../services/students');
 const payments = require('../services/payments');
@@ -1103,7 +1104,12 @@ router.post('/exams/:id/generate', asyncWrap(async (req, res) => {
   res.json({ ok: true, count: created.length, poolCount: variants.length, questions: created });
 }));
 
-// ── PDF upload (background job) ───────────────────────────────────────
+// ── Exam paper upload (background job) ─────────────────────────────────
+// One endpoint for every accepted format: PDF, Word (.docx), Excel (.xlsx),
+// plain text (.txt) and JSON. The reader decides what the file is (by
+// extension, and by magic bytes for the formats that have them) and hands the
+// pipeline either raw exam text or — for JSON — questions someone already
+// structured.
 
 router.post('/exams/:id/pdf', upload.single('file'), asyncWrap(async (req, res) => {
   const exam = db.prepare('SELECT * FROM exams WHERE id = ?').get(req.params.id);
@@ -1112,8 +1118,27 @@ router.post('/exams/:id/pdf', upload.single('file'), asyncWrap(async (req, res) 
     return res.status(400).json({ error: 'Exam is already live/ended. Questions can no longer be edited.' });
   }
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
-  const magic = req.file.buffer.slice(0, 5).toString('latin1');
-  if (magic !== '%PDF-') return res.status(400).json({ error: 'Uploaded file is not a valid PDF.' });
+
+  // Read the upload into its canonical form. Every format problem (unknown
+  // extension, corrupt ZIP, malformed JSON, unreadable document) surfaces
+  // here as a message naming the format we tried, before a job is created.
+  let source;
+  try {
+    source = document.readExamSource(req.file.buffer, req.file.originalname);
+  } catch (err) {
+    return res.status(400).json({ error: err.message });
+  }
+  if (source.format === 'pdf') {
+    const magic = req.file.buffer.slice(0, 5).toString('latin1');
+    if (magic !== '%PDF-') {
+      return res.status(400).json({ error: 'Uploaded file is not a valid PDF.' });
+    }
+  }
+  if (source.text != null && !source.text.trim()) {
+    return res.status(400).json({
+      error: `No readable text could be extracted from "${req.file.originalname}". Check that the file contains an exam paper.`,
+    });
+  }
 
   const running = pdfImport.activeJobForExam(exam.id);
   if (running) {
@@ -1131,7 +1156,7 @@ router.post('/exams/:id/pdf', upload.single('file'), asyncWrap(async (req, res) 
   const jobId = pdfImport.createJob(exam.id, req.file.originalname);
   // Run off the request path: the browser gets the job id instantly and
   // polls for progress, so slow AI extraction can never hang the upload.
-  pdfImport.startJob(jobId, req.file.buffer, { typeFilter }).catch((err) => {
+  pdfImport.startJob(jobId, req.file.buffer, { typeFilter, source }).catch((err) => {
     console.error('[pdf] background job crashed:', err);
   });
   res.json({ jobId, message: 'Upload accepted. Extraction is running in the background.' });

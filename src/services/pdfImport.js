@@ -480,10 +480,10 @@ function updateJob(id, patch) {
  * problem is that nothing could be read out of it sends them to re-check a
  * file that is perfectly fine.
  *
- * @param {{text?: string, isOcr?: boolean, blockWarning?: string}} input
+ * @param {{text?: string, isOcr?: boolean, blockWarning?: string, noun?: string}} input
  * @returns {string}
  */
-function describeExtractionFailure({ text, isOcr, blockWarning } = {}) {
+function describeExtractionFailure({ text, isOcr, blockWarning, noun = 'PDF' } = {}) {
   // This branch is for a TIMEOUT, so it must not claim documents that were
   // simply unreadable. The empty-text extractor reports its own warning, which
   // arrives here as `blockWarning`; checking `blockWarning` alone relabelled an
@@ -492,7 +492,7 @@ function describeExtractionFailure({ text, isOcr, blockWarning } = {}) {
   // handled by the branch below.
   if (blockWarning && String(text || '').trim()) {
     return (
-      'No questions could be parsed from this PDF. ' +
+      `No questions could be parsed from this ${noun}. ` +
       blockWarning +
       ' The AI provider did not answer in time — try again, or raise AI_BLOCK_TIMEOUT_MS if it keeps happening.'
     );
@@ -501,8 +501,8 @@ function describeExtractionFailure({ text, isOcr, blockWarning } = {}) {
   // images, or the document had no usable text layer.
   if (!String(text || '').trim()) {
     return isOcr
-      ? 'No readable text could be extracted from this PDF. It appears to be a scan, and OCR could not read the page images clearly enough to work with. Try a higher-resolution scan, or export the PDF from the original document rather than photographing it.'
-      : 'No readable text could be extracted from this PDF, so there was nothing to build questions from. This usually means the pages are images or a scan that needs clearer imaging — try re-exporting the PDF from the original document.';
+      ? `No readable text could be extracted from this ${noun}. It appears to be a scan, and OCR could not read the page images clearly enough to work with. Try a higher-resolution scan, or export the PDF from the original document rather than photographing it.`
+      : `No readable text could be extracted from this ${noun}, so there was nothing to build questions from. This usually means the pages are images or a scan that needs clearer imaging — try re-exporting the PDF from the original document.`;
   }
   // There was plenty of readable text; it simply was not an exam paper.
   return 'The document may not contain exam questions in a recognizable format.';
@@ -521,7 +521,15 @@ async function startJob(jobId, buffer, opts = {}) {
   const job = getJob(jobId);
   if (!job) return;
   const typeFilter = Array.isArray(opts.typeFilter) && opts.typeFilter.length ? opts.typeFilter : null;
-  updateJob(jobId, { status: 'running', stage: 'Reading PDF…', progress: 2 });
+  // Every upload converges on the same pipeline; only the reader differs. A
+  // PDF is read by the page scanner (figures, markers, OCR), .txt/.docx/.xlsx
+  // arrive as plain exam text, and .json arrives as questions someone already
+  // structured — those are imported verbatim instead of re-parsed by the model.
+  const source = opts.source || { format: 'pdf' };
+  const isPdf = source.format === 'pdf';
+  const isImported = Array.isArray(source.questions);
+  const noun = isPdf ? 'PDF' : 'file';
+  updateJob(jobId, { status: 'running', stage: isPdf ? 'Reading PDF…' : 'Reading file…', progress: 2 });
 
   const created = [];
   // Every question row this job wrote, as ids. applySelectionRules re-reads them
@@ -529,15 +537,35 @@ async function startJob(jobId, buffer, opts = {}) {
   // model claimed.
   const savedRows = [];
   try {
-    const sourceText = await pdf.textWithMarkers(buffer);
-    // Pages whose own text tells the student to study a figure, but which gave
-    // the scanner nothing to assemble, get one chance with AshnaAI's vision:
-    // point at what is already printed on the page. It runs before anything
-    // reads sourceText.text/images/markers, so a rescued figure travels through
-    // extraction exactly like a geometrically found one.
-    const visionRecovered = await recoverFiguresWithVision(buffer, sourceText);
-    if (visionRecovered) {
-      console.log(`[pdfImport] vision located ${visionRecovered} figure(s) the page scan missed`);
+    let sourceText;
+    if (isImported) {
+      // Authored questions: no page to scan and no text to parse — the file
+      // already IS the questions, so only the shape of the pipeline's input
+      // needs filling in (no figures, no markers, no OCR).
+      sourceText = { text: '', images: [], markers: [], mathExprs: [], rowsByPage: [], diagnostics: {} };
+    } else if (isPdf) {
+      sourceText = await pdf.textWithMarkers(buffer);
+      // Pages whose own text tells the student to study a figure, but which gave
+      // the scanner nothing to assemble, get one chance with AshnaAI's vision:
+      // point at what is already printed on the page. It runs before anything
+      // reads sourceText.text/images/markers, so a rescued figure travels through
+      // extraction exactly like a geometrically found one.
+      const visionRecovered = await recoverFiguresWithVision(buffer, sourceText);
+      if (visionRecovered) {
+        console.log(`[pdfImport] vision located ${visionRecovered} figure(s) the page scan missed`);
+      }
+    } else {
+      // .txt/.docx/.xlsx: already exam text, read by document.readExamSource.
+      sourceText = {
+        text: String(source.text || ''),
+        images: [], markers: [], mathExprs: [], rowsByPage: [], diagnostics: {},
+      };
+      if (!sourceText.text.trim()) {
+        throw new Error(
+          `No readable text could be extracted from this file, so there was nothing to build questions from. ` +
+          `Check that the ${noun} is an exam paper with numbered questions.`
+        );
+      }
     }
     // textWithMarkers already calls analyzeDocument internally which includes
     // the image list. Use that instead of a second extractDocument call.
@@ -553,15 +581,24 @@ async function startJob(jobId, buffer, opts = {}) {
     updateJob(jobId, { stage: 'Parsing questions…', progress: 10 });
 
     let blockWarning = '';
-    const parsed = await ai.extractQuestionsFromText(
-      text,
-      (done, total) => {
-        const pct = 10 + Math.round((done / Math.max(1, total)) * 45);
-        updateJob(jobId, { stage: `Parsing questions… (${done}/${total})`, progress: pct });
-      },
-      (warning) => { blockWarning = warning; },
-      { markers: sourceText.markers, mathMarkers: sourceText.mathExprs }
-    );
+    // An imported JSON already holds its questions in final shape: running it
+    // through the model would re-parse (and risk corrupting) work someone
+    // already did correctly, so the authored rows go straight through.
+    const parsed = isImported
+      ? source.questions
+      : await ai.extractQuestionsFromText(
+          text,
+          (done, total) => {
+            const pct = 10 + Math.round((done / Math.max(1, total)) * 45);
+            updateJob(jobId, { stage: `Parsing questions… (${done}/${total})`, progress: pct });
+          },
+          (warning) => { blockWarning = warning; },
+          { markers: sourceText.markers, mathMarkers: sourceText.mathExprs }
+        );
+    if (isImported) {
+      console.log(`[pdfImport] imported ${parsed.length} authored question(s) from JSON (no parsing needed)`);
+      updateJob(jobId, { stage: 'Saving questions…', progress: 55 });
+    }
     diag('question extraction', { jobId, questions: parsed.length,
       ...(sourceText.diagnostics || {}) });
     if (!parsed.length) {
@@ -569,7 +606,7 @@ async function startJob(jobId, buffer, opts = {}) {
       // Surface WHY. The wrong guess here sends the user hunting for a problem
       // in their PDF that isn't there: a paper that parses to nothing is
       // usually unreadable text (a scan), not a mis-formatted document.
-      throw new Error(describeExtractionFailure({ text, isOcr, blockWarning }));
+      throw new Error(describeExtractionFailure({ text, isOcr, blockWarning, noun }));
     }
 
     // Filter by type if the user selected only objectives or only theories
@@ -579,7 +616,7 @@ async function startJob(jobId, buffer, opts = {}) {
       if (!filtered.length) {
         const want = typeFilter.join(' and ');
         throw new Error(
-          `No ${want} questions found in this PDF. ` +
+          `No ${want} questions found in this ${noun}. ` +
           `The document contained ${parsed.length} questions but none were ${want} type.`
         );
       }
@@ -612,7 +649,7 @@ async function startJob(jobId, buffer, opts = {}) {
     // document had no real questions to extract.
     if (!filtered.length) {
       throw new Error(
-        'No real questions could be extracted from this PDF — every entry the parser returned was an instruction line. ' +
+        `No real questions could be extracted from this ${noun} — every entry the parser returned was an instruction line. ` +
         'Check that the upload is an exam paper with numbered questions.'
       );
     }
@@ -764,7 +801,7 @@ async function startJob(jobId, buffer, opts = {}) {
         const marks = parseFloat(g.marks) || 1;
         const info = insert.run(
           job.exam_id, nextOrder, 'objective', g.text, passage, JSON.stringify(opts),
-          correct, marks, g.difficulty || 'medium', g.learning_objective || '', explanation, 'pdf', imageFile,
+          correct, marks, g.difficulty || 'medium', g.learning_objective || '', explanation, source.format, imageFile,
           slugOf(g.section), Number(g.number) || 0, '[]'
         );
         created.push(info.lastInsertRowid);
@@ -782,7 +819,7 @@ async function startJob(jobId, buffer, opts = {}) {
       } else {
         const info = insert.run(
           job.exam_id, nextOrder, 'theory', g.text, passage, null, null,
-          parseFloat(g.marks) || 5, g.difficulty || 'medium', g.learning_objective || '', '', 'pdf', imageFile,
+          parseFloat(g.marks) || 5, g.difficulty || 'medium', g.learning_objective || '', '', source.format, imageFile,
           slugOf(g.section), Number(g.number) || 0,
           // The limbs the extractor folded back under this number (1a, 1b…).
           // They are what the chat prints under the stem and what the marking
