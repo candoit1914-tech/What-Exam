@@ -274,22 +274,22 @@ test('sessionQuestionSequence uses template order when no pool is drawn', () => 
   assert.ok(Array.isArray(seq), 'returns an array');
 });
 
-test('buildQuestionBubbles sends OBJECTIVE header once then each question', () => {
+test('buildQuestionBubbles sends the Paper I (OBJECTIVE) header once then each question', () => {
   const q1 = { id: 1, q_order: 1, type: 'objective', text: 'Q1', passage: '' };
   const q2 = { id: 2, q_order: 2, type: 'objective', text: 'Q2', passage: '' };
   const seq = [q1, q2];
-  assert.deepEqual(exam.buildQuestionBubbles({}, q1, seq, 0), ['Reply with the letter of your answer (e.g. A, B, C, or D).', '*OBJECTIVE*', '*QUESTION 1*\n\nQ1']);
+  assert.deepEqual(exam.buildQuestionBubbles({}, q1, seq, 0), ['Reply with the letter of your answer (e.g. A, B, C, or D).', '*PAPER I — OBJECTIVE*', '*QUESTION 1*\n\nQ1']);
   assert.deepEqual(exam.buildQuestionBubbles({}, q2, seq, 1), ['*QUESTION 2*\n\nQ2']);
 });
 
-test('buildQuestionBubbles sends THEORY header once before theory questions', () => {
+test('buildQuestionBubbles sends the Paper II (THEORY) header once before theory questions', () => {
   const q1 = { id: 1, q_order: 1, type: 'objective', text: 'Q1', passage: '' };
   const q2 = { id: 2, q_order: 2, type: 'theory', text: 'Q2', passage: '' };
   const q3 = { id: 3, q_order: 3, type: 'theory', text: 'Q3', passage: '' };
   const seq = [q1, q2, q3];
   // Numbering restarts per section: theory is 1, 2 — never the raw
   // paper position 2, 3 the way the objectives led into it.
-  assert.deepEqual(exam.buildQuestionBubbles({}, q2, seq, 1), ['Type your full answer to each question as a single message.', '*THEORY*', '*QUESTION 1*\n\nQ2']);
+  assert.deepEqual(exam.buildQuestionBubbles({}, q2, seq, 1), ['Type your full answer to each question as a single message.', '*PAPER II — THEORY*', '*QUESTION 1*\n\nQ2']);
   assert.deepEqual(exam.buildQuestionBubbles({}, q3, seq, 2), ['*QUESTION 2*\n\nQ3']);
 });
 
@@ -300,7 +300,7 @@ test('buildQuestionBubbles emits header, passage, then question — never the pa
   const seq = [q1, q2];
   assert.deepEqual(exam.buildQuestionBubbles({}, q1, seq, 0), [
     'Reply with the letter of your answer (e.g. A, B, C, or D).',
-    '*OBJECTIVE*',
+    '*PAPER I — OBJECTIVE*',
     'Ama lost her pencil on the way to school.',
     '*QUESTION 1*\n\nQ1',
   ]);
@@ -311,7 +311,7 @@ test('buildQuestionBubbles treats an unknown index as the first question', () =>
   const q = { id: 7, q_order: 3, type: 'objective', text: 'Q3', passage: 'Read the passage.' };
   assert.deepEqual(exam.buildQuestionBubbles({}, q, [], -1), [
     'Reply with the letter of your answer (e.g. A, B, C, or D).',
-    '*OBJECTIVE*',
+    '*PAPER I — OBJECTIVE*',
     '*QUESTION 3*\n\nQ3',
   ]);
 });
@@ -629,7 +629,7 @@ test('buildQuestionBubbles does not duplicate a shared instruction-laden passage
   ];
   assert.equal(out.filter((b) => b === 'The farmers rely on irrigation.').length, 1, 'passage body emitted exactly once across both questions');
   assert.equal(out.filter((b) => b.startsWith('*Instructions*')).length, 0, 'the paper instruction line is never sent at all');
-  assert.equal(out.filter((b) => b.startsWith('*THEORY*')).length, 1, 'header emitted exactly once');
+  assert.equal(out.filter((b) => b.startsWith('*PAPER II — THEORY*')).length, 1, 'header emitted exactly once');
 });
 
 test("buildQuestionBubbles drops a later question's own paper instructions too", () => {
@@ -638,7 +638,7 @@ test("buildQuestionBubbles drops a later question's own paper instructions too",
   const seq = [q1, q2];
   assert.deepEqual(exam.buildQuestionBubbles({}, q1, seq, 0), [
     'Reply with the letter of your answer (e.g. A, B, C, or D).',
-    '*OBJECTIVE*',
+    '*PAPER I — OBJECTIVE*',
     'Ama went to the market.',
     '*QUESTION 1*\n\nQ1',
   ]);
@@ -682,7 +682,7 @@ test('buildQuestionBubbles puts a PDF section heading in its own bubble before t
   const seq = [q1, q2];
   assert.deepEqual(exam.buildQuestionBubbles({}, q1, seq, 0), [
     'Reply with the letter of your answer (e.g. A, B, C, or D).',
-    '*OBJECTIVE*',
+    '*PAPER I — OBJECTIVE*',
     // The heading arrives as the label alone: the paper's description of what
     // that part contains is its own prose, and the app writes the label.
     '*PART A*',
@@ -699,7 +699,7 @@ test('buildQuestionBubbles splits a header off the top of a passage and drops th
   const seq = [q1, q2];
   assert.deepEqual(exam.buildQuestionBubbles({}, q1, seq, 0), [
     'Type your full answer to each question as a single message.',
-    '*THEORY*',
+    '*PAPER II — THEORY*',
     '*SECTION B*',
     'Ama and Kofi walked to the market together.',
     '*QUESTION 1*\n\nQ1',

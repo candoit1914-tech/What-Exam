@@ -52,7 +52,7 @@ async function importWith(parsedQuestions) {
   }
   const job = pdfImport.getJob(jobId);
   const saved = db
-    .prepare('SELECT type, text, source_number, follow_ups FROM questions WHERE exam_id = ? ORDER BY q_order')
+    .prepare('SELECT type, text, passage, source_number, follow_ups FROM questions WHERE exam_id = ? ORDER BY q_order')
     .all(examId);
   return { job, saved, examId };
 }
@@ -83,15 +83,60 @@ test('an instruction parsed as a question is dropped, not saved empty', async ()
 });
 
 test('a real question whose stem merely reads like an instruction still imports', async () => {
-  // "Read the passage and answer the question that follows." is a legitimate
-  // stem the paper prints — it must NOT be dropped just for reading like a
-  // directive. stripPaperFurniture keeps it (it is not a bare "Answer all"
-  // form), so it survives the instruction guard.
+  // A question ASKS something, so it survives even when its wording is
+  // imperative: "Write a letter to your father…" is the paper's task, not the
+  // paper addressing the candidate. What must NOT survive is a stem that
+  // hands the reader to questions printed somewhere else.
   const { saved } = await importWith([
-    { type: 'theory', text: 'Read the passage and answer the question that follows.', marks: 5 },
+    { type: 'theory', text: 'Write a letter to your father asking for an extension of time.', marks: 5 },
   ]);
-  assert.equal(saved.length, 1, 'the instruction-like stem is a real question here');
-  assert.match(saved[0].text, /Read the passage/);
+  assert.equal(saved.length, 1, 'the imperative stem is a real question here');
+  assert.match(saved[0].text, /Write a letter/);
+});
+
+test('a directive that stands alone is dropped even when the furniture pass keeps it', async () => {
+  // stripPaperFurniture only removes the NARROWEST directive forms ("Answer
+  // all…", "INSTRUCTIONS:"). These are the rest of what a paper prints where a
+  // question would be — none of them can be answered, so none may be saved.
+  const { job, saved } = await importWith([
+    { type: 'theory', text: 'Read the passage and answer the question that follows.', marks: 5 },
+    { type: 'theory', text: 'Attempt THREE questions from this section.', marks: 5 },
+    { type: 'theory', text: 'Each question carries 20 marks.', marks: 5 },
+    { type: 'theory', text: 'SECTION B', marks: 5 },
+    { type: 'theory', text: 'Write your answers in the answer booklet provided.', marks: 5 },
+    { type: 'theory', text: 'Define osmosis.', marks: 5 },
+    { type: 'objective', text: 'What is the capital of Ghana?', options: ['A. Accra', 'B. Kumasi'], correct_answer: 'A' },
+  ]);
+
+  assert.equal(job.status, 'done', 'the real questions still import');
+  assert.deepEqual(
+    saved.map((q) => q.text.trim()),
+    ['Define osmosis.', 'What is the capital of Ghana?'],
+    'only the two answerable questions were saved'
+  );
+});
+
+test('a dropped instruction keeps the passage it introduced', async () => {
+  // On a reading paper the instruction line and the passage arrive together,
+  // and the numbered questions follow them. Dropping the instruction must not
+  // drop the passage with it — the student would be asked a comprehension
+  // question they were never shown.
+  const { saved } = await importWith([
+    {
+      type: 'theory',
+      text: 'Read the following passage and answer questions 1 to 5.',
+      passage: 'Ama lost her pencil on the way to school.',
+      marks: 5,
+    },
+    { type: 'theory', text: 'Where did Ama lose her pencil?', marks: 2 },
+  ]);
+  assert.equal(saved.length, 1, 'the instruction entry itself is not saved as a question');
+  assert.match(saved[0].text, /Where did Ama lose her pencil/);
+  assert.match(
+    String(saved[0].passage || ''),
+    /Ama lost her pencil/,
+    'the passage travels to the next real question instead of dying with the instruction'
+  );
 });
 
 test('an instruction-only import fails loudly instead of saving an empty paper', async () => {

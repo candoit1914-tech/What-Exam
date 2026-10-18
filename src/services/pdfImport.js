@@ -6,6 +6,7 @@ const selection = require('./selection');
 const path = require('path');
 const config = require('../config');
 const { stripSourceWatermarks, stripPaperFurniture } = require('./textClean');
+const { PAPER_I_KEY, PAPER_II_KEY, slugOf, sectionKeyFor, paperIITitle } = require('./paper');
 
 function diag(event, details) {
   if (process.env.PDF_DIAG === '1') console.log('[pdf-import:diag]', event, details);
@@ -509,6 +510,79 @@ function describeExtractionFailure({ text, isOcr, blockWarning, noun = 'PDF' } =
   return 'The document may not contain exam questions in a recognizable format.';
 }
 
+// ── Instructions are not questions ─────────────────────────────────────
+//
+// A paper prints directives — "Answer all questions in this section",
+// "INSTRUCTIONS: ...", "Each question carries 20 marks", "SECTION B" — and the
+// extractor can hand one back as its own entry, which would be saved as a
+// question and asked of a student. Two of those forms are already removed
+// line-by-line by stripPaperFurniture; what is left here is everything the
+// furniture pass deliberately keeps (it only drops the narrowest forms, because
+// a real stem can read like an instruction).
+//
+// A stem counts as a directive when the WHOLE of it reads like one. Each form
+// below is a line a paper uses to address the candidate rather than to ask them
+// something, and none of them is a question a student could answer.
+
+const DIRECTIVE_PATTERNS = [
+  // The paper addressing the candidate: "INSTRUCTIONS:", "Note:", "N.B.:".
+  /^(?:instructions?|notes?|directions?|remarks?|guidance|n\.?b\.?)\s*[:：]/i,
+  // The quota lines: "Answer all questions in this section", "Attempt THREE
+  // questions", "Choose ONE question", "Do not answer more than two".
+  /^(?:answer|attempt|choose|select|pick|tick|shade|circle|ring|cross\s+out)\s+(?:all|any|each|only|both|one|two|three|four|five|six|seven|eight|nine|ten|following|more\s+than|not\s+more\s+than|up\s+to|the\s+(?:following|questions?|one|ones)|questions?|your\s+answers?)\b/i,
+  // A line handing the reader to questions printed elsewhere on the paper:
+  // "answer questions 1 to 5", "the questions that follow".
+  /\bquestions?\s+\d+\s*(?:-|–|to|and|&)\s*\d+\b/i,
+  /\bquestions?\s+that\s+follow/i,
+  /\bquestion\s+that\s+follows\b/i,
+  // Headings printed where a question would be: "SECTION B", "PART II",
+  // "OBJECTIVE TEST". A heading never has a verb, a number or a question mark.
+  /^(?:section|part|paper|unit|chapter|module)\s+(?:[a-z]{1,4}\d*|\d{1,2}|[ivx]{1,4})(?:\s*[:：]\s*[^.?!]*)?$/i,
+  /^(?:objective|theory|essay|composition|comprehension|multiple\s+choice)\s*(?:test|paper|section|questions?|task)?\s*[:：.]?$/i,
+  // Paper logistics a candidate reads but never answers.
+  /^(?:each|every)\s+question\s+carries?\b/i,
+  /^(?:total\b[^.?!]{0,30}\bmarks?\b|marks?\s*[:·])/i,
+  /^(?:do\s+not|don'?t|ensure|remember|note\s+that)\b/i,
+  /^(?:write|shade|use|place|record)\s+(?:your|the|all)\s+answers?\b/i,
+  /\banswer\s+(?:sheet|booklet|grid|paper)\b/i,
+  /^(?:this|the)\s+(?:paper|question\s+paper|section|test)\s+(?:consists|contains|is\s+divided)\b/i,
+];
+
+// The verbs a real TASK opens with. When an instruction block ends in one
+// ("Answer the following question in about 300 words: Write a letter…", or
+// "Answer all questions in this section. Write a letter to your father."), the
+// task in the tail is the content and the entry must survive.
+const TASK_VERBS =
+  /^(?:write|describe|explain|define|discuss|translate|summaris|summariz|comment|calculate|solve|identify|outline|draw|list|mention|determine|find|compute|suggest|recommend|examine|argue|what|why|how|when|where|who|which)\b/i;
+
+/**
+ * Does this stem talk TO the candidate instead of asking them something?
+ *
+ * The whole stem has to read like a directive; a real question wrapped in one
+ * line of instruction keeps its content:
+ *   - a stem that ends by asking something is a question;
+ *   - a colon that opens onto a task ("…300 words: Write a letter…") keeps the
+ *     tail, unless the tail is a directive itself ("Note: attempt only three");
+ *   - when the stem is several sentences, the LAST one decides — an instruction
+ *     block may end with the task it was setting up.
+ */
+function looksLikeDirective(raw) {
+  const text = String(raw || '').replace(/\s+/g, ' ').trim();
+  if (!text) return true;
+  if (/[?]\s*$/.test(text)) return false; // it asks something
+
+  const sentences = text.split(/(?<=[.!?])\s+/).filter(Boolean);
+  const tail = sentences[sentences.length - 1] || text;
+  if (sentences.length > 1 && tail.split(/\s+/).length >= 4 && TASK_VERBS.test(tail)) return false;
+
+  const colonAt = text.search(/[:：]/);
+  if (colonAt >= 0 && colonAt < text.length - 1) {
+    const after = text.slice(colonAt + 1).replace(/\s+/g, ' ').trim();
+    if (after.split(/\s+/).length >= 4 && !DIRECTIVE_PATTERNS.some((re) => re.test(after))) return false;
+  }
+  return DIRECTIVE_PATTERNS.some((re) => re.test(text));
+}
+
 /**
  * Process an uploaded exam PDF in the background. Runs entirely off the HTTP
  * request path so a slow AI endpoint can never make the browser hang or a
@@ -626,20 +700,41 @@ async function startJob(jobId, buffer, opts = {}) {
     }
 
     // An INSTRUCTION is not a question. The paper prints directives — "Answer
-    // all questions in this section", "INSTRUCTIONS: ..." — that the extractor
-    // can hand back as if they were questions. stripPaperFurniture reduces such
-    // a directive to an EMPTY string, and without this check that empty entry
-    // would be saved as a question with no text and sent to the student. Drop
-    // any entry whose cleaned stem is empty AND that carries no limbs (a real
-    // question's parts would survive even if its stem read like an instruction).
-    // This runs BEFORE the answer-key pass so objective indexing stays aligned.
+    // all questions in this section", "INSTRUCTIONS: ...", "SECTION B" — that
+    // the extractor hands back as if they were questions. Two things must
+    // happen to such an entry before anything else runs:
+    //
+    //   - it is DROPPED, unless it still carries real limbs (a comprehension
+    //     heading whose parts are the actual content);
+    //   - the passage it introduced is NOT lost with it: reading papers carry
+    //     the passage on the line in front of the questions, so the passage is
+    //     handed to the next real question instead of dying with the directive.
+    //
+    // stripPaperFurniture already reduces the narrowest directive forms to an
+    // EMPTY string; looksLikeDirective catches the rest of them. This runs
+    // BEFORE the answer-key pass so objective indexing stays aligned.
     const beforeInstructionFilter = filtered.length;
-    filtered = filtered.filter((q) => {
+    const realQuestions = [];
+    let orphanPassage = '';
+    for (const q of filtered) {
       const cleaned = stripPaperFurniture(stripSourceWatermarks(String(q.text || '')));
-      if (cleaned.trim()) return true;
-      // Stem was pure instruction — keep it only if it still has real limbs.
-      return Array.isArray(q.follow_ups) && q.follow_ups.length > 0;
-    });
+      const limbs = Array.isArray(q.follow_ups) ? q.follow_ups.filter((f) => f && f.text) : [];
+      const keep = limbs.length > 0 || (Boolean(cleaned.trim()) && !looksLikeDirective(cleaned));
+      if (!keep) {
+        const carried = String((q && q.passage) || '').trim();
+        if (carried && !orphanPassage) orphanPassage = carried;
+        continue;
+      }
+      if (orphanPassage) {
+        // The instruction's own group is the one it introduced: give the
+        // passage to its first question, and drop it if that question already
+        // has a passage of its own rather than pasting two groups together.
+        if (!String((q && q.passage) || '').trim()) q.passage = orphanPassage;
+        orphanPassage = '';
+      }
+      realQuestions.push(q);
+    }
+    filtered = realQuestions;
     const droppedInstructions = beforeInstructionFilter - filtered.length;
     if (droppedInstructions > 0) {
       console.log(`[pdfImport] dropped ${droppedInstructions} instruction line(s) parsed as questions`);
@@ -803,7 +898,10 @@ async function startJob(jobId, buffer, opts = {}) {
         const info = insert.run(
           job.exam_id, nextOrder, 'objective', g.text, passage, JSON.stringify(opts),
           correct, marks, g.difficulty || 'medium', g.learning_objective || '', explanation, source.format, imageFile,
-          slugOf(g.section), Number(g.number) || 0, '[]'
+          // Paper I: every objective of the exam lives under one key, whatever
+          // heading the PDF printed it under, so objectives and theory can
+          // never end up in the same ruled section.
+          PAPER_I_KEY, Number(g.number) || 0, '[]'
         );
         created.push(info.lastInsertRowid);
         savedRows.push(info.lastInsertRowid);
@@ -821,7 +919,10 @@ async function startJob(jobId, buffer, opts = {}) {
         const info = insert.run(
           job.exam_id, nextOrder, 'theory', g.text, passage, null, null,
           parseFloat(g.marks) || 5, g.difficulty || 'medium', g.learning_objective || '', '', source.format, imageFile,
-          slugOf(g.section), Number(g.number) || 0,
+          // Paper II, under the heading the paper printed ("paper-ii-section-b")
+          // or on its own ("paper-ii") when the paper has no headings. This is
+          // the ONLY paper a section rule may ever point at.
+          sectionKeyFor(g), Number(g.number) || 0,
           // The limbs the extractor folded back under this number (1a, 1b…).
           // They are what the chat prints under the stem and what the marking
           // scheme is built from, so dropping them here would leave a
@@ -908,7 +1009,7 @@ async function startJob(jobId, buffer, opts = {}) {
       const out = applySelectionRules(
         job.exam_id,
         filtered,
-        savedRows.map((id) => db.prepare('SELECT id, q_order, section_key, source_number FROM questions WHERE id = ?').get(id)),
+        savedRows.map((id) => db.prepare('SELECT id, q_order, type, section_key, source_number FROM questions WHERE id = ?').get(id)),
         buildSectionMeta(filtered)
       );
       if (out.applied) updateJob(jobId, { stage: 'Applying selection rules…', progress: 68 });
@@ -951,21 +1052,10 @@ async function startJob(jobId, buffer, opts = {}) {
   }
 }
 
-/** "SECTION B" -> "section-b". Stable, so it matches what the admin sees. */
-function slugOf(section) {
-  return String(section || '')
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-|-$/g, '');
-}
-
-/**
- * The one section a paper with no headings is given, so its "answer any N"
- * limit has a key to be stored under — exam_sections points at a key, and a
- * missing key is how a limit silently became answer-all.
- */
-const PAPER_SECTION_KEY = 'paper';
+// "SECTION B" -> "section-b" (slugOf) and every section key an import writes
+// (sectionKeyFor, PAPER_I_KEY, PAPER_II_KEY) live in ./paper.js — src/db.js
+// needs the same mapping when it migrates questions imported before the two
+// papers were separated, so there must be one definition of them.
 
 /**
  * Read "how many of these must be answered" out of a section instruction.
@@ -1059,15 +1149,19 @@ function buildSectionMeta(questions) {
  * Turn the extraction's per-question selection facts into stored rules.
  *
  * `questions` is the extraction array itself — the only shape this pipeline
- * actually returns. Section rules are DERIVED by grouping on each question's
- * `section`, and `sectionMeta` (title, instructions, answer_count, keyed by the
- * verbatim heading) supplies the wording. Every claim is checked against the rows
- * we actually saved:
+ * actually returns. Questions are grouped by the section key they were SAVED
+ * under (paper.js `sectionKeyFor`): every objective forms the one Paper I group,
+ * theory forms one group per heading of Paper II. `sectionMeta` (title,
+ * instructions, answer_count, keyed by the verbatim heading) supplies the
+ * wording. Every claim is checked against the rows we actually saved:
  *
- *   - a compulsory question whose number never landed in the database is reported
- *     and dropped, because pointing at the wrong question is unrecoverable;
+ *   - Paper I never gets a rule: objectives are answered in full, and any quota
+ *     the paper or the model claimed for them is reported and refused;
+ *   - a compulsory question whose number never landed in the database is
+ *     reported and dropped, because pointing at the wrong question is
+ *     unrecoverable;
  *   - a count larger than the section is clamped (the count includes its
- *       compulsory questions, so it is priced against all of them);
+ *     compulsory questions, so it is priced against all of them);
  *   - a rule that ends up meaning "answer all" is not written at all, so the exam
  *     behaves exactly as it does today.
  */
@@ -1087,41 +1181,55 @@ function applySelectionRules(examId, questions, savedQuestions, sectionMeta = {}
   const skipped = [];
   let applied = 0;
 
-  // Group the extraction by section, keeping the model-declared compulsory flag.
+  // Group the extraction by the key its rows live under — ONE group for Paper I
+  // (however the PDF split its objective sections) and one per Paper II heading.
+  // Grouping on the stored key rather than the printed heading is what keeps the
+  // rule, the saved rows and the selector talking about one section.
   const groups = new Map();
   for (const q of list) {
-    const section = String((q && q.section) || '').trim();
-    if (!section) continue;
-    if (!groups.has(section)) groups.set(section, []);
-    groups.get(section).push(q);
+    const key = sectionKeyFor(q);
+    let group = groups.get(key);
+    if (!group) {
+      group = {
+        key,
+        heading: String((q && q.section) || '').trim(),
+        objective: key === PAPER_I_KEY,
+        members: [],
+      };
+      groups.set(key, group);
+    }
+    group.members.push(q);
   }
   // A paper with no headings at all still states its limit — "Answer any
   // THREE questions" sits on the first question. Without a key for
   // exam_sections to point at, that limit could never be stored and the paper
   // silently answered every question instead of offering a choice, so those
-  // questions are given one shared section.
-  const paperMeta = sectionMeta[''] || sectionMeta[PAPER_SECTION_KEY];
-  if (!groups.size && paperMeta && Math.max(0, parseInt(paperMeta.answer_count, 10) || 0) > 0) {
-    groups.set(PAPER_SECTION_KEY, list);
-  }
+  // questions are given one shared Paper II section.
+  const paperMeta = sectionMeta[''] || null;
 
   db.exec('BEGIN');
   try {
+    // Every question of an exam belongs to a paper. Rows this pipeline saved
+    // already carry their key; a row still unsectioned (an earlier import, a
+    // hand-entered question) is placed now, so the rule, the drawn snapshot and
+    // the selector can never point at different sections.
+    db.prepare(
+      `UPDATE questions SET section_key = ? WHERE exam_id = ? AND type <> 'objective'
+         AND COALESCE(section_key, '') = ''`
+    ).run(PAPER_II_KEY, examId);
+    db.prepare(
+      `UPDATE questions SET section_key = ? WHERE exam_id = ? AND type = 'objective'
+         AND COALESCE(section_key, '') = ''`
+    ).run(PAPER_I_KEY, examId);
+    for (const row of saved) {
+      if (String(row.section_key || '').trim()) continue;
+      row.section_key = row.type === 'objective' ? PAPER_I_KEY : PAPER_II_KEY;
+    }
+
     let position = 0;
-    for (const [section, members] of groups) {
-      const isPaper = section === PAPER_SECTION_KEY;
-      const key = isPaper ? PAPER_SECTION_KEY : slugOf(section);
-      if (isPaper) {
-        // Retag the rows so the rule, the drawn snapshot and the selector all
-        // speak about the same section.
-        db.prepare(
-          "UPDATE questions SET section_key = ? WHERE exam_id = ? AND (section_key IS NULL OR section_key = '')"
-        ).run(key, examId);
-        for (const row of saved) {
-          if (!String(row.section_key || '').trim()) row.section_key = key;
-        }
-      }
-      const inSection = saved.filter((q) => String(q.section_key || '') === key);
+    for (const group of groups.values()) {
+      const { key, heading, objective } = group;
+      const members = group.members;
 
       // Compulsory questions in this section, matched on the printed number.
       const forcedIds = new Set();
@@ -1129,10 +1237,45 @@ function applySelectionRules(examId, questions, savedQuestions, sectionMeta = {}
         if (!q.compulsory) continue;
         const row = bySourceNumber.get(Number(q.number));
         if (row) forcedIds.add(row.id);
-        else skipped.push(`${section}: compulsory question ${q.number} was not extracted`);
+        else skipped.push(`${heading || key}: compulsory question ${q.number} was not extracted`);
       }
+      const inSection = saved.filter((q) => String(q.section_key || '') === key);
       if (!inSection.length) {
-        skipped.push(`${section}: no questions were saved for it`);
+        skipped.push(`${heading || key}: no questions were saved for it`);
+        continue;
+      }
+
+      // Paper I: every objective is compulsory and every objective is answered.
+      // There is nothing to choose from and nothing to rule over, so no row is
+      // written — an exam_sections row would advertise a choice the student
+      // must never be given for objectives.
+      if (objective) {
+        const allCompulsory = db.prepare('UPDATE questions SET is_compulsory = 1 WHERE id = ?');
+        for (const row of inSection) allCompulsory.run(row.id);
+        const claimed = Math.max(0, parseInt((sectionMeta[heading] || {}).answer_count, 10) || 0);
+        if (claimed > 0) {
+          skipped.push(
+            `${heading || key}: objectives are Paper I and are answered in full — the paper's count of ${claimed} was not written`
+          );
+        }
+        continue;
+      }
+
+      const meta = heading ? (sectionMeta[heading] || sectionMeta[key] || {}) : (paperMeta || {});
+      // The count is the paper's own — "answer any FOUR questions" counts the
+      // compulsory ones, so it is priced against the WHOLE section. Pricing the
+      // same 4 against the three questions that are left to choose would cover
+      // the entire pool, read as answer-all and hand the student all five.
+      const total = inSection.length;
+      const want = Math.max(0, parseInt(meta.answer_count, 10) || 0);
+      const count = Math.min(want, total);
+      const selective = count > 0 && count < total;
+
+      // An unheaded Paper II block with no limit must be left exactly as the
+      // paper printed it: splitting it here would mark questions optional that
+      // no rule ever priced, and shut the default theory rule's own gate.
+      if (!heading && !selective) {
+        skipped.push(`${key}: rule is answer-all, nothing to choose`);
         continue;
       }
 
@@ -1142,18 +1285,8 @@ function applySelectionRules(examId, questions, savedQuestions, sectionMeta = {}
       const setFlag = db.prepare('UPDATE questions SET is_compulsory = ? WHERE id = ?');
       for (const q of inSection) setFlag.run(forcedIds.has(q.id) ? 1 : 0, q.id);
 
-      const meta = isPaper
-        ? paperMeta
-        : (sectionMeta[section] || sectionMeta[key] || {});
-      // The count is the paper's own — "answer any FOUR questions" counts the
-      // compulsory ones, so it is priced against the WHOLE section. Pricing the
-      // same 4 against the three questions that are left to choose would cover
-      // the entire pool, read as answer-all and hand the student all five.
-      const total = inSection.length;
-      const want = Math.max(0, parseInt(meta.answer_count, 10) || 0);
-      const count = Math.min(want, total);
-      if (count <= 0 || count >= total) {
-        skipped.push(`${section}: rule is answer-all, nothing to choose`);
+      if (!selective) {
+        skipped.push(`${heading || key}: rule is answer-all, nothing to choose`);
         continue;
       }
 
@@ -1165,7 +1298,8 @@ function applySelectionRules(examId, questions, savedQuestions, sectionMeta = {}
            position=excluded.position, answer_count=excluded.answer_count`
       ).run(
         examId, key,
-        String(meta.title || (isPaper ? 'Paper' : section)),
+        // The paper's own label for its theory section: "PAPER II — SECTION B".
+        paperIITitle(key, heading) || String(meta.title || heading),
         String(meta.instructions || ''),
         position++, count
       );
@@ -1199,7 +1333,10 @@ module.exports = {
   attachmentSummary,
   recoverFiguresWithVision,
   slugOf,
-  PAPER_SECTION_KEY,
+  PAPER_I_KEY,
+  PAPER_II_KEY,
+  sectionKeyFor,
+  looksLikeDirective,
   answerCountFrom,
   buildSectionMeta,
   applySelectionRules,

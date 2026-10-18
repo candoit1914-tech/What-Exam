@@ -12,7 +12,7 @@ process.env.SEED_ON_BOOT = 'false';
 const { test, after } = require('node:test');
 const assert = require('node:assert/strict');
 const db = require('../src/db');
-const { applySelectionRules, slugOf, buildSectionMeta } = require('../src/services/pdfImport');
+const { applySelectionRules, slugOf, buildSectionMeta, sectionKeyFor } = require('../src/services/pdfImport');
 const selection = require('../src/services/selection');
 // Pure classic script, no DB behind it — the browser slug must equal the importer's
 // or a section key set on the dashboard never matches what an import wrote.
@@ -24,15 +24,18 @@ after(() => {
 });
 
 // Mirrors what startJob persists: source_number keeps the printed number,
-// section_key is the slug, is_compulsory defaults to 1 exactly as the schema does.
+// section_key is the PAPER key the row is saved under (paper.js sectionKeyFor —
+// objectives under paper-i, theory under paper-ii + its heading), and
+// is_compulsory defaults to 1 exactly as the schema does.
 function examWith(spec) {
   const eid = db.prepare("INSERT INTO exams(title,duration_minutes,status) VALUES ('PDF',30,'live')").run().lastInsertRowid;
   const saved = spec.map((q, i) => {
+    const key = sectionKeyFor(q);
     const qid = db.prepare(
       `INSERT INTO questions(exam_id,q_order,type,text,section_key,source_number)
        VALUES (?,?,'theory',?,?,?)`
-    ).run(eid, i + 1, `Q${i + 1}`, slugOf(q.section), q.source_number ?? i + 1).lastInsertRowid;
-    return { id: qid, q_order: i + 1, section_key: slugOf(q.section), source_number: q.source_number ?? i + 1 };
+    ).run(eid, i + 1, `Q${i + 1}`, key, q.source_number ?? i + 1).lastInsertRowid;
+    return { id: qid, q_order: i + 1, type: 'theory', section_key: key, source_number: q.source_number ?? i + 1 };
   });
   return { eid, saved };
 }

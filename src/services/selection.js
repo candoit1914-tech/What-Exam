@@ -1,6 +1,26 @@
 const db = require('../db');
 const wa = require('./whatsapp');
 const { stripPaperFurniture } = require('./textClean');
+const {
+  PAPER_I_KEY,
+  PAPER_II_KEY,
+  PAPER_I_LABEL,
+  PAPER_II_LABEL,
+  isPaperIIKey,
+  paperIITitle,
+} = require('./paper');
+
+// ── Paper I and Paper II ───────────────────────────────────────────────
+//
+// An exam is TWO papers, never one mixed pool: Paper I holds the objectives
+// (multiple choice, answered in full) and Paper II holds the theory questions
+// (the only place a student is ever asked to choose). Every question is tagged
+// with one of these keys — objectives with PAPER_I_KEY, theory with
+// PAPER_II_KEY under the paper's own heading ("paper-ii-section-b") — so the
+// import, the selection rules, the selector and the chat can always tell which
+// paper a question belongs to. The keys themselves live in ./paper.js, which
+// src/db.js also uses when migrating questions imported before the two papers
+// were separated.
 
 // ── Rule resolution ────────────────────────────────────────────────────
 //
@@ -229,6 +249,10 @@ function compulsoryOnlySections(sessionId) {
  */
 function needsChoice(session, question) {
   if (!question || !question.section_key) return false;
+  // Paper I is answered in full. Even if a legacy row somehow carries an
+  // optional objective inside a ruled section, the student is never asked to
+  // choose an objective — the choice belongs to Paper II alone.
+  if (question.type === 'objective') return false;
   const sid = session && session.id != null ? session.id : session;
   const sec = sessionPlan(sid).find((s) => s.section_key === question.section_key);
   if (!sec || sec.quota <= 0 || sec.committed) return false;
@@ -395,8 +419,23 @@ function defaultAnswerCount(n) {
 }
 
 /** `section-b` → `SECTION B` — the label a student and an admin both read. */
-function prettySectionTitle(key) {
+function prettySlug(key) {
   return String(key || '').replace(/[-_]+/g, ' ').trim().toUpperCase();
+}
+
+/**
+ * The label a section key is listed under. A Paper II block reads as the paper
+ * plus the heading the PDF printed — `paper-ii-section-b` → "PAPER II — SECTION
+ * B" — so the default rule names its section the same way the import does.
+ */
+function prettySectionTitle(key) {
+  const k = String(key || '').trim();
+  if (isPaperIIKey(k)) {
+    const rest = k === PAPER_II_KEY ? '' : k.slice(PAPER_II_KEY.length + 1);
+    return paperIITitle(k, prettySlug(rest));
+  }
+  if (k === PAPER_I_KEY) return PAPER_I_LABEL;
+  return prettySlug(k);
 }
 
 /**

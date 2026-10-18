@@ -399,7 +399,7 @@ test('Continue prints the answer sheet: the numbers chosen and what the paper is
 
     const sheet = cap.sent.find((m) => /here is your paper/.test(m.text || ''));
     assert.ok(sheet, 'the commit hands the student their own sheet');
-    assert.match(sheet.text, /\*THEORY\*/, 'the paper is grouped the way the printed paper is');
+    assert.match(sheet.text, /\*PAPER II — THEORY\*/, 'the paper is grouped the way the printed paper is');
     assert.match(
       sheet.text, /Q1 \(compulsory\), Q2/,
       'the compulsory question is named as such, the chosen one carries its number'

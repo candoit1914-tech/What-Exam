@@ -17,6 +17,7 @@ const selection = require('./selection');
 // unlock(), so this edge is safe at require time too.
 const payments = require('./payments');
 const { stripSourceWatermarks, stripPaperFurniture } = require('./textClean');
+const { PAPER_I_KEY, PAPER_I_LABEL, PAPER_II_LABEL } = require('./paper');
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -317,6 +318,14 @@ function drawSessionQuestions(sessionId, examId) {
       if (cur == null || row.id < cur) sectionStart.set(key, row.id);
     }
     uniqueRows.sort((a, b) => {
+      // Paper I always opens the paper, wherever the PDF printed it: the
+      // objectives are answered first and in full, so they must be the first
+      // questions the student sees even when a theory section happens to start
+      // earlier in the pool. Paper II follows, section by section, in the order
+      // its first question appears.
+      const ra = (a.section_key || '') === PAPER_I_KEY ? 0 : 1;
+      const rb = (b.section_key || '') === PAPER_I_KEY ? 0 : 1;
+      if (ra !== rb) return ra - rb;
       const pa = sectionStart.get(a.section_key || '');
       const pb = sectionStart.get(b.section_key || '');
       return pa !== pb ? pa - pb : (a.id || 0) - (b.id || 0);
@@ -527,7 +536,14 @@ function answerSheetMessage(session) {
     for (const q of s.compulsory) forced.add(q.question_id);
   }
   const lines = ['✅ Locked in — here is your paper:'];
-  for (const [type, label] of [['objective', 'OBJECTIVE'], ['theory', 'THEORY']]) {
+  // The student's paper has the SAME two parts the exam paper printed: Paper I
+  // is the objectives (all of them), Paper II is the theory they chose from.
+  // Naming them here is what makes the sheet read like the paper in front of
+  // them rather than like a dump of two question types.
+  for (const [type, label] of [
+    ['objective', `${PAPER_I_LABEL} — OBJECTIVE`],
+    ['theory', `${PAPER_II_LABEL} — THEORY`],
+  ]) {
     const qs = seq.filter((q) => (q.type === 'theory' ? 'theory' : 'objective') === type);
     if (!qs.length) continue;
     lines.push('', `*${label}*`);
@@ -865,8 +881,21 @@ function splitQuestionHeadings(text) {
   return { headings, body: lines.slice(headings.length).join('\n') };
 }
 
+/**
+ * The banner above the first question of each type.
+ *
+ * A paper is two papers — Paper I is the objectives, Paper II the theory — and
+ * the banner is where the student is told which one they have reached. It is
+ * emitted once per type (see buildQuestionBubbles), so numbering, the section
+ * intros and the passages around it are untouched.
+ */
+const PAPER_BANNERS = {
+  objective: `*${PAPER_I_LABEL} — OBJECTIVE*`,
+  theory: `*${PAPER_II_LABEL} — THEORY*`,
+};
+
 function formatSectionHeader(type) {
-  return `*${type}*`;
+  return PAPER_BANNERS[String(type || '').toLowerCase() === 'theory' ? 'theory' : 'objective'];
 }
 
 /** Simple instructions shown before the first question of each type. */

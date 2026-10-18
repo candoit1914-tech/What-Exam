@@ -265,11 +265,12 @@ test('an upload whose paper never states a choice still gets the rule', async ()
   assert.equal(pdfImport.getJob(jobId).status, 'done');
 
   const [rule] = rulesOf(examId);
-  assert.equal(rule.section_key, 'theory', 'a paper with no headings becomes one theory block');
+  assert.equal(rule.section_key, 'paper-ii', 'a paper with no headings becomes one Paper II theory block');
+  assert.equal(rule.title, 'PAPER II', 'and it is listed as the whole of Paper II');
   assert.equal(rule.answer_count, 5, '7 questions → question 1 + 4 chosen');
   const flags = flagsOf(examId);
   assert.equal(flags[0].is_compulsory, 1);
-  assert.ok(flags.slice(1).every((q) => q.is_compulsory === 0 && q.section_key === 'theory'));
+  assert.ok(flags.slice(1).every((q) => q.is_compulsory === 0 && q.section_key === 'paper-ii'));
 });
 
 test('an upload whose rules were read keeps the paper’s own instruction', async () => {
@@ -294,7 +295,8 @@ test('an upload whose rules were read keeps the paper’s own instruction', asyn
   }
 
   const [rule] = rulesOf(examId);
-  assert.equal(rule.section_key, 'section-b');
+  assert.equal(rule.section_key, 'paper-ii-section-b', 'Paper II under the heading the paper printed');
+  assert.equal(rule.title, 'PAPER II — SECTION B');
   assert.equal(rule.answer_count, 3, 'the paper’s own count wins over the default');
 });
 

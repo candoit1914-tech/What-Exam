@@ -725,8 +725,10 @@ function selectionRulesCardHTML(examId, sections, selection, questions, pricing)
       <div class="field" style="flex:2;min-width:220px"><label>Paper instruction</label>
         <input type="text" data-sinst="${esc(r.section_key)}" value="${esc(r.instructions)}" ${editable ? '' : 'disabled'}></div>
       <div class="field" style="width:120px"><label>Answer any</label>
-        <input type="number" data-scount="${esc(r.section_key)}" min="0" max="${r.pool + r.compulsory}" value="${r.answer_count}" ${editable ? '' : 'disabled'}></div>
-      <div class="muted" style="padding-bottom:10px">of ${SelectionUI.rowHint(r)}</div>
+        <input type="number" data-scount="${esc(r.section_key)}" ${r.locked ? 'data-locked="1"' : ''} min="0" max="${r.pool + r.compulsory}" value="${r.answer_count}" ${editable && !r.locked ? '' : 'disabled'}></div>
+      <div class="muted" style="padding-bottom:10px">${r.locked
+        ? esc(SelectionUI.rowHint(r)) + ' &mdash; answered in full, so there is no choice here'
+        : 'of ' + esc(SelectionUI.rowHint(r))}</div>
     </div>`).join('')}
     ${editable ? `<div class="row" style="margin-top:14px">
       <button class="btn btn-primary" onclick="saveSelectionRules(${examId})">Save selection rules</button>
@@ -758,8 +760,13 @@ async function saveSelectionRules(examId) {
       title: titleEl ? titleEl.value : k,
       instructions: instEl ? instEl.value : '',
       answer_count: input.value,
+      locked: input.dataset.locked === '1',
     };
-  });
+    // A locked row (Paper I — the objectives, answered in full) is left out of
+    // the payload on purpose: answer-all is not a rule, so not sending the key
+    // is what tells the server to keep no rule row for it. Sending its 0 would
+    // store an answer-all rule the paper never had.
+  }).filter((r) => !r.locked);
   // An emptied card sends [] on purpose: the server treats that as "remove every
   // rule", which is what clearing the quotas must do. Guarding it here would
   // leave stale rules behind and the paper would still be selective on send.

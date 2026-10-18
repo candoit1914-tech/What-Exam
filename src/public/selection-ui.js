@@ -8,6 +8,32 @@
    already collapses a rule that covers every question to 0, so a second rule list in
    the browser would go stale and could offer a choice the server cannot honour. */
 (function (root) {
+  // The label a bare section key is listed under. The two papers read as papers
+  // and never as slugs — `paper-i` → "PAPER I", `paper-ii-section-b` → "PAPER II
+  // — SECTION B" — because an admin recognises the paper from the printed exam,
+  // not from the key the importer happens to store. Any other key keeps its
+  // verbatim fallback: this card has always shown an untitled section under its
+  // own key, and a title the server did supply always wins.
+  function labelForKey(key) {
+    var k = String(key || '').trim();
+    if (k === 'paper-i') return 'PAPER I';
+    if (k === 'paper-ii' || k.indexOf('paper-ii-') === 0) {
+      var rest = k === 'paper-ii' ? '' : k.slice('paper-ii-'.length).replace(/[-_]+/g, ' ').trim().toUpperCase();
+      return rest ? 'PAPER II — ' + rest : 'PAPER II';
+    }
+    return k;
+  }
+
+  // Paper I is answered in full — the objectives part of a WAEC paper offers no
+  // choice — so its quota input is a number that could never mean anything, and
+  // the server refuses it anyway. Marking the row `locked` is what lets the card
+  // say so instead of letting an admin type into a field that bounces.
+  // A section that holds ONLY objectives is Paper I however it is keyed.
+  function isLocked(key, objectiveCount, theoryCount) {
+    if (String(key || '').trim() === 'paper-i') return true;
+    return objectiveCount > 0 && theoryCount === 0;
+  }
+
   // One row per section, merging what is stored with what the server resolved.
   // A section appears if EITHER source knows it: a rule can exist with no
   // questions yet (admin set it up first), and questions can carry a section_key
@@ -48,9 +74,26 @@
           else compulsory.push(q);
         });
       }
+      var objectiveCount = 0;
+      var theoryCount = 0;
+      function tally(list) {
+        (list || []).forEach(function (q) {
+          var t = q && q.type;
+          if (t === 'objective') objectiveCount += 1;
+          else if (t === 'theory') theoryCount += 1;
+        });
+      }
+      tally(compulsory);
+      tally(optional);
+      tally((questions || []).filter(function (q) {
+        return String((q && q.section_key) || '').trim() === key;
+      }));
       return {
         section_key: key,
-        title: sec.title || plan.title || key,
+        title: sec.title || plan.title || labelForKey(key),
+        // Paper I never has a quota: the input is shown so the card reads
+        // completely, and disabled so the number cannot be typed or sent.
+        locked: isLocked(key, objectiveCount, theoryCount),
         instructions: sec.instructions || plan.instructions || '',
         // The server resolves the real rule; never recompute it here or the
         // card would show a number the students are not actually given.
@@ -148,7 +191,7 @@
     function add(key, label) {
       if (!key || seen[key]) return;
       seen[key] = true;
-      out.push([key, label || key]);
+      out.push([key, label || labelForKey(key)]);
     }
     (sections || []).forEach(function (s) { add(s.section_key, s.title); });
     (selection || []).forEach(function (s) { add(s.section_key, s.title); });
@@ -169,6 +212,8 @@
 
   var api = {
     ruleRows: ruleRows,
+    labelForKey: labelForKey,
+    isLocked: isLocked,
     rowHint: rowHint,
     summaryLines: summaryLines,
     pricingNote: pricingNote,

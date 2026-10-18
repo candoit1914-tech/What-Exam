@@ -14,6 +14,7 @@ const studentsService = require('../services/students');
 const payments = require('../services/payments');
 const results = require('../services/results');
 const watermarkService = require('../services/watermark');
+const paper = require('../services/paper');
 const config = require('../config');
 const { checkConfig } = require('../services/configCheck');
 const auth = require('../auth');
@@ -516,6 +517,32 @@ router.patch('/exams/:id/sections', (req, res) => {
     return res.status(400).json({ error: 'Exam is already live/ended. Selection rules can no longer be edited.' });
   }
   const incoming = Array.isArray(req.body && req.body.sections) ? req.body.sections : [];
+  // Validate BEFORE the transaction opens: a rejected write must leave every
+  // stored rule exactly as it was, which a rollback-inside-try cannot promise
+  // once the handler has already answered.
+  //
+  // Paper I is answered in full — there is no "any N of M" in the objectives
+  // part of a WAEC paper. A quota aimed at a section holding objectives (a
+  // Paper I section, or a legacy section that still mixes both papers) is an
+  // admin asking for a choice the paper never offered, so it is refused with
+  // the reason instead of being clamped to a number that would quietly read as
+  // answer-all.
+  for (const s of incoming) {
+    if (!s || !String(s.section_key || '').trim()) continue;
+    const key = String(s.section_key).trim();
+    if (!(Math.max(0, parseInt(s.answer_count, 10) || 0) > 0)) continue;
+    const objectives = db
+      .prepare("SELECT COUNT(*) c FROM questions WHERE exam_id = ? AND section_key = ? AND type = 'objective'")
+      .get(exam.id, key).c;
+    if (objectives > 0) {
+      return res.status(400).json({
+        error:
+          `${paper.PAPER_I_LABEL} is answer-all: every objective must be attempted, so it cannot offer a choice. ` +
+          `Set the number of questions to answer on a ${paper.PAPER_II_LABEL} (theory) section instead.`,
+        section_key: key,
+      });
+    }
+  }
   const upsert = db.prepare(
     `INSERT INTO exam_sections(exam_id,section_key,title,instructions,position,answer_count)
      VALUES (?,?,?,?,?,?)
@@ -528,6 +555,10 @@ router.patch('/exams/:id/sections', (req, res) => {
     for (const s of incoming) {
       if (!s || !String(s.section_key || '').trim()) continue;
       const key = String(s.section_key).trim();
+      // Paper I is never a rule. Answer-all is not a rule, so the objectives
+      // part of the paper gets no exam_sections row at all — the dashboard
+      // lists it from its questions, and any stale row is dropped by `keep`.
+      if (paper.isPaperIKey(key)) continue;
       const want = Math.max(0, parseInt(s.answer_count, 10) || 0);
       const optional = db
         .prepare('SELECT COUNT(*) c FROM questions WHERE exam_id = ? AND section_key = ? AND is_compulsory = 0')
@@ -555,7 +586,9 @@ router.patch('/exams/:id/sections', (req, res) => {
       upsert.run(exam.id, key, String(s.title || ''),
         String(s.instructions || ''), parseInt(s.position, 10) || 0, count);
     }
-    const keep = incoming.map((s) => String(s && s.section_key || '').trim()).filter(Boolean);
+    const keep = incoming
+      .map((s) => String(s && s.section_key || '').trim())
+      .filter((key) => key && !paper.isPaperIKey(key));
     // Always delete what is no longer listed, INCLUDING when the body is an
     // empty array. Guarding this on `keep.length` means an admin who clears the
     // card and saves sends [] and silently keeps every old rule — the one thing

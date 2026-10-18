@@ -567,4 +567,167 @@ if (answersDdl && /REFERENCES\s+questions/i.test(answersDdl.sql)) {
   console.log('Migrated answers table (removed question FK for pool variants).');
 }
 
+// ── Paper I / Paper II ───────────────────────────────────────────────────
+//
+// Exams imported before the two papers were separated carry one section_key per
+// printed heading, so objectives and theory could sit in ONE section — and a
+// quota over that section was a choice the paper never offered. Rewrite every
+// such key with the mapping the importer writes today (services/paper.js) so an
+// old exam reads exactly like a fresh upload:
+//
+//   objectives -> paper-i                   answer-all, never ruled
+//   theory     -> paper-ii[-<heading slug>]  the only place choice lives
+//
+// Two shapes are deliberately left alone: '' (a question nobody ever grouped —
+// manual entry, AI generation) and 'theory' (the block the default theory rule
+// names). Both are already single-paper shapes and the selection tests pin
+// them. Nothing here touches is_selected: a student's committed choice is their
+// own, however the section it sits in is spelled.
+//
+// Idempotent — remapping a remapped row is a no-op — so a database that is
+// already split costs one indexed SELECT per table and writes nothing.
+try {
+  const paper = require('./services/paper');
+
+  // The rows that could still move: legacy heading keys, plus the two accidents
+  // a half-migrated or hand-edited database can hold (a theory question under
+  // paper-i, an objective under paper-ii-*). Everything already correct is
+  // excluded here so the loop below never even sees it.
+  const maybeMoved = `
+    section_key <> ''
+    AND section_key <> 'theory'
+    AND (
+          section_key NOT LIKE 'paper-%'
+       OR (section_key = 'paper-i' AND type <> 'objective')
+       OR (section_key LIKE 'paper-ii%' AND type = 'objective')
+    )`;
+
+  function remapRows(sql, bind, apply) {
+    const rows = db.prepare(sql).all(...bind);
+    let moved = 0;
+    for (const r of rows) {
+      const next = paper.legacySectionKey(r.section_key, r.type);
+      if (next === String(r.section_key || '')) continue;
+      apply(r, next);
+      moved += 1;
+    }
+    return moved;
+  }
+
+  let moved = 0;
+
+  // Rules follow the theory questions they ruled. A legacy heading's rule moves
+  // onto that heading's Paper II key, its title becomes the paper's own label
+  // ("PAPER II — SECTION B"), and its quota is clamped to the theory questions
+  // it now covers — the objectives it used to price are gone from it.
+  //
+  // This runs FIRST, while `questions` still holds its legacy keys: a rule is
+  // classified by what it used to point at, so counting its questions after
+  // they had been rewritten would see an empty section and leave the old rule
+  // sitting under a key nothing answers to.
+  const sections = db.prepare(
+    "SELECT id, exam_id, section_key, title, answer_count FROM exam_sections WHERE section_key NOT IN ('','theory')"
+  ).all();
+  const countBy = (examId, key, type) =>
+    db
+      .prepare('SELECT COUNT(*) c FROM questions WHERE exam_id = ? AND section_key = ? AND type = ?')
+      .get(examId, key, type).c;
+  const dropSection = db.prepare('DELETE FROM exam_sections WHERE id = ?');
+  const moveSection = db.prepare('UPDATE exam_sections SET section_key = ?, title = ?, answer_count = ? WHERE id = ?');
+  for (const s of sections) {
+    const key = String(s.section_key || '');
+    if (paper.isPaperIKey(key)) {
+      // A Paper I row is the answer-all rule that must not exist: there is
+      // nothing to choose in the objectives, so the dashboard lists Paper I
+      // from its questions and no rule row at all.
+      dropSection.run(s.id);
+      moved += 1;
+      continue;
+    }
+    if (paper.isPaperIIKey(key)) continue; // already on the new naming
+    const objectives = countBy(s.exam_id, key, 'objective');
+    const theory = countBy(s.exam_id, key, 'theory');
+    if (objectives > 0 && theory === 0) {
+      // A rule over nothing but objectives is the one rule Paper I must never
+      // have: the objectives part is answered in full, so there is nothing to
+      // choose and no answer-all rule to store. Drop the row — the dashboard
+      // still lists Paper I from its questions.
+      dropSection.run(s.id);
+      moved += 1;
+      continue;
+    }
+    if (objectives + theory === 0) continue; // orphan with no questions: leave it
+    const next = paper.legacySectionKey(key, 'theory');
+    if (next === key) continue;
+    const heading = String(s.title || '').trim();
+    const title = /^PAPER II\b/i.test(heading) || !heading
+      ? (heading || paper.PAPER_II_LABEL)
+      : paper.paperIITitle(next, heading);
+    moveSection.run(next, title, Math.min(Number(s.answer_count) || 0, theory), s.id);
+    moved += 1;
+  }
+
+  const setQuestions = db.prepare('UPDATE questions SET section_key = ? WHERE id = ?');
+  moved += remapRows(
+    `SELECT id, section_key, type FROM questions WHERE ${maybeMoved}`,
+    [],
+    (r, next) => {
+      setQuestions.run(next, r.id);
+      // Paper I is answered in full. An objective that a legacy heading once
+      // left optional becomes compulsory again the moment it joins Paper I —
+      // that is the paper's rule, not a stored one.
+      if (r.type === 'objective' && paper.isPaperIKey(next)) {
+        db.prepare('UPDATE questions SET is_compulsory = 1 WHERE id = ?').run(r.id);
+      }
+    }
+  );
+
+  const setPool = db.prepare('UPDATE question_pool SET section_key = ? WHERE id = ?');
+  moved += remapRows(
+    `SELECT id, section_key, type FROM question_pool WHERE ${maybeMoved}`,
+    [],
+    (r, next) => setPool.run(next, r.id)
+  );
+
+  // A drawn session keeps the section key it was drawn under, so it must be
+  // rewritten with the SAME mapping as its pool row or the selector would look
+  // for a section that no longer exists. The type comes from the pool row it
+  // points at; rows whose pool row is gone are left as they are.
+  const setDrawn = db.prepare(
+    'UPDATE session_questions SET section_key = ? WHERE session_id = ? AND q_order = ?'
+  );
+  moved += remapRows(
+    `SELECT sq.session_id AS session_id, sq.q_order AS q_order,
+            sq.section_key AS section_key, qp.type AS type
+       FROM session_questions sq
+       JOIN question_pool qp ON qp.id = sq.question_id
+      WHERE sq.section_key <> ''
+        AND sq.section_key <> 'theory'
+        AND (
+              sq.section_key NOT LIKE 'paper-%'
+           OR (sq.section_key = 'paper-i' AND qp.type <> 'objective')
+           OR (sq.section_key LIKE 'paper-ii%' AND qp.type = 'objective')
+        )`,
+    [],
+    (r, next) => setDrawn.run(next, r.session_id, r.q_order)
+  );
+
+  // The section the student is choosing in right now. Choice only ever happens
+  // in Paper II, so an un-migrated key here is a theory section by definition.
+  const setSession = db.prepare('UPDATE sessions SET selection_section = ? WHERE id = ?');
+  moved += remapRows(
+    `SELECT id, section_key, type FROM (
+       SELECT id, selection_section AS section_key, 'theory' AS type FROM sessions
+        WHERE selection_section <> '' AND selection_section <> 'theory'
+          AND selection_section NOT LIKE 'paper-ii%'
+     )`,
+    [],
+    (r, next) => setSession.run(next, r.id)
+  );
+
+  if (moved) console.log(`Migrated papers: separated ${moved} row(s) into Paper I / Paper II.`);
+} catch (err) {
+  console.error('[db] paper separation migration failed (continued):', err.message);
+}
+
 module.exports = db;

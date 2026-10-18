@@ -301,16 +301,16 @@ test('a paper with no headings still gets its "answer any N" rule', () => {
   const out = pdfImport.applySelectionRules(eid, extracted, saved, meta);
   assert.equal(out.applied, 1, 'the rule was written instead of being dropped as answer-all');
   const row = db.prepare('SELECT * FROM exam_sections WHERE exam_id = ?').get(eid);
-  assert.equal(row.section_key, pdfImport.PAPER_SECTION_KEY, 'the rule has a key to point at');
+  assert.equal(row.section_key, pdfImport.PAPER_II_KEY, 'the rule has a key to point at');
   assert.equal(row.answer_count, 3);
-  assert.equal(row.title, 'Paper');
+  assert.equal(row.title, 'PAPER II', 'a headingless theory block is the whole of Paper II');
   const optional = db
     .prepare('SELECT COUNT(*) c FROM questions WHERE exam_id = ? AND is_compulsory = 0')
     .get(eid).c;
   assert.equal(optional, 5, 'the questions become optional, or the quota has nothing to price against');
   assert.equal(
     db.prepare('SELECT section_key FROM questions WHERE id = ?').get(saved[0].id).section_key,
-    'paper',
+    'paper-ii',
     'the rows are retagged so the selector and the rule speak about one section'
   );
 });
