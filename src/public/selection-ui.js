@@ -129,8 +129,9 @@
   // The one-line summary shown in the Edit Exam modal and anywhere a paper's
   // shape is described. Only live rules appear: a section that resolved to 0
   // is answer-all, and listing it as a rule would be a lie. The counts are the
-  // paper's own — compulsory included — so the line reads exactly like the
-  // instruction printed on the paper.
+  // totals the rules owe — compulsory included — so the line says what the
+  // student must actually answer: the paper's stated choice plus the
+  // compulsory questions owed on top of it.
   function summaryLines(selection) {
     return (selection || [])
       .filter(function (s) { return Number(s.quota) > 0 || Number(s.toAnswer) > 0; })

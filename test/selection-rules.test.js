@@ -49,8 +49,8 @@ test('an extraction with no section data writes no rule at all', () => {
 
 test('a selective section makes its non-forced questions selectable', () => {
   // Four questions, one compulsory, and a paper that demands two of them. The
-  // count is stored exactly as the paper states it — two — because the
-  // compulsory question is owed OUT of those two, leaving one to choose.
+  // stated count is the CHOICE on offer — the compulsory question is owed ON
+  // TOP of those two — so the section owes three in all, leaving two to pick.
   const { eid, saved } = examWith([
     { section: 'SECTION B' }, { section: 'SECTION B' },
     { section: 'SECTION B' }, { section: 'SECTION B' },
@@ -64,13 +64,13 @@ test('a selective section makes its non-forced questions selectable', () => {
   assert.equal(out.applied, 1);
 
   const sec = db.prepare('SELECT * FROM exam_sections WHERE exam_id=?').get(eid);
-  assert.equal(sec.answer_count, 2, 'the paper\u2019s own number, compulsory question included');
+  assert.equal(sec.answer_count, 3, 'the stated two plus the compulsory one owed on top');
 
   // What the import writes and what the selector prices are the same rule:
-  // two owed, one of them forced, so the student picks one of three.
+  // three owed, one of them forced, so the student picks two of three.
   const plan = selection.sectionPlan(eid)[0];
-  assert.equal(plan.toAnswer, 2, 'the section still owes what the paper demanded');
-  assert.equal(plan.quota, 1, 'and offers the three questions it left to choose from');
+  assert.equal(plan.toAnswer, 3, 'the section owes the compulsory question plus the paper\u2019s stated choice');
+  assert.equal(plan.quota, 2, 'and offers the two questions the stated count left to choose from');
 
   const rows = db.prepare('SELECT source_number, is_compulsory FROM questions WHERE exam_id=? ORDER BY q_order').all(eid);
   assert.equal(rows[0].is_compulsory, 1, 'question 1 stays compulsory');

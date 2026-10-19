@@ -717,7 +717,7 @@ function selectionRulesCardHTML(examId, sections, selection, questions, pricing)
   const note = SelectionUI.pricingNote(pricing || (examState.data || {}).pricing);
   return `<div class="card" style="margin-top:14px">
     <h3 style="margin-bottom:4px">SELECTION <span class="gr">RULES</span></h3>
-    <p class="muted qmeta">Students choose which questions to answer. Compulsory questions are always answered, and the number you set counts them too — "Answer any 4" in a section of five means four questions answered, not four chosen.</p>
+    <p class="muted qmeta">Students choose which questions to answer. Compulsory questions are always answered, and the number you set counts them too — set 4 in a section of five and four questions are answered (the compulsory ones among them), not four chosen out of the rest.</p>
     ${note ? `<p class="muted qmeta" data-pricing-note>${esc(note)}</p>` : ''}
     ${rows.map((r) => `<div class="row" style="margin-top:12px;gap:10px;align-items:flex-end;flex-wrap:wrap">
       <div class="field" style="flex:1;min-width:180px"><label>Section</label>

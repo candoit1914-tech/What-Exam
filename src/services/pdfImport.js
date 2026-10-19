@@ -1081,8 +1081,11 @@ function answerCountFrom(raw) {
     // "Answer any 3 of the 5 questions", "Answer 3 out of 5 questions",
     // "Answer TWO of the FIVE questions" — the count asked for comes first.
     /\b(?:answer|attempt|choose|select|pick)\b[^.?!]{0,40}?\b(\d{1,2}|[a-z]+)(?:\s*\(\d+\))?\s+(?:out\s+of|of)\s+(?:the\s+)?\b(?:\d{1,2}|[a-z]+)\b/i,
-    // "Answer only THREE questions", "Answer 2 questions", "Attempt ONE question".
-    /\b(?:answer|attempt|choose|select|pick)\s+(?:all\s+|any\s+|only\s+|the\s+|a\s+)?(\d{1,2}|[a-z]+)(?:\s*\(\d+\))?\s+questions?\b/i,
+    // "Answer only THREE questions", "Answer 2 questions", "Attempt ONE question",
+    // "Answer about 4 questions" — the hedges papers use when the count is
+    // approximate ("about", "approximately", "at least", "at most") are filler
+    // too: they shape the demand, they are never the demand itself.
+    /\b(?:answer|attempt|choose|select|pick)\s+(?:all\s+|any\s+|only\s+|the\s+|a\s+|about\s+|approximately\s+|at\s+least\s+|at\s+most\s+)?(\d{1,2}|[a-z]+)(?:\s*\(\d+\))?\s+questions?\b/i,
     // The count without a verb in front of it: "3 of the 5 questions".
     /\b(\d{1,2})\s+(?:out\s+of|of)\s+(?:the\s+)?(?:\d{1,2})\s+questions?\b/i,
   ];
@@ -1098,15 +1101,22 @@ function answerCountFrom(raw) {
 /**
  * Build the per-section rule facts from the extraction's own questions.
  *
- * Sections are keyed on the heading the model returned verbatim. A paper with
- * NO headings at all still carries its limit on the first question, so that
- * case is returned under the empty key instead of being dropped — dropping it
- * is what left a headingless paper with no way to ever offer a choice.
+ * Facts are keyed TWICE: by the paper key the rows are saved under (paper.js
+ * `sectionKeyFor` — `paper-i`, `paper-ii`, `paper-ii-<slug>`) and by the
+ * heading the model returned verbatim, so a caller can look a section up
+ * either way. The paper-scoped key is what keeps the two papers' counts
+ * apart: an objectives instruction ("Answer all 40 questions") must never
+ * price the theory block printed next to it, and a theory section's "answer
+ * any FOUR" must never be read as a quota on Paper I.
+ *
+ * A paper with NO headings at all still carries its limit on the first
+ * question, so that case is returned under the empty key too — but only the
+ * THEORY facts go there, with objectives facts as the fallback when the
+ * paper carries no theory at all, for the same reason.
  */
 function buildSectionMeta(questions) {
   const list = Array.isArray(questions) ? questions : [];
   const meta = {};
-  const anySection = list.some((q) => String((q && q.section) || '').trim());
 
   const factsFor = (q) => ({
     title: String((q && q.section) || '').trim(),
@@ -1114,34 +1124,43 @@ function buildSectionMeta(questions) {
     answer_count: answerCountFrom(`${(q && q.instructions) || ''} ${(q && q.passage) || ''}`),
   });
 
-  if (!anySection) {
-    const entries = list.filter(Boolean).map(factsFor);
-    if (entries.length) {
-      // The instruction may sit on any question, and only one that states a
-      // count matters; the first is kept when none does.
-      meta[''] = entries.find((e) => e.answer_count > 0) || entries[0];
-    }
-    return meta;
-  }
-
-  for (const q of list) {
-    const section = String((q && q.section) || '').trim();
-    if (!section) continue;
-    const facts = factsFor(q);
-    const prev = meta[section];
-    // The first question of a section carries its instructions, but extraction
-    // sometimes hangs them on a later one: keep the first's wording, and take
-    // the count from whichever question actually states one.
-    if (!prev) {
-      meta[section] = facts;
-    } else if (prev.answer_count === 0 && facts.answer_count > 0) {
-      meta[section] = {
+  // Keep the first question's wording, and take the count from whichever
+  // question actually states one — extraction sometimes hangs a section's
+  // instructions on a later question.
+  const merge = (prev, facts) => {
+    if (!prev) return facts;
+    if (prev.answer_count === 0 && facts.answer_count > 0) {
+      return {
         title: prev.title,
         instructions: facts.instructions || prev.instructions,
         answer_count: facts.answer_count,
       };
     }
+    return prev;
+  };
+
+  let unheadedAny = null;
+  let unheadedTheory = null;
+  for (const q of list) {
+    if (!q) continue;
+    const facts = factsFor(q);
+    const heading = facts.title;
+    const key = sectionKeyFor(q);
+    meta[key] = merge(meta[key], facts);
+    if (heading) {
+      meta[heading] = merge(meta[heading], facts);
+    } else {
+      unheadedAny = merge(unheadedAny, facts);
+      if (key !== PAPER_I_KEY) unheadedTheory = merge(unheadedTheory, facts);
+    }
   }
+
+  // The headingless paper states its limit on the first question, and that
+  // limit belongs to the THEORY block: dropping it is what left a headingless
+  // paper never offering a choice, while letting an objectives instruction
+  // price the theory questions is the opposite failure.
+  const unheaded = unheadedTheory || unheadedAny;
+  if (unheaded) meta[''] = unheaded;
   return meta;
 }
 
@@ -1160,8 +1179,10 @@ function buildSectionMeta(questions) {
  *   - a compulsory question whose number never landed in the database is
  *     reported and dropped, because pointing at the wrong question is
  *     unrecoverable;
- *   - a count larger than the section is clamped (the count includes its
- *     compulsory questions, so it is priced against all of them);
+ *   - the paper's stated count is the CHOICE it puts on offer ("answer about
+ *     FOUR questions") and the compulsory questions are owed ON TOP of it: a
+ *     section of six that asks for four and forces one owes five in all. The
+ *     sum is clamped to the section;
  *   - a rule that ends up meaning "answer all" is not written at all, so the exam
  *     behaves exactly as it does today.
  */
@@ -1252,7 +1273,13 @@ function applySelectionRules(examId, questions, savedQuestions, sectionMeta = {}
       if (objective) {
         const allCompulsory = db.prepare('UPDATE questions SET is_compulsory = 1 WHERE id = ?');
         for (const row of inSection) allCompulsory.run(row.id);
-        const claimed = Math.max(0, parseInt((sectionMeta[heading] || {}).answer_count, 10) || 0);
+        // Paper-scoped first: the objectives' own instruction, never the
+        // theory block's — on a headingless paper the empty key holds theory
+        // facts and would report the wrong number here.
+        const claimed = Math.max(
+          0,
+          parseInt((sectionMeta[PAPER_I_KEY] || sectionMeta[heading] || {}).answer_count, 10) || 0
+        );
         if (claimed > 0) {
           skipped.push(
             `${heading || key}: objectives are Paper I and are answered in full — the paper's count of ${claimed} was not written`
@@ -1261,14 +1288,21 @@ function applySelectionRules(examId, questions, savedQuestions, sectionMeta = {}
         continue;
       }
 
-      const meta = heading ? (sectionMeta[heading] || sectionMeta[key] || {}) : (paperMeta || {});
-      // The count is the paper's own — "answer any FOUR questions" counts the
-      // compulsory ones, so it is priced against the WHOLE section. Pricing the
-      // same 4 against the three questions that are left to choose would cover
-      // the entire pool, read as answer-all and hand the student all five.
+      // Paper-scoped facts first — the saved rows' own key — so the theory
+      // block never picks up an objectives instruction printed under the same
+      // (or no) heading. The verbatim heading and the headingless paper's
+      // facts remain as fallbacks for meta keyed the old way.
+      const meta = sectionMeta[key] || (heading ? sectionMeta[heading] : null) || paperMeta || {};
       const total = inSection.length;
       const want = Math.max(0, parseInt(meta.answer_count, 10) || 0);
-      const count = Math.min(want, total);
+      // The stated count is the CHOICE on offer ("answer about FOUR
+      // questions"): the compulsory questions are owed ON TOP of it, so a
+      // section of six whose paper asks for four and forces one owes five in
+      // all — the one forced plus the four on offer. The sum is clamped to the
+      // section, so a count that already covers everything still reads as
+      // answer-all. With no stated count there is nothing to add to, and the
+      // block stays answer-all exactly as the paper printed it.
+      const count = want > 0 ? Math.min(want + forcedIds.size, total) : 0;
       const selective = count > 0 && count < total;
 
       // An unheaded Paper II block with no limit must be left exactly as the

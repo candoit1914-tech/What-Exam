@@ -579,9 +579,11 @@ router.patch('/exams/:id/sections', (req, res) => {
           .run(exam.id, key);
       }
       // Clamp against the WHOLE section, compulsory questions included:
-      // answer_count is the paper's own number ("answer any 4 of 5"), so only a
-      // count that covers every question is answer-all. Storing that would show
-      // the admin a rule that can never fire.
+      // answer_count is the number owed in total — the importer stores the
+      // paper's stated choice plus its compulsory questions owed on top, and
+      // the admin types that total directly — so only a count covering every
+      // question is answer-all. Storing that would show the admin a rule that
+      // can never fire.
       const count = Math.min(want, total);
       upsert.run(exam.id, key, String(s.title || ''),
         String(s.instructions || ''), parseInt(s.position, 10) || 0, count);

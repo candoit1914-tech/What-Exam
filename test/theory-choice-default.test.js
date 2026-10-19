@@ -297,7 +297,10 @@ test('an upload whose rules were read keeps the paper’s own instruction', asyn
   const [rule] = rulesOf(examId);
   assert.equal(rule.section_key, 'paper-ii-section-b', 'Paper II under the heading the paper printed');
   assert.equal(rule.title, 'PAPER II — SECTION B');
-  assert.equal(rule.answer_count, 3, 'the paper’s own count wins over the default');
+  // The stated three is the CHOICE on offer; compulsory question 1 is owed on
+  // top of it, so the section owes four in all — the same total the default
+  // rule would have chosen, now arrived at from the paper's own instruction.
+  assert.equal(rule.answer_count, 4, 'the paper’s stated three plus its compulsory question');
 });
 
 // ── what the student actually gets ────────────────────────────────────

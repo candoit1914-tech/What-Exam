@@ -60,8 +60,10 @@ function questionsInSection(examId, sectionKey) {
  *
  * `answer_count` answers the paper's own question — "how many of these
  * questions does the student have to answer?" — so it counts the compulsory
- * ones. The optional pool is what is left to CHOOSE from once they are paid
- * for. Returns `{ toAnswer, quota }`:
+ * ones. The importer derives it as the paper's stated choice ("answer any
+ * FOUR") plus its compulsory questions owed ON TOP of that choice; an admin
+ * editing the card types the same total directly. The optional pool is what
+ * is left to CHOOSE from once they are paid for. Returns `{ toAnswer, quota }`:
  *
  *   answer_count 0          — no rule: the section is answered in full.
  *   answer_count >= total   — "answer any 5" with 5 on offer is answer-all.

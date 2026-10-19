@@ -135,6 +135,124 @@ test('an upload stores objectives under Paper I and theory under Paper II', asyn
   assert.ok(plan[0].quota > 0, 'the theory block offers a choice');
 });
 
+// ── the compulsory question is owed ON TOP of the stated count ─────────
+//
+// A paper that prints "answer about FOUR questions" and marks one of them
+// compulsory is asking for FOUR to CHOOSE plus the compulsory one — five of
+// its six, not four. The importer reads the stated count as the choice and
+// adds the compulsory questions to it.
+
+test('a paper that asks for 4 and forces 1 owes 5 of its 6', async () => {
+  const eid = newExam('__owed_on_top__');
+  const job = await importPaper(eid, Array.from({ length: 6 }, (_, i) => ({
+    type: 'theory',
+    number: i + 1,
+    section: 'SECTION B',
+    // The paper's own words: four to choose, question 1 owed on top of them.
+    instructions: i === 0 ? 'Answer any FOUR questions from this section.' : '',
+    compulsory: i === 0,
+    text: `Essay ${i + 1}`,
+    marks: 5,
+  })));
+  assert.equal(job.status, 'done', job.error || '');
+
+  const [rule] = rulesOf(eid);
+  assert.equal(rule.answer_count, 5, 'the stated four plus the compulsory one owed on top');
+
+  const plan = selection.sectionPlan(eid);
+  assert.equal(plan.length, 1, 'the theory block is ruled');
+  assert.equal(plan[0].toAnswer, 5, 'five of the six questions are owed in all');
+  assert.equal(plan[0].quota, 4, 'one of them is forced, so the student picks the other four');
+
+  const rows = rowsOf(eid);
+  assert.equal(rows[0].is_compulsory, 1, 'question 1 stays compulsory');
+  assert.ok(rows.slice(1).every((q) => q.is_compulsory === 0), 'the rest are the pool to choose from');
+});
+
+test('an objectives count never prices the theory block, even with no headings', async () => {
+  const eid = newExam('__count_isolation__');
+  const job = await importPaper(eid, [
+    // Headingless Paper I: both papers state their limit on the first
+    // question, and the objectives' "all 10" must never become the theory's
+    // quota (nor let the theory's four price Paper I).
+    ...Array.from({ length: 10 }, (_, i) => ({
+      type: 'objective',
+      number: i + 1,
+      passage: i === 0 ? 'Answer all 10 questions.' : '',
+      text: `What is ${i + 1} plus ${i + 1}?`,
+      options: ['A. 2', 'B. 3'],
+      correct_answer: 'A',
+      marks: 1,
+    })),
+    ...Array.from({ length: 6 }, (_, i) => ({
+      type: 'theory',
+      number: i + 1,
+      instructions: i === 0 ? 'Answer any FOUR questions.' : '',
+      compulsory: i === 0,
+      text: `Essay ${i + 1}`,
+      marks: 5,
+    })),
+  ]);
+  assert.equal(job.status, 'done', job.error || '');
+
+  const rules = rulesOf(eid);
+  assert.ok(
+    rules.every((r) => r.section_key !== paper.PAPER_I_KEY),
+    'Paper I still gets no rule: ' + JSON.stringify(rules.map((r) => r.section_key))
+  );
+  const [rule] = rules;
+  assert.equal(rule.section_key, 'paper-ii', 'the headingless theory block owns the rule');
+  assert.equal(
+    rule.answer_count, 5,
+    'the stated four plus the compulsory one — never the objectives’ 10, never the default 4'
+  );
+
+  const plan = selection.sectionPlan(eid);
+  assert.equal(plan[0].toAnswer, 5);
+  assert.equal(plan[0].quota, 4);
+
+  const objectives = rowsOf(eid).filter((q) => q.type === 'objective');
+  assert.ok(objectives.every((q) => q.is_compulsory === 1), 'Paper I is still answered in full');
+});
+
+test('one heading holding both papers keeps their counts apart', async () => {
+  const eid = newExam('__shared_heading__');
+  const job = await importPaper(eid, [
+    ...Array.from({ length: 3 }, (_, i) => ({
+      type: 'objective',
+      number: i + 1,
+      section: 'SECTION A',
+      passage: i === 0 ? 'Answer all 3 questions.' : '',
+      text: `What is ${i + 1} plus ${i + 1}?`,
+      options: ['A. 2', 'B. 3'],
+      correct_answer: 'A',
+      marks: 1,
+    })),
+    ...Array.from({ length: 6 }, (_, i) => ({
+      type: 'theory',
+      number: i + 1,
+      section: 'SECTION A',
+      instructions: i === 0 ? 'Answer any FOUR questions.' : '',
+      compulsory: i === 0,
+      text: `Essay ${i + 1}`,
+      marks: 5,
+    })),
+  ]);
+  assert.equal(job.status, 'done', job.error || '');
+
+  const rules = rulesOf(eid);
+  assert.ok(
+    rules.every((r) => r.section_key !== paper.PAPER_I_KEY),
+    'the shared heading never gives Paper I a rule: ' + JSON.stringify(rules.map((r) => r.section_key))
+  );
+  const [rule] = rules;
+  assert.equal(rule.section_key, 'paper-ii-section-a');
+  // Both papers print their instruction under the SAME heading, so a rule
+  // reading the verbatim heading would pick the objectives' "all 3" up: the
+  // paper-scoped facts are what the theory block must be priced from.
+  assert.equal(rule.answer_count, 5, 'the theory’s stated four plus its compulsory one');
+});
+
 test('Paper I is never a choice, whatever an old row claims', () => {
   const eid = newExam('__no_choice__');
   db.prepare(
