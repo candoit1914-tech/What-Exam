@@ -147,16 +147,41 @@ const config = {
   // base URL defaults to OpenAI and the model to whisper-1. With no key,
   // `enabled` is false and transcribeAudio() refuses rather than sending audio
   // to a chat endpoint that would answer 200 with silence.
+  //
+  // Three keys are honoured, in order: a dedicated AI_TRANSCRIBE_API_KEY; the
+  // admin's own paid OpenAI account (OPENAI_API_KEY — its Whisper is one of
+  // the two things that key is for, the other being photo answers below); and
+  // last the chat key, but ONLY when chat itself is OpenAI — a gateway key
+  // has no speech model behind it, so it is never guessed at here.
   aiTranscribe: (() => {
-    const key = process.env.AI_TRANSCRIBE_API_KEY || '';
+    const chatIsOpenAI = /api\.openai\.com/i.test(process.env.AI_BASE_URL || '');
+    const key = process.env.AI_TRANSCRIBE_API_KEY
+      || process.env.OPENAI_API_KEY
+      || (chatIsOpenAI ? process.env.AI_API_KEY : '');
     const usable = valid(key);
     return {
-      baseUrl: (process.env.AI_TRANSCRIBE_BASE_URL || 'https://api.openai.com/v1').replace(/\/$/, ''),
+      baseUrl: (process.env.AI_TRANSCRIBE_BASE_URL || process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1')
+        .replace(/\/$/, ''),
       apiKey: usable ? key : '',
       model: process.env.AI_TRANSCRIBE_MODEL || 'whisper-1',
       enabled: usable,
     };
   })(),
+
+  // OpenAI direct — the admin's own PAID platform account, kept apart from the
+  // chat primary (a gateway). One OPENAI_API_KEY lights up the two features
+  // OpenAI is the specialist for: Whisper speech-to-text for voice notes
+  // (through aiTranscribe above) and a vision model for photo answers (asked
+  // first, in ai.readPhotoAnswer, so a paid key is never left unused). Set the
+  // key and both work; leave it blank and the app is exactly as it was.
+  openai: {
+    baseUrl: (process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1').replace(/\/$/, ''),
+    apiKey: valid(process.env.OPENAI_API_KEY) ? process.env.OPENAI_API_KEY : '',
+    // Vision model for reading handwritten photo answers. gpt-4o-mini is the
+    // shipped default: vision-native and cheap per photo. Override with
+    // OPENAI_VISION_MODEL for a stronger reader on hard handwriting.
+    visionModel: process.env.OPENAI_VISION_MODEL || 'gpt-4o-mini',
+  },
 
   // Optional second OpenAI-compatible provider. The primary is the main AI:
   // it is called on its own, and this endpoint is only tried if the primary

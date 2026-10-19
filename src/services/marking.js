@@ -321,8 +321,9 @@ async function markTheoryImageAnswer(question, studentAnswer, imageFile, scheme)
       console.error('[marking] Local OCR failed:', err.message);
     }
 
-    // Fallback to AI vision providers
-    if (ai.aiConfigured()) {
+    // Fallback to AI vision providers — the paid OpenAI account counts as one
+    // even when no chat provider is configured at all.
+    if (ai.aiConfigured() || ai.openaiConfigured()) {
       try {
         const readText = await ai.readPhotoAnswer(imageFile, question.text);
         if (readText && readText !== '[unreadable]' && readText.length > 1) {

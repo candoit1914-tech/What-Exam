@@ -13,6 +13,17 @@ function aiConfigured() {
   return !!(config.ai.apiKey || config.ai.baseUrl);
 }
 
+/**
+ * The admin's own paid OpenAI account (OPENAI_API_KEY). Separate from
+ * `aiConfigured` because it answers a different question: not "can chat run"
+ * but "can a voice note be transcribed and a photo answer read" — the two
+ * features a chat gateway cannot serve. Config-level only: the key is read at
+ * load, tests stub the functions that use it.
+ */
+function openaiConfigured() {
+  return !!(config.openai && config.openai.apiKey);
+}
+
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /**
@@ -3330,11 +3341,12 @@ function clamp(n, max) {
 
 /**
  * Read a handwritten photo answer using the existing AI provider.
- * Tries all configured providers (primary, secondary, tertiary) since
- * the primary model may not support vision.
+ * Tries every configured provider — the paid OpenAI account first (when set),
+ * then primary, secondary, tertiary — since the primary model may not support
+ * vision.
  */
 async function readPhotoAnswer(imagePath, questionText) {
-  if (!aiConfigured()) {
+  if (!aiConfigured() && !openaiConfigured()) {
     throw new AIError('AI is not configured');
   }
 
@@ -3397,9 +3409,23 @@ RULES:
   // Vision-capable providers ONLY — Nvidia Nemotron does NOT support image
   // inputs, so it must be skipped for photo reads.  OpenAI gpt-4o-mini and
   // gpt-4o both support vision natively.
-  const providers = [
+  const providers = [];
+  // The admin's own paid OpenAI account goes FIRST when it is configured: a
+  // photo answer is the one read that cannot fall back to text, the gateway
+  // primary is not guaranteed to be vision-capable, and a paid platform key
+  // sitting unused while photos fail is exactly what OPENAI_API_KEY exists to
+  // prevent. Every other provider stays behind it as fallback.
+  if (openaiConfigured()) {
+    providers.push({
+      baseUrl: config.openai.baseUrl,
+      apiKey: config.openai.apiKey,
+      model: config.openai.visionModel,
+      name: 'openai',
+    });
+  }
+  providers.push(
     { baseUrl: config.ai.baseUrl, apiKey: config.ai.apiKey, model: config.ai.model, name: 'primary' },
-  ];
+  );
   // Only add secondary/tertiary if they look like vision-capable models
   if (secondaryConfigured() && !config.claude.model?.includes('nemotron')) {
     providers.push({ baseUrl: config.claude.baseUrl, apiKey: config.claude.apiKey, model: config.claude.model || config.ai.model, name: 'secondary' });
@@ -3543,8 +3569,9 @@ async function transcribeAudio(audioPath, questionText) {
   const sttConfigured = !!(config.aiTranscribe && config.aiTranscribe.enabled && config.aiTranscribe.apiKey);
   if (!sttConfigured && !aiConfigured()) {
     throw new AIError(
-      'No provider configured for audio transcription. Set AI_TRANSCRIBE_API_KEY ' +
-      'to a speech-to-text endpoint, or configure a chat provider.'
+      'No provider configured for audio transcription. Set OPENAI_API_KEY (a paid ' +
+      'OpenAI platform key — Whisper comes with it) or AI_TRANSCRIBE_API_KEY to a ' +
+      'speech-to-text endpoint, or configure a chat provider.'
     );
   }
 
@@ -3725,6 +3752,7 @@ RULES:
 module.exports = {
   AIError,
   aiConfigured,
+  openaiConfigured,
   chatJSON,
   mapLimit,
   batchConcurrencyFor,

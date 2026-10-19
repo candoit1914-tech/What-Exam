@@ -2537,8 +2537,10 @@ async function handleAnswer(exam, session, student, question, body, meta = {}) {
         // Fallback: local OCR (tesseract.js)
         let readSuccess = false;
         
-        // Try AI vision first (much better for handwritten text than Tesseract)
-        if (ai.aiConfigured()) {
+        // Try AI vision first (much better for handwritten text than Tesseract).
+        // The paid OpenAI account counts as a provider on its own — it is asked
+        // first by readPhotoAnswer when configured.
+        if (ai.aiConfigured() || ai.openaiConfigured()) {
           try {
             console.log(`[exam] Reading photo with AI vision...`);
             const readText = await ai.readPhotoAnswer(answerImage, question.text);
@@ -2604,8 +2606,10 @@ async function handleAnswer(exam, session, student, question, body, meta = {}) {
         fs.writeFileSync(path.join(config.uploadsDir, audioFile), buffer);
         console.log(`[exam] Saved audio answer as ${audioFile}`);
 
-        // Transcribe the audio using AI
-        if (ai.aiConfigured()) {
+        // Transcribe the audio using AI. The paid OpenAI account counts as a
+        // provider on its own: transcribeAudio() asks Whisper on it (through
+        // aiTranscribe) before any chat endpoint is tried.
+        if (ai.aiConfigured() || ai.openaiConfigured()) {
           try {
             console.log(`[exam] Transcribing audio with AI...`);
             const transcribed = await ai.transcribeAudio(audioFile, question.text);

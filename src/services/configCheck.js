@@ -20,6 +20,10 @@ const CHECKS = [
   // otherwise working deployment broken — the same rule AI_API_KEY follows.
   ['PAYSTACK_SECRET_KEY', 'warning', 'Priced exams cannot be created: checkouts cannot be initialized, references cannot be verified and webhook signatures cannot be checked. Free exams are unaffected.', 'Set PAYSTACK_SECRET_KEY from the Paystack dashboard (API Keys & Webhooks) when you price a paper, and keep it private.'],
   ['AI_API_KEY', 'warning', 'The primary AI provider is unavailable. AI generation, PDF extraction and grading require a usable configured provider; manually authored exams can still be delivered.', 'Set AI_API_KEY and AI_BASE_URL for the primary provider, or configure a supported alternative provider.'],
+  // The paid OpenAI account is optional like AI_API_KEY, and covers the two
+  // features a chat gateway cannot serve: voice notes (unless a dedicated
+  // AI_TRANSCRIBE_API_KEY already covers transcription) and photo answers.
+  ['OPENAI_API_KEY', 'warning', 'Voice-note answers cannot be transcribed (unless AI_TRANSCRIBE_API_KEY is set) and photo answers fall back to OCR alone, which reads handwriting poorly.', 'Set OPENAI_API_KEY to the secret key of a paid OpenAI platform account (platform.openai.com/api-keys): its Whisper transcribes voice notes and its vision model reads photo answers.'],
   ['CORS_ORIGIN', 'info', 'Only loopback browser origins are allowed by default. A separately hosted dashboard needs its origin allowed.', 'Set CORS_ORIGIN to the comma-separated origins of separately hosted dashboards.'],
 ];
 
