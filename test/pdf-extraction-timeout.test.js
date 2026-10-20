@@ -196,6 +196,59 @@ test('"no questions parsed" explains that blocks timed out', async () => {
   );
 });
 
+// ── the failure note names the REAL cause ──────────────────────────────
+//
+// The zero-question message used to append "the AI provider did not answer in
+// time" to EVERY warning — even one whose blocks all failed for a different
+// reason, and while a secondary note (unmatched diagrams) hid the primary one.
+// The reason the run actually recorded is now part of the warning, and the
+// message only keeps the timeout wording when no cause was named.
+
+test('a timeout is named as a timeout', async () => {
+  const original = ai.chatJSON;
+  ai.chatJSON = async () => {
+    const e = new Error('AI request timed out after 60s.');
+    e.name = 'AIError';
+    throw e;
+  };
+  const warnings = [];
+  try {
+    const parsed = await ai.extractQuestionsFromText(SMALL_PAPER, null, (w) => warnings.push(w));
+    assert.deepEqual(parsed, [], 'every block failed, so nothing is parsed');
+  } finally {
+    ai.chatJSON = original;
+  }
+  assert.ok(warnings.some((w) => /could not be parsed/i.test(w)), JSON.stringify(warnings));
+  assert.ok(
+    warnings.some((w) => /The cause: the AI provider timed out on every attempt\./.test(w)),
+    `the note must name the timeout: ${JSON.stringify(warnings)}`
+  );
+});
+
+test('an answered-but-empty provider is reported as such, not as a timeout', async () => {
+  const original = ai.chatJSON;
+  ai.chatJSON = async () => []; // 200 OK, valid JSON, no questions — a real failure mode
+  const warnings = [];
+  try {
+    await ai.extractQuestionsFromText(SMALL_PAPER, null, (w) => warnings.push(w));
+  } finally {
+    ai.chatJSON = original;
+  }
+  assert.ok(
+    warnings.some((w) => /The cause: the AI provider answered but returned no questions \(every attempt\)\./.test(w)),
+    `the note must name the empty answer: ${JSON.stringify(warnings)}`
+  );
+
+  // And the message built from that warning must not contradict it.
+  const msg = pdfImport.describeExtractionFailure({
+    text: 'Question 1. The document text is perfectly readable.',
+    isOcr: false,
+    blockWarning: warnings.join(' '),
+  });
+  assert.doesNotMatch(msg, /did not answer in time/i, 'a named cause replaces the timeout guess');
+  assert.match(msg, /returned no questions/);
+});
+
 test('theory questions left without a real marking scheme are reported, not silently imported', async () => {
   // buildMarkingScheme() never throws: when the AI cannot produce a scheme it
   // writes an empty placeholder (model_answer '', key_points []) and the import

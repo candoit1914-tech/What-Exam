@@ -169,14 +169,20 @@ const config = {
   })(),
 
   // OpenAI direct — the admin's own PAID platform account, kept apart from the
-  // chat primary (a gateway). One OPENAI_API_KEY lights up the two features
-  // OpenAI is the specialist for: Whisper speech-to-text for voice notes
-  // (through aiTranscribe above) and a vision model for photo answers (asked
-  // first, in ai.readPhotoAnswer, so a paid key is never left unused). Set the
-  // key and both work; leave it blank and the app is exactly as it was.
+  // chat primary (a gateway). One OPENAI_API_KEY lights up three features:
+  // Whisper speech-to-text for voice notes (through aiTranscribe above), a
+  // vision model for photo answers (asked first in ai.readPhotoAnswer), and —
+  // when the chat primary fails or times out — a chat fallback, so an import
+  // can never die of "the AI provider did not answer in time" while a paid
+  // account sits unused. Set the key and all three work; leave it blank and
+  // the app is exactly as it was.
   openai: {
     baseUrl: (process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1').replace(/\/$/, ''),
     apiKey: valid(process.env.OPENAI_API_KEY) ? process.env.OPENAI_API_KEY : '',
+    // Chat fallback model, used ONLY when the primary provider fails — the
+    // primary is still preferred and OpenAI is never billed for a call the
+    // primary would have answered. gpt-4o-mini: fast, cheap, JSON-reliable.
+    model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
     // Vision model for reading handwritten photo answers. gpt-4o-mini is the
     // shipped default: vision-native and cheap per photo. Override with
     // OPENAI_VISION_MODEL for a stronger reader on hard handwriting.

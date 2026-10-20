@@ -493,10 +493,17 @@ function describeExtractionFailure({ text, isOcr, blockWarning, noun = 'PDF' } =
   // misleading message this function exists to replace. Unreadable text is
   // handled by the branch below.
   if (blockWarning && String(text || '').trim()) {
+    // When the extractor already named the real cause ("The cause: the AI
+    // provider answered but returned no questions"), appending the timeout
+    // guess would contradict it. For a warning that names no cause, the
+    // timeout guess is what it has always been.
+    const namesCause = /the cause:/i.test(blockWarning);
     return (
       `No questions could be parsed from this ${noun}. ` +
       blockWarning +
-      ' The AI provider did not answer in time — try again, or raise AI_BLOCK_TIMEOUT_MS if it keeps happening.'
+      (namesCause
+        ? ' Try again — the same paper usually imports on a second attempt.'
+        : ' The AI provider did not answer in time — try again, or raise AI_BLOCK_TIMEOUT_MS if it keeps happening.')
     );
   }
   // Nothing readable at all. Either OCR ran and could not read the page
@@ -709,7 +716,12 @@ async function startJob(jobId, buffer, opts = {}) {
             const pct = 10 + Math.round((done / Math.max(1, total)) * 45);
             updateJob(jobId, { stage: `Parsing questions… (${done}/${total})`, progress: pct });
           },
-          (warning) => { blockWarning = warning; },
+          // APPENDED, not overwritten: the last warning used to replace the
+          // one before it, so a secondary note ("3 diagrams could not be
+          // matched") hid the primary one ("N blocks could not be parsed —
+          // cause: timed out") and the failure message was built on the wrong
+          // warning entirely.
+          (warning) => { blockWarning = [blockWarning, warning].filter(Boolean).join(' '); },
           { markers: sourceText.markers, mathMarkers: sourceText.mathExprs }
         );
     if (isImported) {

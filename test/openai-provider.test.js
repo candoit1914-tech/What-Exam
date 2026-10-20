@@ -1,8 +1,9 @@
 'use strict';
-// The admin's own PAID OpenAI account (OPENAI_API_KEY) lights up the two
+// The admin's own PAID OpenAI account (OPENAI_API_KEY) lights up the three
 // features a chat gateway cannot serve: Whisper transcription for voice
-// notes, and a vision-capable model asked FIRST for photo answers. One key,
-// both features — and with no key the app behaves exactly as before.
+// notes, a vision-capable model asked FIRST for photo answers, and a chat
+// FALLBACK when the primary provider fails. One key, all three — and with no
+// key the app behaves exactly as before.
 //
 // Config is read at load, so each config case is a FRESH load with only its
 // own variables set (the way a Render deploy sees them). No network: every
@@ -216,5 +217,142 @@ test('openaiConfigured mirrors the key, and gates open with it', () => {
     assert.equal(ai.openaiConfigured(), false);
   } finally {
     config.openai = saved;
+  }
+});
+
+// ── chat fallback: the paid account rescues a failed primary ───────────
+//
+// The third job of OPENAI_API_KEY. An import used to die of "the AI provider
+// did not answer in time" when the chat primary was down — with this paid
+// account sitting unused. chatJSON now falls through to it (after CLAUDE_*,
+// before XAI_*), only when a provider above it FAILED.
+
+test('OPENAI_API_KEY also sets the chat fallback model', () => {
+  const fresh = loadConfig({ OPENAI_API_KEY: 'sk-live-openai-test' });
+  assert.equal(fresh.openai.model, 'gpt-4o-mini', 'a fast, JSON-reliable default');
+  assert.equal(
+    loadConfig({ OPENAI_API_KEY: 'sk-x', OPENAI_MODEL: 'gpt-4o' }).openai.model,
+    'gpt-4o',
+    'OPENAI_MODEL overrides the fallback model'
+  );
+});
+
+test('a whole extraction survives a dead primary on the paid OpenAI account', async () => {
+  // The production failure this wiring exists for: the chat primary (AshnaAI)
+  // is down, and an import that used to die of "the AI provider did not
+  // answer in time" now finishes on the account the admin already pays for.
+  // Real chatJSON, real block pipeline — only fetch is stubbed.
+  const savedFetch = global.fetch;
+  const saved = { openai: config.openai, ai: { ...config.ai } };
+  const calls = [];
+  try {
+    ai.resetCircuitBreakers();
+    config.openai = { baseUrl: 'https://api.openai.com/v1', apiKey: 'sk-live-openai-test', model: 'gpt-4o-mini', visionModel: 'gpt-4o-mini' };
+    config.ai.baseUrl = 'https://api.ashna.ai/v1/api';
+    config.ai.apiKey = 'gateway-chat-key';
+    config.ai.model = 'gpt-5-mini';
+    global.fetch = async (url, init) => {
+      const u = String(url);
+      calls.push(u);
+      if (u.startsWith('https://api.ashna.ai/')) {
+        return { ok: false, status: 500, text: async () => 'upstream exploded', json: async () => ({}) };
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [{
+            message: {
+              content: '[{"type":"objective","number":1,"text":"Calculate 1 + 1.","options":["A. 1","B. 2"],"correct_answer":"A"}]',
+            },
+          }],
+        }),
+      };
+    };
+
+    const warnings = [];
+    const parsed = await ai.extractQuestionsFromText(
+      'MATHEMATICS PAPER 1\n\nQuestion 1\nCalculate 1 + 1.\nA. 1\nB. 2',
+      null,
+      (w) => warnings.push(w)
+    );
+
+    assert.equal(parsed.length, 1, 'the question arrived via the fallback, the import is not lost');
+    assert.equal(parsed[0].text, 'Calculate 1 + 1.');
+    assert.ok(calls.some((u) => u.startsWith('https://api.ashna.ai/')), 'the primary was still asked first');
+    assert.ok(calls.some((u) => u.startsWith('https://api.openai.com/v1/chat/completions')), 'and OpenAI answered after it failed');
+    assert.deepEqual(warnings, [], 'a rescued import carries no failure warning');
+  } finally {
+    global.fetch = savedFetch;
+    config.openai = saved.openai;
+    config.ai.baseUrl = saved.ai.baseUrl;
+    config.ai.apiKey = saved.ai.apiKey;
+    config.ai.model = saved.ai.model;
+    ai.resetCircuitBreakers();
+  }
+});
+
+test('when the chat primary fails, the paid OpenAI account answers instead', async () => {
+  const savedFetch = global.fetch;
+  const saved = { openai: config.openai, ai: { ...config.ai } };
+  const calls = [];
+  try {
+    ai.resetCircuitBreakers();
+    config.openai = { baseUrl: 'https://api.openai.com/v1', apiKey: 'sk-live-openai-test', model: 'gpt-4o-mini', visionModel: 'gpt-4o-mini' };
+    config.ai.baseUrl = 'https://api.ashna.ai/v1/api';
+    config.ai.apiKey = 'gateway-chat-key';
+    config.ai.model = 'gpt-5-mini';
+    global.fetch = async (url, init) => {
+      const u = String(url);
+      calls.push({ url: u, body: init && init.body, headers: (init && init.headers) || {} });
+      if (u.startsWith('https://api.ashna.ai/')) {
+        return { ok: false, status: 500, text: async () => 'upstream exploded', json: async () => ({}) };
+      }
+      return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: '[{"type":"theory","text":"rescued"}]' } }] }) };
+    };
+
+    const out = await ai.chatJSON([{ role: 'user', content: 'extract' }], { maxRetries: 0 });
+
+    assert.deepEqual(out, [{ type: 'theory', text: 'rescued' }], 'the fallback answer is returned as if the primary had answered');
+    assert.equal(calls.length, 2, 'primary first, paid OpenAI second');
+    assert.match(calls[0].url, /ashna\.ai/, 'the gateway is still preferred');
+    assert.equal(calls[1].url, 'https://api.openai.com/v1/chat/completions');
+    assert.equal(calls[1].headers.Authorization, 'Bearer sk-live-openai-test', 'the fallback call carries the paid key');
+    assert.equal(JSON.parse(calls[1].body).model, 'gpt-4o-mini');
+  } finally {
+    global.fetch = savedFetch;
+    config.openai = saved.openai;
+    config.ai.baseUrl = saved.ai.baseUrl;
+    config.ai.apiKey = saved.ai.apiKey;
+    config.ai.model = saved.ai.model;
+    ai.resetCircuitBreakers();
+  }
+});
+
+test('with no OpenAI key, chat keeps its old single-provider shape', async () => {
+  const savedFetch = global.fetch;
+  const saved = { openai: config.openai, ai: { ...config.ai } };
+  const calls = [];
+  try {
+    config.openai = { baseUrl: 'https://api.openai.com/v1', apiKey: '', model: 'gpt-4o-mini', visionModel: 'gpt-4o-mini' };
+    config.ai.baseUrl = 'https://api.ashna.ai/v1/api';
+    config.ai.apiKey = 'gateway-chat-key';
+    config.ai.model = 'gpt-5-mini';
+    global.fetch = async (url) => {
+      calls.push(String(url));
+      return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: '[{"type":"theory","text":"primary"}]' } }] }) };
+    };
+
+    const out = await ai.chatJSON([{ role: 'user', content: 'extract' }], { maxRetries: 0 });
+
+    assert.deepEqual(out, [{ type: 'theory', text: 'primary' }]);
+    assert.equal(calls.length, 1, 'no phantom OpenAI call is made without the key');
+    assert.match(calls[0], /ashna\.ai/);
+  } finally {
+    global.fetch = savedFetch;
+    config.openai = saved.openai;
+    config.ai.baseUrl = saved.ai.baseUrl;
+    config.ai.apiKey = saved.ai.apiKey;
+    config.ai.model = saved.ai.model;
   }
 });

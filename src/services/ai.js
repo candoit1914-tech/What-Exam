@@ -16,9 +16,10 @@ function aiConfigured() {
 /**
  * The admin's own paid OpenAI account (OPENAI_API_KEY). Separate from
  * `aiConfigured` because it answers a different question: not "can chat run"
- * but "can a voice note be transcribed and a photo answer read" — the two
- * features a chat gateway cannot serve. Config-level only: the key is read at
- * load, tests stub the functions that use it.
+ * but "can a voice note be transcribed, a photo answer read, and the chat
+ * primary's failure rescued" — three jobs a chat gateway alone cannot do.
+ * Config-level only: the key is read at load, tests stub the functions that
+ * use it.
  */
 function openaiConfigured() {
   return !!(config.openai && config.openai.apiKey);
@@ -315,6 +316,7 @@ const PROVIDER_FAILURE_THRESHOLD = 3;
 const circuitBreaker = {
   primary: { fails: 0, skipUntil: 0 },
   secondary: { fails: 0, skipUntil: 0 },
+  openai: { fails: 0, skipUntil: 0 },
   tertiary: { fails: 0, skipUntil: 0 },
 };
 
@@ -379,6 +381,9 @@ async function chatJSON(messages, { temperature = 0.4, maxRetries = 2, timeoutMs
   } else {
     console.log('[ai] Config: secondary=NOT configured');
   }
+  if (openaiConfigured()) {
+    console.log(`[ai] Config: openai-fallback=${config.openai.model} @ ${config.openai.baseUrl} (key: present)`);
+  }
 
   // Ensure every provider always has a timeout so a hanging endpoint can
   // never block the whole flow. 0 means "no timeout" in withHardTimeout.
@@ -405,7 +410,7 @@ async function chatJSON(messages, { temperature = 0.4, maxRetries = 2, timeoutMs
       ...common,
     }) : null;
 
-  if (!secondaryConfigured() && !tertiaryConfigured()) {
+  if (!secondaryConfigured() && !tertiaryConfigured() && !openaiConfigured()) {
     console.log('[ai] Using single provider:', config.ai.model);
     return primary();
   }
@@ -418,6 +423,20 @@ async function chatJSON(messages, { temperature = 0.4, maxRetries = 2, timeoutMs
       ...common,
       // Per-provider override wins; note spread order — common would clobber it.
       timeoutMs: config.claude.timeoutMs || effectiveTimeout,
+    });
+
+  // The admin's own paid OpenAI account as a CHAT fallback. It is only ever
+  // reached when the primary fails (or is cooling off on the breaker), so the
+  // gateway answer is still preferred and OpenAI is never billed for a call
+  // the primary would have made. This is the line between "the AI provider
+  // did not answer in time" killing an import and that same import quietly
+  // finishing on the account the admin already pays for.
+  const openaiFallback = () =>
+    callEndpoint({
+      baseUrl: config.openai.baseUrl,
+      apiKey: config.openai.apiKey,
+      model: config.openai.model,
+      ...common,
     });
 
   const tertiary = () =>
@@ -441,6 +460,10 @@ async function chatJSON(messages, { temperature = 0.4, maxRetries = 2, timeoutMs
   if (secondaryConfigured() && isProviderAvailable('secondary')) {
     providers.push({ fn: secondary, name: 'secondary' });
     providerNames.push(config.claude.model || 'secondary');
+  }
+  if (openaiConfigured() && isProviderAvailable('openai')) {
+    providers.push({ fn: openaiFallback, name: 'openai' });
+    providerNames.push(config.openai.model || 'openai');
   }
   if (tertiaryConfigured() && isProviderAvailable('tertiary')) {
     providers.push({ fn: tertiary, name: 'tertiary' });
@@ -1626,6 +1649,33 @@ function deduplicateAgainstHistory(newQuestions, existingTexts, similarityThresh
 }
 
 /**
+ * One sentence naming WHY extraction blocks failed, from the reasons the run
+ * actually recorded. The zero-question failure message used to guess "the AI
+ * provider did not answer in time" for EVERY case — including a provider that
+ * answered instantly with nothing in it — and an admin sent to raise a
+ * timeout knob for a failure that was not a timeout fixes nothing.
+ */
+function blockFailureSentence(reasons) {
+  const entries = Object.entries(reasons || {}).filter(([k, v]) => k !== 'short' && v > 0);
+  if (!entries.length) return '';
+  entries.sort((a, b) => b[1] - a[1]);
+  const [reason, n] = entries[0];
+  const attempts = entries.reduce((s, [, v]) => s + v, 0);
+  const scope = n === attempts ? 'every attempt' : `${n} of ${attempts} attempt(s)`;
+  const what = {
+    timeout: `the AI provider timed out on ${scope}`,
+    'empty-block': `the AI provider answered but returned no questions (${scope})`,
+    'invalid-json': `the AI provider returned unreadable output (${scope})`,
+    'rate-limited-429': `the AI provider rate-limited the import (${scope})`,
+    'quota-exhausted': `the AI provider account ran out of quota (${scope})`,
+    network: `the AI provider could not be reached (${scope})`,
+  }[reason] || (reason.startsWith('http-')
+    ? `the AI provider answered with an HTTP ${reason.slice(5)} error (${scope})`
+    : `the AI provider failed — ${reason} (${scope})`);
+  return ` The cause: ${what}.`;
+}
+
+/**
  * Extract structured questions from raw exam text (from PDF or pasted document).
  * Detects options and answer keys; generates schemes where missing.
  *
@@ -1963,7 +2013,8 @@ Rules:
     const gone = stillFailed.filter((_, k) => !recovered[k]);
     if (gone.length && onWarning) {
       onWarning(
-        `${gone.length} question block(s) could not be parsed — some questions may be missing. Retry the upload to recover them.`
+        `${gone.length} question block(s) could not be parsed — some questions may be missing. ` +
+        `Retry the upload to recover them.${blockFailureSentence(blockStats.reasons)}`
       );
     } else if (recoveredLocally && onWarning) {
       onWarning(
