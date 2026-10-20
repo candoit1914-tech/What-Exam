@@ -619,7 +619,20 @@ async function startJob(jobId, buffer, opts = {}) {
       // needs filling in (no figures, no markers, no OCR).
       sourceText = { text: '', images: [], markers: [], mathExprs: [], rowsByPage: [], diagnostics: {} };
     } else if (isPdf) {
-      sourceText = await pdf.textWithMarkers(buffer);
+      try {
+        sourceText = await pdf.textWithMarkers(buffer);
+      } catch (err) {
+        // The DOCUMENT could not be opened — never a figure problem (those
+        // degrade to notes), so it must fail, but in words the admin can act
+        // on. pdfjs' raw "Invalid PDF structure"/"PasswordException" is what
+        // used to vanish into a toast with nothing to search for.
+        const detail = String((err && err.message) || err || '').trim().replace(/[.\s]+$/, '');
+        throw new Error(
+          `This PDF could not be read${detail ? ` (${detail})` : ''}. ` +
+          'It may be password-protected, damaged, or not really a PDF — export it again ' +
+          '(or print to PDF from the original document) and re-upload.'
+        );
+      }
       // Pages whose own text tells the student to study a figure, but which gave
       // the scanner nothing to assemble, get one chance with AshnaAI's vision:
       // point at what is already printed on the page. It runs before anything
@@ -651,8 +664,37 @@ async function startJob(jobId, buffer, opts = {}) {
     if (isOcr) {
       console.log('[pdfImport] Document was scanned/image-based — used OCR to extract text');
       warnings.push('This PDF was scanned/image-based. Text was extracted via OCR and may contain minor errors.');
-      updateJob(jobId, { warning: warnings.join(' ') });
     }
+    // What the page scanner could not do, kept in the import note rather than
+    // only in a server log nobody opens: a skipped page loses its questions, a
+    // page whose diagram geometry refused to read loses only its diagrams, a
+    // dead figure filter loses only figures. Each is a different thing to act
+    // on — and none of them is a reason to fail an import that can still
+    // produce questions.
+    const scan = (sourceText.diagnostics && sourceText.diagnostics.figures) || {};
+    if (Array.isArray(scan.failedPages) && scan.failedPages.length) {
+      const n = scan.failedPages.length;
+      warnings.push(
+        `${n === 1 ? 'Page' : 'Pages'} ${scan.failedPages.join(', ')} could not be parsed and ` +
+        `${n === 1 ? 'was' : 'were'} skipped — any questions printed only on ` +
+        `${n === 1 ? 'that page' : 'those pages'} are missing from this import. ` +
+        `Re-upload ${n === 1 ? 'that page as a scan to recover it' : 'those pages as scans to recover them'}.`
+      );
+    }
+    if (Array.isArray(scan.figureScanFailedPages) && scan.figureScanFailedPages.length) {
+      const n = scan.figureScanFailedPages.length;
+      warnings.push(
+        `Diagram scanning failed on ${n === 1 ? 'page' : 'pages'} ${scan.figureScanFailedPages.join(', ')}; ` +
+        `${n === 1 ? 'that page was' : 'those pages were'} imported without ${n === 1 ? 'its' : 'their'} diagrams.`
+      );
+    }
+    if (scan.selectionError) {
+      warnings.push(
+        'The diagram filter could not run on this PDF, so no diagrams were attached — ' +
+        'the questions themselves imported normally.'
+      );
+    }
+    if (warnings.length) updateJob(jobId, { warning: warnings.join(' ') });
     updateJob(jobId, { stage: 'Parsing questions…', progress: 10 });
 
     let blockWarning = '';

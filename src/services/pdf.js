@@ -141,99 +141,95 @@ async function ocrDocument(buffer) {
   const rowsByPage = [];
   const pageData = [];
   let figureStats = null;
+  const failedPages = [];
+  const figureScanFailedPages = [];
 
   try {
     for (let p = 1; p <= doc.numPages; p++) {
-      const page = await doc.getPage(p);
-      const vp1 = page.getViewport({ scale: 1 });
-      const vp2 = page.getViewport({ scale: 2 });
-      // Render at scale 2 directly for crisp OCR input
-      const full = await replayPageOps(page, vp2);
-      const canvas = createCanvas(Math.ceil(vp2.width), Math.ceil(vp2.height));
-      const ctx = canvas.getContext('2d');
-      ctx.drawImage(full, 0, 0, canvas.width, canvas.height);
-      const pageBuffer = canvas.toBuffer('image/png');
+      // The page reads as two halves that are allowed to fail apart. The
+      // TEXT half (render + OCR) is what the page is kept for: a page the
+      // renderer or the OCR engine chokes on is skipped and counted — every
+      // other page still imports. The DIAGRAM half runs after, on its own
+      // guard, so a stream pdfjs cannot replay costs only that page's
+      // figures. A diagram problem must never cost the page, let alone the
+      // paper — and this is the path every scanned exam takes.
+      let page = null;
+      let vp1 = null;
+      let pageRows = [];
+      try {
+        page = await doc.getPage(p);
+        vp1 = page.getViewport({ scale: 1 });
+        const vp2 = page.getViewport({ scale: 2 });
+        // Render at scale 2 directly for crisp OCR input
+        const full = await replayPageOps(page, vp2);
+        const canvas = createCanvas(Math.ceil(vp2.width), Math.ceil(vp2.height));
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(full, 0, 0, canvas.width, canvas.height);
+        const pageBuffer = canvas.toBuffer('image/png');
 
-      // OCR the rendered page
-      const { data: { text } } = await worker.recognize(pageBuffer);
-      const lines = (text || '').split('\n').filter((l) => l.trim());
-      textLines.push(...lines);
+        // OCR the rendered page
+        const { data: { text } } = await worker.recognize(pageBuffer);
+        const lines = (text || '').split('\n').filter((l) => l.trim());
+        textLines.push(...lines);
 
-      // Create synthetic row entries in scale-1 user space for marker placement
-      const pageRows = lines.map((line, i) => ({
-        y: vp1.height - ((i + 0.5) * vp1.height / lines.length),
-        line,
-      }));
+        // Create synthetic row entries in scale-1 user space for marker placement
+        pageRows = lines.map((line, i) => ({
+          y: vp1.height - ((i + 0.5) * vp1.height / lines.length),
+          line,
+        }));
+      } catch (err) {
+        console.warn(`[pdf] OCR failed on page ${p} — skipping it`, { error: (err && err.message) || String(err) });
+        failedPages.push(p);
+        pageRows = [];
+      }
+      // One entry per page, always: rowsByPage and pageData are indexed by
+      // page number, and a missing entry would shift every later page's
+      // figure markers onto the wrong page.
       rowsByPage.push(pageRows);
 
-      // Detect images from the operator list (diagrams in scanned PDFs)
-      const { OPS } = loadPdfjs();
-      const ops = await page.getOperatorList();
-      const paints = [];
-      let ctm = [1, 0, 0, 1, 0, 0];
-      const stack = [];
-      let lineWidth = 1;
-      let pathPts = null;
-
-      const seal = () => {
-        if (pathPts && pathPts.length >= 4) {
-          const bb = pointsAABB(pathPts, ctm);
-          if (bb.w > 0 && bb.h > 0) {
-            paints.push({ kind: 'vector', page: p, ...bb, userMid: bb.y + bb.h / 2, strokePad: lineWidth / 2 });
-          }
+      // Detect images from the operator list (diagrams in scanned PDFs) —
+      // the same walk as the text-layer path, from the one place it lives.
+      let paints = [];
+      if (page && vp1) {
+        try {
+          paints = await pagePaints(page, p);
+        } catch (err) {
+          console.warn(`[pdf] diagram scan failed on page ${p} — keeping its text`, { error: (err && err.message) || String(err) });
+          figureScanFailedPages.push(p);
+          paints = [];
         }
-        pathPts = null;
-      };
-
-      for (let i = 0; i < ops.fnArray.length; i++) {
-        const fn = ops.fnArray[i];
-        const args = ops.argsArray[i];
-        if (fn === OPS.transform) ctm = mul(ctm, args);
-        else if (fn === OPS.save) stack.push(ctm);
-        else if (fn === OPS.restore) ctm = stack.pop() || [1, 0, 0, 1, 0, 0];
-        else if (fn === OPS.setLineWidth) lineWidth = args[0];
-        else if (fn === OPS.constructPath) {
-          const codes = args[0] || [];
-          const nums = args[1] || [];
-          let ni = 0;
-          let pts = pathPts || [];
-          for (const code of codes) {
-            if (code === OPS.rectangle) { pts.push(nums[ni], nums[ni + 1], nums[ni] + nums[ni + 2], nums[ni + 1] + nums[ni + 3]); ni += 4; }
-            else if (code === OPS.moveTo || code === OPS.lineTo) { pts.push(nums[ni], nums[ni + 1]); ni += 2; }
-            else if (code === OPS.curveTo) { pts.push(nums[ni], nums[ni + 1], nums[ni + 2], nums[ni + 3], nums[ni + 4], nums[ni + 5]); ni += 6; }
-            else if (code === OPS.curveTo2 || code === OPS.curveTo3) { pts.push(nums[ni], nums[ni + 1], nums[ni + 2], nums[ni + 3]); ni += 4; }
-          }
-          pathPts = pts;
-        } else if (fn === OPS.rectangle) {
-          pathPts = (pathPts || []).concat([args[0], args[1], args[0] + args[2], args[1] + args[3]]);
-        } else if (fn === OPS.ellipse) {
-          const [x, y, rx, ry] = args;
-          pathPts = (pathPts || []).concat([x - rx, y - ry, x + rx, y + ry]);
-        } else if (fn === OPS.fill || fn === OPS.eoFill || fn === OPS.fillStroke || fn === OPS.stroke || fn === OPS.closeFillStroke || fn === OPS.closeStroke || fn === OPS.endPath) {
-          seal();
-        } else if (fn === OPS.paintImageXObject || fn === OPS.paintInlineImageXObject || fn === OPS.paintImageMaskXObject) {
-          const bb = unitSquareAABB(ctm);
-          paints.push({ kind: 'raster', page: p, ...bb, userMid: bb.y + bb.h / 2, rasterId: fn === OPS.paintImageXObject ? args[0] : null });
-        }
+        pageData.push({ paints, width: vp1.width, height: vp1.height, rows: pageRows });
+      } else {
+        pageData.push({ paints: [], width: 0, height: 0, rows: [] });
       }
-      seal();
-      pageData.push({ paints, width: vp1.width, height: vp1.height, rows: pageRows });
     }
 
     // The same figure rules as the text-layer path, from the one place that
     // defines them (selectFigureRegions) — a filter that exists twice has
     // already drifted once, and it silently gave a scanned paper and its
-    // text-layer twin different figures from the same page.
-    const selection = selectFigureRegions(pageData);
-    images.push(...selection.images);
+    // text-layer twin different figures from the same page. Guarded like the
+    // text path: a filter that cannot run gives up on figures, never on an
+    // import whose questions are already OCR'd and waiting.
+    let selection = null;
+    let selectionError = '';
+    try {
+      selection = selectFigureRegions(pageData);
+    } catch (err) {
+      selectionError = String((err && err.message) || err || 'the figure filter could not run');
+      console.warn('[pdf] figure selection failed — continuing without figures', { error: selectionError });
+    }
+    if (selection) images.push(...selection.images);
     figureStats = {
       pages: pageData.length,
-      candidates: selection.candidates,
-      paths: selection.paths,
-      dropped: selection.dropped,
-      kept: selection.images.length,
-      keptByPage: selection.images.map((i) => `p${i.page}:${i.kind}`),
-      rejections: (selection.rejections || []).slice(0, 50),
+      failedPages,
+      figureScanFailedPages,
+      ...(selectionError ? { selectionError } : {}),
+      candidates: selection ? selection.candidates : { raster: 0, vector: 0 },
+      paths: selection ? selection.paths : { raster: 0, vector: 0 },
+      dropped: selection ? selection.dropped : {},
+      kept: selection ? selection.images.length : 0,
+      keptByPage: selection ? selection.images.map((i) => `p${i.page}:${i.kind}`) : [],
+      rejections: selection ? (selection.rejections || []).slice(0, 50) : [],
     };
   } finally {
     try {
@@ -288,19 +284,16 @@ function pointsAABB(pts, m) {
 }
 
 /**
- * Walk one page's operator list, tracking the current transformation matrix
- * (with save/restore stacks) and collecting:
+ * The page's DRAWING geometry from its operator list: vector paths and raster
+ * images as bounding boxes in user space (y-up). Walks the current
+ * transformation matrix (with save/restore stacks) and collects:
  *   - raster paints (image XObjects drawn over the unit square under the CTM)
  *   - vector path fills/strokes (their point AABB under the CTM)
- *   - joined text lines with the baseline y (user space) of each line's first
- *     item — the same line-join rules as extractText, so marker placement
- *     matches the text the AI later sees.
- * Returns { paints, rows, width, height } in user space (y-up).
+ * Throws to its caller on anything pdfjs cannot replay — a broken diagram
+ * stream must cost only the diagrams, never the page that carries them.
  */
-async function analyzePage(doc, pageNo, mathBase = 0) {
+async function pagePaints(page, pageNo) {
   const { OPS } = loadPdfjs();
-  const page = await doc.getPage(pageNo);
-  const vp = page.getViewport({ scale: 1 });
   const ops = await page.getOperatorList();
   const paints = [];
   let ctm = [1, 0, 0, 1, 0, 0];
@@ -379,6 +372,37 @@ async function analyzePage(doc, pageNo, mathBase = 0) {
     }
   }
   seal();
+  return paints;
+}
+
+/**
+ * One page, read as two halves that are allowed to fail apart. The GRAPHICS
+ * half (pagePaints — the operator list behind every diagram) is best-effort:
+ * a stream pdfjs cannot replay leaves scanError and no figures, while the
+ * page keeps its TEXT, which is what an import actually needs. The TEXT half
+ * (getTextContent — joined with the same line rules as extractText, so marker
+ * placement matches what the AI sees) is what the page is kept for; if IT
+ * throws, the caller skips the page and reports which one it was.
+ * Returns { paints, rows, mathExprs, width, height, scanError } in user
+ * space (y-up).
+ */
+async function analyzePage(doc, pageNo, mathBase = 0) {
+  const page = await doc.getPage(pageNo);
+  const vp = page.getViewport({ scale: 1 });
+
+  // Diagram geometry, read on its own: a page whose content stream pdfjs
+  // refuses (unsupported filter, corrupt path data, an odd drawing op) keeps
+  // its text and loses only its figures — a diagram problem must never cost
+  // the page, let alone the paper. What could not be read rides along as
+  // scanError so the import note can name the page.
+  let paints = [];
+  let scanError = '';
+  try {
+    paints = await pagePaints(page, pageNo);
+  } catch (err) {
+    scanError = String((err && err.message) || err || 'unreadable page graphics');
+    console.warn(`[pdf] diagram scan failed on page ${pageNo} — keeping its text`, { error: scanError });
+  }
 
   // Text lines (user space) from getTextContent, joined with the same
   // whitespace rules as extractText so markers land on the same line boxes.
@@ -448,7 +472,7 @@ async function analyzePage(doc, pageNo, mathBase = 0) {
   }
   diag('page extraction', { page: pageNo, rows: rows.length, mathExpressions: exprs.length,
     mathMarkers: rows.reduce((n, row) => n + (row.line.match(/\[MATH:\d+\]/g) || []).length, 0) });
-  return { paints, rows, mathExprs: exprs, width: vp.width, height: vp.height };
+  return { paints, rows, mathExprs: exprs, width: vp.width, height: vp.height, scanError };
 }
 
 /**
@@ -1013,8 +1037,29 @@ async function analyzeDocument(buffer) {
 async function analyzeDocumentWithDoc(doc, buffer) {
   const pageData = [];
   let mathBase = 0;
+  // What the reader could not do, kept per page so the import note can say
+  // WHICH pages are missing or diagramless instead of leaving an admin with
+  // a dead job and no error anyone can find.
+  const failedPages = [];
+  const figureScanFailedPages = [];
   for (let p = 1; p <= doc.numPages; p++) {
-    const data = await analyzePage(doc, p, mathBase);
+    let data;
+    try {
+      data = await analyzePage(doc, p, mathBase);
+    } catch (err) {
+      // One page pdfjs cannot open (corrupt object, broken text stream) must
+      // never cost the whole paper: the page contributes nothing, every other
+      // page still imports, and the skip is reported — the questions printed
+      // only on the skipped page are what is lost, and that is a re-upload of
+      // one page, not a failed import.
+      console.warn(`[pdf] page ${p} could not be parsed — skipping it`, { error: (err && err.message) || String(err) });
+      failedPages.push(p);
+      data = { paints: [], rows: [], mathExprs: [], width: 0, height: 0 };
+    }
+    // A page whose diagram stream refused to read (analyzePage's scanError)
+    // already kept its text; only its figures are gone, so it is counted
+    // apart from a skipped page — different loss, different fix.
+    if (data.scanError) figureScanFailedPages.push(p);
     pageData.push(data);
     mathBase += data.mathExprs.length;
   }
@@ -1076,9 +1121,25 @@ async function analyzeDocumentWithDoc(doc, buffer) {
   // and so every rejected candidate is counted by reason. Without those counts
   // a paper with no figures looks identical to a paper whose figures were all
   // filtered out, which is the one diagnosis an import must be able to make.
-  const { images, dropped, candidates, paths, rejections } = selectFigureRegions(pageData);
+  // The filter itself is guarded: a rule that cannot run (NaN geometry from an
+  // odd transform, a pathological page) gives up on FIGURES — every question
+  // still imports — and the failure is reported instead of thrown.
+  let selection = null;
+  let selectionError = '';
+  try {
+    selection = selectFigureRegions(pageData);
+  } catch (err) {
+    selectionError = String((err && err.message) || err || 'the figure filter could not run');
+    console.warn('[pdf] figure selection failed — continuing without figures', { error: selectionError });
+  }
+  const { images, dropped, candidates, paths, rejections } = selection || {
+    images: [], dropped: {}, candidates: { raster: 0, vector: 0 }, paths: { raster: 0, vector: 0 }, rejections: [],
+  };
   const figureStats = {
     pages: pageData.length,
+    failedPages,
+    figureScanFailedPages,
+    ...(selectionError ? { selectionError } : {}),
     candidates,
     paths,
     dropped,
@@ -1678,4 +1739,4 @@ function saveUpload(buffer, originalName) {
   return filePath;
 }
 
-module.exports = { extractText, extractDocument, textWithMarkers, stripMarkers, renderImage, renderVectorRegion, renderMathRegion, renderPageToBuffer, saveUpload, loadPdfjs, openDoc, needsOcrFallback };
+module.exports = { extractText, extractDocument, textWithMarkers, stripMarkers, renderImage, renderVectorRegion, renderMathRegion, renderPageToBuffer, saveUpload, loadPdfjs, openDoc, needsOcrFallback, analyzeDocumentWithDoc };
