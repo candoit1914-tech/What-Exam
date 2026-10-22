@@ -25,6 +25,19 @@ function openaiConfigured() {
   return !!(config.openai && config.openai.apiKey);
 }
 
+/**
+ * Whether a vision pass can be attempted at all: AI_VISION must be on AND some
+ * provider must be able to see. The chat primary counts (AI_BASE_URL is set
+ * even when it is only a gateway, and a gateway model may well do vision), and
+ * so does the admin's paid OpenAI account on its own — a deployment that set
+ * nothing but OPENAI_API_KEY has a working vision model, and gating this on
+ * the chat primary alone is what left figure rescue switched off there while
+ * the paid credit sat unused.
+ */
+function visionConfigured() {
+  return !!config.ai.vision && (aiConfigured() || openaiConfigured());
+}
+
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /**
@@ -369,8 +382,12 @@ function puterConfigured() {
   return puter.isConfigured();
 }
 
-async function chatJSON(messages, { temperature = 0.4, maxRetries = 2, timeoutMs = config.ai.timeoutMs, maxTokens = 8192 } = {}) {
-  if (!aiConfigured() && !puterConfigured()) {
+async function chatJSON(messages, { temperature = 0.4, maxRetries = 2, timeoutMs = config.ai.timeoutMs, maxTokens = 8192, prefer = '' } = {}) {
+  // A paid OpenAI key on its own IS a configured AI. The guard used to name
+  // the chat primary only, so a deployment with nothing but OPENAI_API_KEY
+  // threw "AI is not configured" from the very call the paid account exists
+  // to answer.
+  if (!aiConfigured() && !puterConfigured() && !openaiConfigured()) {
     throw new AIError('AI is not configured. Set AI_API_KEY and AI_BASE_URL in .env');
   }
 
@@ -394,7 +411,7 @@ async function chatJSON(messages, { temperature = 0.4, maxRetries = 2, timeoutMs
   // configured.  It is NOT raced with other providers because its internal
   // xhr polyfill can crash the process via unhandled rejections on error
   // responses (see @heyputer/puter.js xhrshim.js:190).
-  if (!aiConfigured() && puterConfigured()) {
+  if (!aiConfigured() && !openaiConfigured() && puterConfigured()) {
     console.log('[ai] Using Puter.js as sole provider');
     return require('./puter').chat(messages, { temperature, maxTokens }).then((res) => {
       if (!res) throw new AIError('Puter.js returned empty response');
@@ -431,11 +448,20 @@ async function chatJSON(messages, { temperature = 0.4, maxRetries = 2, timeoutMs
   // the primary would have made. This is the line between "the AI provider
   // did not answer in time" killing an import and that same import quietly
   // finishing on the account the admin already pays for.
+  //
+  // `prefer: 'openai'` turns that around for the calls that need SIGHT: figure
+  // localisation is asked for on the vision model and goes first, because a
+  // text-only gateway model answers 200 with no boxes and the figure simply
+  // never reaches the chat. The primary stays queued behind it, so a paid key
+  // that is absent changes nothing about the ordinary order.
+  const openaiModel = prefer === 'openai'
+    ? (config.openai.visionModel || config.openai.model)
+    : config.openai.model;
   const openaiFallback = () =>
     callEndpoint({
       baseUrl: config.openai.baseUrl,
       apiKey: config.openai.apiKey,
-      model: config.openai.model,
+      model: openaiModel,
       ...common,
     });
 
@@ -453,6 +479,11 @@ async function chatJSON(messages, { temperature = 0.4, maxRetries = 2, timeoutMs
   // skipped; the last resort below still reaches the primary.
   const providers = [];
   const providerNames = [];
+  const openaiFirst = prefer === 'openai' && openaiConfigured();
+  if (openaiFirst && isProviderAvailable('openai')) {
+    providers.push({ fn: openaiFallback, name: 'openai' });
+    providerNames.push(openaiModel || 'openai');
+  }
   if (primary && isProviderAvailable('primary')) {
     providers.push({ fn: primary, name: 'primary' });
     providerNames.push(config.ai.model);
@@ -461,7 +492,7 @@ async function chatJSON(messages, { temperature = 0.4, maxRetries = 2, timeoutMs
     providers.push({ fn: secondary, name: 'secondary' });
     providerNames.push(config.claude.model || 'secondary');
   }
-  if (openaiConfigured() && isProviderAvailable('openai')) {
+  if (openaiConfigured() && !openaiFirst && isProviderAvailable('openai')) {
     providers.push({ fn: openaiFallback, name: 'openai' });
     providerNames.push(config.openai.model || 'openai');
   }
@@ -3537,7 +3568,10 @@ RULES:
  * the provider is missing, the model is unsure, or nothing passes validation.
  */
 async function locateFigures({ imageBase64, mimeType = 'image/png', pageWidth, pageHeight, hint = '' }) {
-  if (!config.ai.vision || !aiConfigured() || !imageBase64) return [];
+  // AI_VISION on, and a provider that can SEE — the chat primary or the paid
+  // OpenAI account alone. Gating on the chat primary alone is why a paid key
+  // with no gateway produced no figures at all.
+  if (!visionConfigured() || !imageBase64) return [];
   if (!(pageWidth > 0) || !(pageHeight > 0)) return [];
   // Read the export so tests can stub it, as extractQuestionsFromText does.
   const chatJSON = module.exports.chatJSON;
@@ -3573,7 +3607,11 @@ async function locateFigures({ imageBase64, mimeType = 'image/png', pageWidth, p
           ],
         },
       ],
-      { temperature: 0, maxRetries: 1, maxTokens: 1200 }
+      // prefer: 'openai' — the paid account's vision model leads, the chat
+      // primary waits behind it. A gateway model that cannot read an image
+      // used to answer this call with "no figures" and lose the page's
+      // diagram for good, while the account the admin pays for sat unused.
+      { temperature: 0, maxRetries: 1, maxTokens: 1200, prefer: 'openai' }
     );
   } catch (err) {
     console.warn('[ai] figure localisation failed', { error: err && err.message });
@@ -3804,6 +3842,7 @@ module.exports = {
   AIError,
   aiConfigured,
   openaiConfigured,
+  visionConfigured,
   chatJSON,
   mapLimit,
   batchConcurrencyFor,

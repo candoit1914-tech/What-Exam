@@ -56,19 +56,24 @@ const orig = {};
 before(() => {
   orig.vision = config.ai.vision;
   orig.apiKey = config.ai.apiKey;
+  orig.openaiKey = config.openai.apiKey;
   orig.aiConfigured = aiMod.aiConfigured;
   orig.locateFigures = aiMod.locateFigures;
   orig.chatJSON = aiMod.chatJSON;
   config.ai.vision = true;
-  // locateFigures calls the internal aiConfigured(), which reads the config:
-  // give it a key so the gates under test are the ones this file means to
-  // exercise (vision off / model failing), not "no provider at all".
+  // locateFigures reads the config through the internal aiConfigured(): give it
+  // a key so the gates under test are the ones this file means to exercise
+  // (vision off / model failing), not "no provider at all". The paid OpenAI
+  // key is pinned OFF for the same reason — the cases below are about the chat
+  // provider, and one test turns the paid key on for itself.
   config.ai.apiKey = 'test-key';
+  config.openai.apiKey = '';
   aiMod.aiConfigured = () => true;
 });
 after(() => {
   config.ai.vision = orig.vision;
   config.ai.apiKey = orig.apiKey;
+  config.openai.apiKey = orig.openaiKey;
   aiMod.aiConfigured = orig.aiConfigured;
   aiMod.locateFigures = orig.locateFigures;
   aiMod.chatJSON = orig.chatJSON;
@@ -194,4 +199,84 @@ test('locateFigures converts units and throws away boxes that are not figures', 
   assert.ok(user[1].image_url.url.startsWith('data:image/png;base64,'));
   assert.ok(user[0].text.includes('study the diagram above'), 'the hint is included');
   assert.ok(user[0].text.includes('"figures"'), 'the answer shape is spelled out');
+});
+
+// ── coverage: every page, and the account that can actually see ────────
+
+/**
+ * `pages` pages, each naming its OWN figure (so each anchor is findable) and
+ * each drawing under the scanner's size floor — the shape of a real paper whose
+ * diagrams the geometric pass cannot assemble.
+ */
+async function manyMissingFigurePdf(pages) {
+  const doc = new PDFDocument({ size: 'A4', margin: 50 });
+  for (let p = 1; p <= pages; p++) {
+    if (p > 1) doc.addPage();
+    doc.fontSize(12).text(`${p}. Study the diagram above on page ${p}. The shape shows`);
+    doc.fontSize(11).text('A. a cycle   B. a graph   C. a table   D. a scale');
+    doc.moveDown(0.5);
+    doc.lineWidth(2).strokeColor('#000');
+    doc.rect(150, 300, 60, 60).stroke();
+    doc.moveTo(150, 300).lineTo(210, 360).stroke();
+    doc.moveTo(210, 300).lineTo(150, 360).stroke();
+  }
+  doc.end();
+  return collectPdf(doc);
+}
+
+test('every page that asks for a figure gets its own vision pass, however many there are', async () => {
+  // The rescue used to stop after three pages. A paper whose diagrams live on
+  // pages 1, 4, 5, 9 and 12 therefore lost the ones past the cap, and every
+  // question under them reached WhatsApp with no figure above it.
+  const buf = await manyMissingFigurePdf(5);
+  const sourceText = await pdf.textWithMarkers(buf);
+  assert.equal(sourceText.images.length, 0, 'the 0.7% drawings stay under the scanner floor on every page');
+
+  const hints = [];
+  aiMod.locateFigures = async ({ hint }) => { hints.push(String(hint)); return [{ x: 150, y: 300, w: 60, h: 60 }]; };
+
+  const added = await pdfImport.recoverFiguresWithVision(buf, sourceText);
+
+  assert.equal(added, 5, 'all five pages are rescued — no cap silently skips the diagrams past the third page');
+  assert.equal(hints.length, 5, 'vision was asked exactly once per page that needed it');
+  for (let p = 1; p <= 5; p++) {
+    assert.ok(hints.some((h) => h.includes(`on page ${p}`)), `page ${p} was asked about its own figure`);
+  }
+  assert.deepEqual(
+    sourceText.markers.map((m) => m.page),
+    [1, 2, 3, 4, 5],
+    'the figures attach in page order, whatever order the answers came back in'
+  );
+  assert.equal(sourceText.images.length, 5, 'and each one is on the page it was found on');
+});
+
+test('a paid OpenAI key alone turns figure vision on, and is asked first', async () => {
+  // No chat gateway at all: OPENAI_API_KEY on its own. The gate used to be the
+  // chat primary's to give, so vision stayed off there while the paid credit
+  // sat unused — and the call that did go out never named the paid model.
+  aiMod.locateFigures = orig.locateFigures;
+  const saved = {
+    aiKey: config.ai.apiKey,
+    aiBase: config.ai.baseUrl,
+    openaiKey: config.openai.apiKey,
+    chatJSON: aiMod.chatJSON,
+  };
+  const asks = [];
+  try {
+    config.ai.apiKey = '';
+    config.ai.baseUrl = '';
+    config.openai.apiKey = 'sk-paid-platform-test';
+    config.ai.vision = true;
+    aiMod.chatJSON = async (messages, opts) => { asks.push(opts || {}); return { figures: [] }; };
+
+    await aiMod.locateFigures({ imageBase64: 'AAA', pageWidth: 600, pageHeight: 800, hint: 'study the diagram' });
+
+    assert.equal(asks.length, 1, 'the gate opens on the paid key alone — vision is not the chat primary\'s to grant');
+    assert.equal(asks[0].prefer, 'openai', 'and the paid account, on its vision model, is the one asked first');
+  } finally {
+    config.ai.apiKey = saved.aiKey;
+    config.ai.baseUrl = saved.aiBase;
+    config.openai.apiKey = saved.openaiKey;
+    aiMod.chatJSON = saved.chatJSON;
+  }
 });

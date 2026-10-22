@@ -208,6 +208,51 @@ test('with no OpenAI key the photo path is exactly as it was', async () => {
   }
 });
 
+test('figure vision asks the paid account first, on its vision model', async () => {
+  // locateFigures is the caller. With a gateway primary AND the paid key set,
+  // the paid account leads — a gateway model that cannot read an image answers
+  // with "no figures" and loses the page's diagram for good, while the account
+  // the admin pays for sits unused. Real chatJSON; only fetch is stubbed.
+  const savedFetch = global.fetch;
+  const savedVision = config.ai.vision;
+  const saved = { openai: config.openai, ai: { ...config.ai } };
+  const calls = [];
+  try {
+    ai.resetCircuitBreakers();
+    config.openai = { baseUrl: 'https://api.openai.com/v1', apiKey: 'sk-live-openai-test', model: 'gpt-4o-mini', visionModel: 'gpt-4o-mini' };
+    config.ai.baseUrl = 'https://api.ashna.ai/v1/api';
+    config.ai.apiKey = 'gateway-chat-key';
+    config.ai.model = 'gpt-5-mini';
+    config.ai.vision = true;
+    global.fetch = async (url, init) => {
+      calls.push({ url: String(url), body: init && init.body });
+      return visionReply('{"figures":[{"x":0.2,"y":0.2,"w":0.3,"h":0.3}]}');
+    };
+
+    const boxes = await ai.locateFigures({
+      imageBase64: 'AAA',
+      pageWidth: 600,
+      pageHeight: 800,
+      hint: 'study the diagram above',
+    });
+
+    assert.equal(boxes.length, 1, 'the box came back and passed validation');
+    assert.equal(calls.length, 1, 'the paid account answered first, so the gateway is never billed for the page image');
+    assert.match(calls[0].url, /api\.openai\.com/, 'the call went to OpenAI itself');
+    const body = JSON.parse(calls[0].body);
+    assert.equal(body.model, 'gpt-4o-mini', 'on the vision model — this is a sight call, not a chat one');
+    assert.equal(body.messages[1].content[1].type, 'image_url', 'the page image rode along');
+  } finally {
+    global.fetch = savedFetch;
+    config.ai.vision = savedVision;
+    config.openai = saved.openai;
+    config.ai.baseUrl = saved.ai.baseUrl;
+    config.ai.apiKey = saved.ai.apiKey;
+    config.ai.model = saved.ai.model;
+    ai.resetCircuitBreakers();
+  }
+});
+
 test('openaiConfigured mirrors the key, and gates open with it', () => {
   const saved = config.openai;
   try {

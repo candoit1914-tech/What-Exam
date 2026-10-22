@@ -132,6 +132,13 @@ const config = {
     // backoff absorbs any 429 a tighter account does see.
     generateConcurrency: parseInt(process.env.AI_GENERATE_CONCURRENCY || '10', 10),
     vision: process.env.AI_VISION === 'true',
+    // How many pages ONE import may show to the vision rescue: the pages whose
+    // own text tells the student to study a figure but which gave the scanner
+    // nothing to assemble. 0 — the default — means EVERY page that needs it.
+    // The old fixed cap of 3 quietly skipped the diagrams on page 4, 9 and 12,
+    // and each of those questions reached WhatsApp with no figure above it. Set
+    // a positive number only to bound what one import may spend on vision.
+    visionPageLimit: parseInt(process.env.AI_VISION_PAGE_LIMIT || '0', 10),
   },
 
   // Speech-to-text is a SEPARATE provider from chat, deliberately. The chat

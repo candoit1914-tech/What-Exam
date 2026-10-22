@@ -52,6 +52,12 @@ services:
         value: low
       - key: AI_VISION
         value: "true"
+      # Every page of an uploaded PDF that asks for a figure gets its own
+      # vision rescue pass (0 = no cap). A paid OPENAI_API_KEY (dashboard
+      # secret below) turns the rescue on even if AI_VISION is off, and is
+      # asked first, on its own vision model.
+      - key: AI_VISION_PAGE_LIMIT
+        value: "0"
       - key: AI_TIMEOUT_MS
         value: "120000"
       - key: AI_BLOCK_TIMEOUT_MS
@@ -67,9 +73,10 @@ services:
       # ── Secrets: set these in the Render dashboard, NOT here ────────────
       # AI_API_KEY                 (AshnaAI)
       # OPENAI_API_KEY             (paid OpenAI platform key - transcribes voice
-      #                             notes with Whisper and reads photo answers
-      #                             with vision; optional but the simplest way
-      #                             to enable both media features)
+      #                             notes with Whisper, reads photo answers
+      #                             with vision, and finds figures the PDF page
+      #                             scan missed; optional but the simplest way
+      #                             to enable all three media features)
       # AI_TRANSCRIBE_API_KEY      (speech-to-text; chat gateway cannot do audio
       #                             and is NOT needed when OPENAI_API_KEY is set)
       # ADMIN_PASSWORD             (a STABLE value - without it a new one is

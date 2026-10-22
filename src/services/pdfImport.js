@@ -130,9 +130,20 @@ function attachmentSummary({ requested = 0, attached = 0, failures = [], diagnos
 // calls after every biology question.
 const FIGURE_REF = /\b(?:figure|diagram|illustration|graph|chart|picture|photograph|drawing|plate)\b/i;
 const FIGURE_REF_CONTEXT = /\b(?:above|below|shown|given|overleaf|opposite|labelled|labeled|study|examine|refer)\b/i;
-// Budget: an import already spends many AI calls; this one only exists to
-// rescue figures, so it never reads more than a few pages.
-const VISION_PAGE_LIMIT = 3;
+// How many pages ONE import may show to the vision rescue. The cap used to be
+// a hardcoded 3, which quietly skipped the diagrams on page 4, 9 and 12 — and
+// each of those questions then reached WhatsApp with no figure above it. 0 (the
+// default) means every page that needs it; a positive AI_VISION_PAGE_LIMIT
+// bounds what one import spends on vision.
+function visionPageLimit() {
+  const limit = Number(config.ai.visionPageLimit);
+  return Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : Infinity;
+}
+
+// Pages rescued at the same time. Rendering a page opens its own worker and
+// every page costs one vision call, so three in flight keeps a long paper's
+// rescue moving without opening a worker per page of the document.
+const VISION_PAGE_CONCURRENCY = 3;
 
 function pngSize(buf) {
   // PNG: 8-byte signature, 4-byte chunk length, "IHDR", then width/height.
@@ -154,7 +165,7 @@ function pagesMissingFigures(sourceText) {
     });
     if (refs.length) out.push({ page, refs });
   });
-  return out.slice(0, VISION_PAGE_LIMIT);
+  return out.slice(0, visionPageLimit());
 }
 
 /** A box of blank paper is not a figure, however confidently it was boxed. */
@@ -212,33 +223,72 @@ function attachVisionFigure(sourceText, page, box, refs) {
 
 /**
  * Locate figures the page scanner missed, on the pages whose own text says
- * there is one. Bounded (a few pages), best-effort (never throws into the
- * import), and counted so the admin's import note can say the AI found them.
+ * there is one. EVERY such page gets its pass (a positive config.ai.visionPageLimit
+ * is the only cap), best-effort (never throws into the import), and counted so
+ * the admin's import note can say the AI found them.
  * Returns how many figures were recovered.
  */
 async function recoverFiguresWithVision(buffer, sourceText) {
   const recovered = { count: 0 };
   try {
-    if (!config.ai.vision || !ai.aiConfigured()) return 0;
+    // AI_VISION on and a provider that can SEE — the chat primary or the paid
+    // OpenAI account alone (locateFigures asks for the paid one first).
+    if (!ai.visionConfigured()) return 0;
     const pending = pagesMissingFigures(sourceText);
     if (!pending.length) return 0;
-    for (const { page, refs } of pending) {
-      const pagePng = await pdf.renderPageToBuffer(buffer, page, 1, { text: true });
-      const size = pngSize(pagePng);
-      if (!size) continue;
-      const hint = refs.map((r) => r.line).join('\n').slice(0, 400);
-      const boxes = await ai.locateFigures({
-        imageBase64: pagePng.toString('base64'),
-        pageWidth: size.width,
-        pageHeight: size.height,
-        hint,
-      });
+
+    // The expensive half — render, send the image, read the boxes back — runs
+    // a few pages at a time. Rendering a page spins up its own worker and each
+    // page is one vision call, so a long paper must neither open every worker
+    // at once nor crawl through them one by one.
+    const found = new Array(pending.length);
+    let cursor = 0;
+    const lane = async () => {
+      for (;;) {
+        const i = cursor++;
+        if (i >= pending.length) return;
+        const { page, refs } = pending[i];
+        try {
+          const pagePng = await pdf.renderPageToBuffer(buffer, page, 1, { text: true });
+          const size = pngSize(pagePng);
+          if (!size) { found[i] = []; continue; }
+          const hint = refs.map((r) => r.line).join('\n').slice(0, 400);
+          const boxes = await ai.locateFigures({
+            imageBase64: pagePng.toString('base64'),
+            pageWidth: size.width,
+            pageHeight: size.height,
+            hint,
+          });
+          const inked = [];
+          for (const box of boxes || []) {
+            if (!(await boxHasInk(pagePng, box))) continue;
+            inked.push(box);
+          }
+          found[i] = inked;
+        } catch (err) {
+          // One page that cannot be read costs that page and nothing else —
+          // never the rescue as a whole, and never the import behind it.
+          console.warn('[pdfImport] vision figure recovery failed for a page', {
+            page,
+            error: (err && err.message) || String(err),
+          });
+          found[i] = [];
+        }
+      }
+    };
+    await Promise.all(
+      Array.from({ length: Math.min(VISION_PAGE_CONCURRENCY, pending.length) }, () => lane())
+    );
+
+    // The boxes are ATTACHED in page order: the marker index is the figure's
+    // place in the list, and attaching in completion order would make that
+    // list depend on which provider happened to answer first.
+    for (let i = 0; i < pending.length; i++) {
+      const { page, refs } = pending[i];
       const taken = [];
-      for (let i = 0; i < boxes.length; i++) {
-        const box = boxes[i];
+      for (const box of found[i] || []) {
         // Two boxes on top of each other are the same figure reported twice.
         if (taken.some((b) => Math.abs(b.x - box.x) < 10 && Math.abs(b.y - box.y) < 10)) continue;
-        if (!(await boxHasInk(pagePng, box))) continue;
         const attached = attachVisionFigure(sourceText, page, box, refs);
         if (!attached) continue;
         taken.push(box);
@@ -641,9 +691,10 @@ async function startJob(jobId, buffer, opts = {}) {
         );
       }
       // Pages whose own text tells the student to study a figure, but which gave
-      // the scanner nothing to assemble, get one chance with AshnaAI's vision:
-      // point at what is already printed on the page. It runs before anything
-      // reads sourceText.text/images/markers, so a rescued figure travels through
+      // the scanner nothing to assemble, get a vision pass: point at what is
+      // already printed on the page — every such page, asked first of the paid
+      // OpenAI account (see ai.locateFigures). It runs before anything reads
+      // sourceText.text/images/markers, so a rescued figure travels through
       // extraction exactly like a geometrically found one.
       const visionRecovered = await recoverFiguresWithVision(buffer, sourceText);
       if (visionRecovered) {

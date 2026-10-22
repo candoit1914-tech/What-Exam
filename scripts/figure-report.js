@@ -117,7 +117,8 @@ if (!totalFig) {
   console.log('  "No images or diagrams were attached: ... rejected as ..." -> every candidate was filtered; the note names the rule.');
   console.log('  "...no saved question references them"            -> figures exist, but no saved question kept their marker.');
   console.log('');
-  console.log('For scanned papers also confirm AI_VISION=true (it asks the model to point at a figure the scan missed).');
+  console.log('For scanned papers also confirm figure vision is on: AI_VISION=true, or a paid OPENAI_API_KEY');
+  console.log('(asked first, on its own vision model) - it asks the model to point at a figure the scan missed).');
 } else {
   console.log(`${totalFig} of ${totalQ} question(s) carry a figure.`);
   const missing = [...byExam.values()].reduce((n, r) => n + r.missing, 0);
