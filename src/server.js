@@ -311,15 +311,40 @@ if (require.main === module) {
     // every uploaded photo and voice note. It then re-seeds a fresh exam, which
     // made the loss look like a normal boot. Losing a live exam database is far
     // too expensive to discover from a log line further down.
-    const onEphemeralStorage = !process.env.DB_PATH && !process.env.UPLOADS_DIR;
+    //
+    // Both failure shapes are covered:
+    //   1. the variables are unset (legacy check), and
+    //   2. they are SET but point inside the container filesystem anyway -
+    //      no disk mounted, or a disk mounted at a different path. Shape 2 is
+    //      the one that bit a live deployment: the old warning stayed silent,
+    //      the logs showed nothing worse than a routine "[seed] DB was empty",
+    //      and every deploy quietly destroyed the previous database.
+    // The check runs only on Render (RENDER env var): elsewhere the mount
+    // table of a developer's machine would report ./data as "ephemeral" and
+    // cry wolf on every local boot.
+    const onRender = !!process.env.RENDER;
+    const unsetStorage = !process.env.DB_PATH && !process.env.UPLOADS_DIR;
+    const onEphemeralStorage = unsetStorage
+      || (onRender && require('./services/storageHealth')
+        .ephemeralPaths([config.dbPath, config.uploadsDir]).length > 0);
     if (onEphemeralStorage) {
       console.warn('');
       console.warn('  ============================================================================');
-      console.warn('   DATA LOSS RISK: DB_PATH and UPLOADS_DIR are not set.');
+      console.warn(unsetStorage
+        ? '   DATA LOSS RISK: DB_PATH and UPLOADS_DIR are not set.'
+        : '   DATA LOSS RISK: DB_PATH/UPLOADS_DIR are set, but not on a mounted disk.');
       console.warn('');
       console.warn('   The database and uploads are inside the container filesystem, which');
       console.warn('   Render DELETES on every deploy and restart. Every student, session,');
       console.warn('   graded answer, photo and voice note will be gone.');
+      if (!unsetStorage) {
+        console.warn('');
+        console.warn('   Set does not mean safe: these paths resolve to the container FS:');
+        console.warn(`        DB_PATH      -> ${config.dbPath}`);
+        console.warn(`        UPLOADS_DIR  -> ${config.uploadsDir}`);
+        console.warn('   A disk must be mounted at /opt/render/project/src/data (Render');
+        console.warn('   dashboard -> service -> Disks) for these paths to survive a deploy.');
+      }
       console.warn('');
       console.warn('   Fix: mount a Render disk at /opt/render/project/src/data, then set');
       console.warn('        DB_PATH=/opt/render/project/src/data/exams.db');
