@@ -1379,6 +1379,39 @@ const FIGURE_PAIR_RETRY_MS = 4000;
 
 const pairKey = (sessionId, qOrder) => `${sessionId}:${qOrder}`;
 
+// ── delivery locks ─────────────────────────────────────────────────────
+//
+// A send takes seconds — every bubble is paced — and WhatsApp does not wait
+// for the answer: a retried webhook, the student's own next message and the
+// pair-retry timer all arrive while question 2 is still going out, and every
+// one of them read "question 2 has not gone out yet" before the first had
+// finished. The chat then got question 2 twice.
+//
+// runExclusive() closes that window by giving each key a queue: the task runs
+// only once the previous holder has finished, so any re-read inside it sees
+// the world as that delivery left it. Two keys are used — one per number (a
+// student's messages keep their own order) and one per question (the timer, a
+// replayed outbox row and the next message all converge on the same question).
+// They are never nested — a caller holding one never waits for the other — so
+// there is no ordering between them to get wrong. A failed task rejects only
+// its own caller and leaves the queue working, and the queue is dropped the
+// moment it is empty, so neither map can grow with the process.
+const inboundChains = new Map();
+const questionSendChains = new Map();
+
+function runExclusive(map, key, task) {
+  const previous = map.get(key) || Promise.resolve();
+  const run = previous.then(() => task());
+  // The queue's own promise never rejects: an error belongs to the caller who
+  // awaits `run`, never to the task queued behind it.
+  const tail = run.then(() => {}, () => {});
+  map.set(key, tail);
+  tail.then(() => {
+    if (map.get(key) === tail) map.delete(key);
+  });
+  return run;
+}
+
 /**
  * Ask for this pair to be delivered again in a moment.
  *
@@ -1438,44 +1471,56 @@ async function retryQuestionPair(sessionId, qOrder) {
   if (deliveringPairs.has(key)) return false;
   deliveringPairs.add(key);
   try {
-    const recipient = pairRecipient(sessionId, question.id);
-    const student = { id: session.student_id, phone: recipient };
-    const qRow = outbox.enqueue({
-      sessionId,
-      questionId: question.id,
-      qOrder,
-      kind: 'question',
-      recipient,
-    });
-    // The text may already be out — a paid-paper template carried it, or an
-    // earlier delivery was recorded after the send. Only its picture is owed,
-    // and the pair must not put the same question in the chat twice.
-    const textDelivered = qRow.state === 'sent';
+    // The SAME lock sendQuestionTo takes: this retry and a delivery already in
+    // flight for this question are one delivery, and only one of them may put
+    // the question in the chat. Everything that decides what still has to go
+    // out is therefore read inside the lock — after any waiter has finished —
+    // so "the text already went out" is a fact rather than a hope.
+    return await runExclusive(questionSendChains, key, async () => {
+      const recipient = pairRecipient(sessionId, question.id);
+      const student = { id: session.student_id, phone: recipient };
+      const qRow = outbox.enqueue({
+        sessionId,
+        questionId: question.id,
+        qOrder,
+        kind: 'question',
+        recipient,
+      });
+      // The text may already be out — a paid-paper template carried it, or an
+      // earlier delivery was recorded after the send. Only its picture is owed,
+      // and the pair must not put the same question in the chat twice.
+      const textDelivered = qRow.state === 'sent';
 
-    const res = await deliverQuestionFigures(session, student, question);
-    if (res.owed) {
-      scheduleQuestionPairRetry(session, student, question);
-      return false;
-    }
-    if (res.error) {
-      console.warn(
-        `[exam] question ${qOrder} (session ${sessionId}) delivered without its figure: ${res.error.message || res.error}`
-      );
-    }
-    if (!textDelivered) {
-      await sendQuestionBody(session, student, exam, question, questionStemParts(exam, question, session).parts);
-      recordAcceptance(session);
-    }
-    // The question this student was advancing to has now actually landed, so
-    // the position moves with it — otherwise their next answer is read against
-    // the question before it. A re-show behind an owed figure (at or below the
-    // position) retires its row and moves nothing, exactly as before.
-    if (Number(qOrder) > Number(session.current_q_order)) {
-      commitAdvance(session.id, qOrder, qRow.id);
-    } else {
-      outbox.markSent(qRow.id);
-    }
-    return true;
+      const res = await deliverQuestionFigures(session, student, question);
+      if (res.owed) {
+        scheduleQuestionPairRetry(session, student, question);
+        return false;
+      }
+      if (res.error) {
+        console.warn(
+          `[exam] question ${qOrder} (session ${sessionId}) delivered without its figure: ${res.error.message || res.error}`
+        );
+      }
+      if (!textDelivered) {
+        await sendQuestionBody(session, student, exam, question, questionStemParts(exam, question, session).parts);
+        recordAcceptance(session);
+      }
+      // The question this student was advancing to has now actually landed, so
+      // the position moves with it — otherwise their next answer is read against
+      // the question before it. A re-show behind an owed figure (at or below the
+      // position) retires its row and moves nothing, exactly as before. The
+      // position is re-read here because a delivery this call waited for may
+      // have moved it: committing against the snapshot taken before the wait
+      // would drag the student backwards.
+      const position = db.prepare('SELECT current_q_order FROM sessions WHERE id = ?').get(sessionId);
+      const current = Number(position ? position.current_q_order : session.current_q_order);
+      if (Number(qOrder) > current) {
+        commitAdvance(session.id, qOrder, qRow.id);
+      } else {
+        outbox.markSent(qRow.id);
+      }
+      return true;
+    });
   } finally {
     deliveringPairs.delete(key);
   }
@@ -1606,6 +1651,10 @@ async function sendQuestionBody(session, student, exam, question, parts) {
  * held back with it — see the figure pass below. Callers must treat
  * 'withheld' as "not delivered, and not failed": the row stays queued, the
  * position does not move, and the pair is retried.
+ *
+ * The delivery itself runs under the question's lock, so callers that arrive
+ * while it is in flight wait their turn and then read what it left behind
+ * rather than sending the same question a second time.
  */
 async function sendQuestionTo(session, student, qOrder = null) {
   session = db.prepare('SELECT * FROM sessions WHERE id = ?').get(session.id);
@@ -1642,9 +1691,62 @@ async function sendQuestionTo(session, student, qOrder = null) {
     await selection.openChoice(student.phone, session.id, question.section_key);
     return false;
   }
-  // The figure debt is written BEFORE the first bubble: a crash mid-send must
-  // still leave something a retry can find, and it costs nothing when the send
-  // goes through (the same row is retired a few lines below).
+
+  // From here on this is ONE delivery of ONE question, run under the question's
+  // lock: the pair-retry timer, a replayed outbox row and the student's next
+  // message can all be asking for this same question at this moment, and
+  // without the lock their bubbles interleave into the same question twice.
+  //
+  // The checks above are made BEFORE the wait on purpose: every await above
+  // this point returns from the function, so no second delivery can slip
+  // between the question lookup and the lock, and a redirect to another
+  // question returns while no lock is held (one lock is never taken inside
+  // another).
+  const key = pairKey(session.id, question.q_order);
+  // Whether somebody else is already delivering this question. A caller that
+  // has to queue behind one reads a world that delivery has changed; a caller
+  // that does not is alone with its own intent.
+  const queued = questionSendChains.has(key);
+  return runExclusive(questionSendChains, key, () =>
+    deliverOneQuestion(session, student, exam, question, { queued })
+  );
+}
+
+/**
+ * The sending half of sendQuestionTo — the part that puts one question in the
+ * chat — always run while the question's lock is held.
+ */
+async function deliverOneQuestion(session, student, exam, question, { queued }) {
+  // Another delivery of THIS question finished while this caller waited, and
+  // the ledger row is its proof. The row is only read here, inside the lock:
+  // before the wait it could only ever have said "queued". Returning true
+  // WITHOUT sending is the point — the question is already on screen, and
+  // saying yes still lets the caller move the position onto it. A caller that
+  // did not have to wait never takes this branch, so a deliberate re-show (a
+  // nudge, a greeting, the walk off a refused question) repeats as always.
+  if (queued) {
+    const row = db
+      .prepare(
+        "SELECT state FROM message_outbox WHERE session_id = ? AND question_id = ? AND kind = 'question'"
+      )
+      .get(session.id, question.id);
+    if (row && row.state === 'sent') return true;
+  }
+
+  // BOTH debts are written BEFORE the first bubble: a crash mid-send must
+  // still leave something a retry can find, and each costs nothing when the
+  // send goes through. The question's own row is retired the moment its text
+  // lands — not only when the position advances — because that is what the
+  // re-read above trusts, and it is why the paid path's first question (sent
+  // as a bare bubble, with no row of its own) is no longer delivered a second
+  // time by the student's very next reply.
+  const entry = outbox.enqueue({
+    sessionId: session.id,
+    questionId: question.id,
+    qOrder: question.q_order,
+    kind: 'question',
+    recipient: student.phone,
+  });
   openFigureDebt(session, student, question);
 
   // Every bubble that is not the question itself is meta content — section
@@ -1684,6 +1786,7 @@ async function sendQuestionTo(session, student, qOrder = null) {
   }
 
   await sendQuestionBody(session, student, exam, question, parts);
+  outbox.markSent(entry.id);
 
   recordAcceptance(session);
   return true;
@@ -1876,7 +1979,24 @@ async function enterExam(session, student) {
   return { started: true, ok: true, reason: 'started' };
 }
 
+/**
+ * Handle one inbound WhatsApp message.
+ *
+ * One message at a time PER NUMBER, always. WhatsApp retries a webhook it did
+ * not see acknowledged, a student's own next message lands while the previous
+ * one is still being delivered, and every send takes seconds of paced bubbles —
+ * so two handlers used to read "question 2 has not gone out yet" at the same
+ * instant and both answer it, stacking the same question in the chat. Queueing
+ * per number keeps the thread in order and gives every read in the handler a
+ * world the previous message has finished changing; different numbers still
+ * run in parallel, as they always have.
+ */
 async function handleInbound(phone, body, meta = {}) {
+  const key = normalizePhone(phone) || String(phone == null ? '' : phone);
+  return runExclusive(inboundChains, key, () => handleInboundNow(phone, body, meta));
+}
+
+async function handleInboundNow(phone, body, meta = {}) {
   const student = getOrCreateStudent(phone);
   let session = getActiveSession(student.id);
 
