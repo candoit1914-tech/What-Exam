@@ -401,3 +401,85 @@ test('with no OpenAI key, chat keeps its old single-provider shape', async () =>
     config.ai.model = saved.ai.model;
   }
 });
+
+// ── theory photo grading: a vision job that must not be the chat primary's
+//    to gate, and must lead with the account that can see ────────────────
+
+test('theory photo grading runs on the paid key alone — no chat gateway required', async () => {
+  // The gate used to be `aiConfigured()` only, so a deployment running on
+  // nothing but OPENAI_API_KEY threw "AI is not configured" from the very
+  // feature the paid account exists to serve.
+  const savedFetch = global.fetch;
+  const saved = { openai: config.openai, ai: { ...config.ai } };
+  const calls = [];
+  try {
+    ai.resetCircuitBreakers();
+    config.openai = { baseUrl: 'https://api.openai.com/v1', apiKey: 'sk-live-openai-test', model: 'gpt-4o-mini', visionModel: 'gpt-4o-mini' };
+    config.ai.baseUrl = '';
+    config.ai.apiKey = '';
+    global.fetch = async (url, init) => {
+      calls.push({ url: String(url), body: init && init.body });
+      return visionReply('{"marksAwarded":7,"maxMarks":10,"breakdown":[],"feedback":"good","aiGenerated":false}');
+    };
+
+    const grade = await ai.markImageTheory({
+      questionText: 'Explain osmosis with a labelled diagram.',
+      maxMarks: 10,
+      presentationMarks: 0,
+      grammarMarks: 0,
+      imageBase64: 'AAA',
+    });
+
+    assert.equal(grade.marksAwarded, 7, 'the photo of the answer was graded, not refused as unconfigured');
+    assert.equal(calls.length, 1, 'the paid account alone carried the job');
+    assert.match(calls[0].url, /api\.openai\.com/, 'and the grading call went to OpenAI itself');
+  } finally {
+    global.fetch = savedFetch;
+    config.openai = saved.openai;
+    config.ai.baseUrl = saved.ai.baseUrl;
+    config.ai.apiKey = saved.ai.apiKey;
+    ai.resetCircuitBreakers();
+  }
+});
+
+test('with a gateway present, photo grading still asks the paid account first', async () => {
+  // prefer: 'openai', same as figure vision: a model that never saw the photo
+  // can still emit a plausible grade — a silent wrong answer — while the
+  // account that can see sits unused.
+  const savedFetch = global.fetch;
+  const saved = { openai: config.openai, ai: { ...config.ai } };
+  const calls = [];
+  try {
+    ai.resetCircuitBreakers();
+    config.openai = { baseUrl: 'https://api.openai.com/v1', apiKey: 'sk-live-openai-test', model: 'gpt-4o-mini', visionModel: 'gpt-4o-mini' };
+    config.ai.baseUrl = 'https://api.ashna.ai/v1/api';
+    config.ai.apiKey = 'gateway-chat-key';
+    config.ai.model = 'gpt-5-mini';
+    global.fetch = async (url, init) => {
+      calls.push({ url: String(url), body: init && init.body });
+      return visionReply('{"marksAwarded":9,"maxMarks":10,"breakdown":[],"feedback":"ok","aiGenerated":false}');
+    };
+
+    const grade = await ai.markImageTheory({
+      questionText: 'Explain diffusion.',
+      maxMarks: 10,
+      presentationMarks: 0,
+      grammarMarks: 0,
+      imageBase64: 'AAA',
+    });
+
+    assert.equal(grade.marksAwarded, 9);
+    assert.equal(calls.length, 1, 'the paid account answered first, so the gateway is never sent the image');
+    assert.match(calls[0].url, /api\.openai\.com/, 'the photo went to OpenAI itself');
+    const body = JSON.parse(calls[0].body);
+    assert.equal(body.model, 'gpt-4o-mini', 'on the vision model — this is a sight call, not a chat one');
+    assert.equal(body.messages[1].content[1].type, 'image_url', 'the photo rode along');
+  } finally {
+    global.fetch = savedFetch;
+    config.openai = saved.openai;
+    config.ai.baseUrl = saved.ai.baseUrl;
+    config.ai.apiKey = saved.ai.apiKey;
+    config.ai.model = saved.ai.model;
+    ai.resetCircuitBreakers();
+  }
+});

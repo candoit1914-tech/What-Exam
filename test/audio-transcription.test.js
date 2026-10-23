@@ -148,3 +148,88 @@ test('no transcribe provider means the audio endpoint is never called', async ()
     restore();
   }
 });
+
+// ── the paid account as a speech provider, not just a chat one ─────────
+
+/**
+ * Run `fn` with a two-actor cast: a dedicated speech key that FAILS, and the
+ * paid OpenAI account behind it. `route(auth)` decides each answer, so a test
+ * can play "wrong key" then "the real one".
+ */
+function withSpeechCast(fn) {
+  const savedOpenai = config.openai;
+  config.openai = {
+    baseUrl: 'https://api.openai.com/v1',
+    apiKey: 'sk-paid-platform-test',
+    model: 'gpt-4o-mini',
+    visionModel: 'gpt-4o-mini',
+  };
+  return withTranscribeProvider(fn).finally(() => { config.openai = savedOpenai; });
+}
+
+test('a failed dedicated speech key still transcribes through the paid OpenAI account', async () => {
+  // The production shape: AI_TRANSCRIBE_API_KEY holds something that is not a
+  // working OpenAI key (or points at a different host), so Strategy 1 401s.
+  // The paid OPENAI_API_KEY sits right there and used to never be asked —
+  // only chat `input_audio` followed, which a gateway answers with silence,
+  // so every voice note was flagged for review.
+  const orig = global.fetch;
+  const calls = [];
+  try {
+    await withSpeechCast(async () => {
+      config.aiTranscribe = {
+        baseUrl: 'https://api.openai.com/v1',
+        apiKey: 'sk-wrong-transcribe-key',
+        model: 'whisper-1',
+        enabled: true,
+      };
+      global.fetch = async (url, init) => {
+        calls.push({ url: String(url), auth: (init.headers || {}).Authorization });
+        if (calls.length === 1) {
+          return { ok: false, status: 401, text: async () => 'invalid api key', headers: { get: () => null } };
+        }
+        return { ok: true, status: 200, text: async () => 'the real transcript', json: async () => ({}), headers: { get: () => null } };
+      };
+
+      const text = await ai.transcribeAudio(WAV, 'What is the powerhouse of the cell?');
+
+      assert.equal(text, 'the real transcript', 'the paid account answered where the dedicated key failed');
+      assert.equal(calls.length, 2, 'exactly two attempts: the failing key, then the paid account');
+      assert.ok(calls[0].url.endsWith('/audio/transcriptions') && calls[1].url.endsWith('/audio/transcriptions'),
+        'both attempts are real speech endpoints, not chat input_audio');
+      assert.equal(calls[0].auth, 'Bearer sk-wrong-transcribe-key');
+      assert.equal(calls[1].auth, 'Bearer sk-paid-platform-test', 'the paid account carries its own key');
+    });
+  } finally {
+    global.fetch = orig;
+  }
+});
+
+test('the paid account is not asked twice when it already IS the transcribe provider', async () => {
+  // config.js wires OPENAI_API_KEY into aiTranscribe when no dedicated key is
+  // set — same key, same base URL. When that attempt fails, retrying it would
+  // bill the same account twice for the same file; the chain must move on to
+  // the chat fallback instead.
+  const orig = global.fetch;
+  const calls = [];
+  try {
+    await withSpeechCast(async () => {
+      config.aiTranscribe = {
+        baseUrl: 'https://api.openai.com/v1',
+        apiKey: 'sk-paid-platform-test',
+        model: 'whisper-1',
+        enabled: true,
+      };
+      global.fetch = async (url, init) => {
+        calls.push({ url: String(url), auth: (init.headers || {}).Authorization });
+        return { ok: false, status: 401, text: async () => 'invalid api key', headers: { get: () => null } };
+      };
+
+      await assert.rejects(() => ai.transcribeAudio(WAV, 'Q?'));
+      const audioCalls = calls.filter((c) => c.url.includes('/audio/transcriptions'));
+      assert.equal(audioCalls.length, 1, 'the same account is never billed twice for one file');
+    });
+  } finally {
+    global.fetch = orig;
+  }
+});

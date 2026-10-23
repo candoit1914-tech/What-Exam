@@ -3277,8 +3277,13 @@ Rules:
  * config.ai.vision is enabled; text-only providers never reach this.
  */
 async function markImageTheory({ questionText, passage, modelAnswer, keyPoints, rubric, presentationMarks, grammarMarks, maxMarks, studentAnswer, imageBase64 }) {
-  if (!aiConfigured()) {
-    throw new AIError('AI is not configured. Set AI_API_KEY and AI_BASE_URL in .env to mark theory questions.');
+  // The gate must not be the chat primary's to give: grading a PHOTO of an
+  // answer is a vision job, and a deployment running on nothing but
+  // OPENAI_API_KEY can do it as well as the gateway can. Gating on chat
+  // alone threw "AI is not configured" from the very feature the paid
+  // account exists to serve.
+  if (!aiConfigured() && !openaiConfigured()) {
+    throw new AIError('AI is not configured. Set AI_API_KEY or OPENAI_API_KEY in .env to mark theory questions.');
   }
   const user = [
     'Grade the student attempt below against the model answer and rubric.',
@@ -3311,7 +3316,12 @@ async function markImageTheory({ questionText, passage, modelAnswer, keyPoints, 
       ].filter(Boolean),
     },
   ];
-  return chatJSON(messages, { temperature: 0.2 });
+  // prefer: 'openai' — for the same reason figure vision leads with it: a
+  // gateway model that cannot SEE answers this call with a plausible grade
+  // for a photo it never read, while the account that can see sits unused.
+  // The primary stays queued behind the paid account, so a deployment
+  // without the key grades through the gateway exactly as before.
+  return chatJSON(messages, { temperature: 0.2, prefer: 'openai' });
 }
 
 /**
@@ -3647,15 +3657,61 @@ async function locateFigures({ imageBase64, mimeType = 'image/png', pageWidth, p
 }
 
 /**
+ * ONE attempt at an OpenAI-compatible /audio/transcriptions endpoint.
+ * Returns the trimmed transcript or throws — the caller decides whether the
+ * next provider gets a turn. Shared by every speech provider below so the
+ * paid account and a dedicated key run the exact same request shape.
+ */
+async function whisperTranscribe({ baseUrl, apiKey, model }, audioBuffer, { ext, mimeType, prompt, timeoutMs }) {
+  // Node 18+ has built-in FormData and Blob
+  const formData = new FormData();
+  const blob = new Blob([audioBuffer], { type: mimeType });
+  formData.append('file', blob, `audio.${ext}`);
+  formData.append('model', model);
+  formData.append('language', 'en');
+  formData.append('response_format', 'text');
+  formData.append('prompt', prompt);
+
+  const controller = new AbortController();
+  const res = await withHardTimeout(
+    fetch(`${baseUrl}/audio/transcriptions`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${apiKey}` },
+      body: formData,
+      signal: controller.signal,
+    }),
+    timeoutMs,
+    () => controller.abort()
+  );
+  if (!res.ok) {
+    const errText = await res.text().catch(() => '');
+    throw new AIError(`transcription endpoint returned ${res.status}: ${errText.slice(0, 200)}`);
+  }
+  const text = await res.text();
+  // A 200 with an empty body means the endpoint accepted the file but could
+  // not decode it. Falling through to input_audio would then try a chat model,
+  // which on a gateway answers 200 with no transcript too.
+  if (!text || !text.trim() || text.trim() === '[inaudible]') {
+    throw new AIError(`${model} returned an empty transcript`);
+  }
+  return text.trim();
+}
+
+/**
  * Transcribe an audio file (voice message) to text.
- * Strategy: a dedicated speech-to-text provider first (most reliable for
- * audio), then provider chat endpoints with input_audio, then Gemini native.
+ * Strategy 1: speech providers in order — a dedicated key, then the paid
+ * OpenAI account; then provider chat endpoints with input_audio; then Gemini
+ * native.
  */
 async function transcribeAudio(audioPath, questionText) {
   // Entry depends on EITHER provider, not the chat one: audio can be fully
   // transcribable by a speech endpoint even while the chat provider is
   // missing or misconfigured, and gating on chat alone would reject that.
-  const sttConfigured = !!(config.aiTranscribe && config.aiTranscribe.enabled && config.aiTranscribe.apiKey);
+  // The paid OpenAI account counts as speech configured too — its Whisper is
+  // a speech endpoint by definition, and it is the only provider that can
+  // answer when the dedicated key is the thing that is broken.
+  const sttConfigured = !!(config.aiTranscribe && config.aiTranscribe.enabled && config.aiTranscribe.apiKey)
+    || !!(config.openai && config.openai.apiKey);
   if (!sttConfigured && !aiConfigured()) {
     throw new AIError(
       'No provider configured for audio transcription. Set OPENAI_API_KEY (a paid ' +
@@ -3691,55 +3747,57 @@ RULES:
 
   const effectiveTimeout = Math.max(config.ai.timeoutMs, 60000);
 
-  // ── Strategy 1: dedicated speech-to-text provider (most reliable) ─────
+  // ── Strategy 1: speech-to-text providers, in order ─────────────────────
   // Independent of the chat primary on purpose: a chat gateway usually has no
   // speech model, and `input_audio` against one returns 200 with no transcript,
   // which is indistinguishable from silence. Failing loudly here is what keeps
   // a broken STT setup from grading a voice note as blank.
-  if (config.aiTranscribe && config.aiTranscribe.enabled && config.aiTranscribe.apiKey) {
+  const dedicatedStt = !!(config.aiTranscribe && config.aiTranscribe.enabled && config.aiTranscribe.apiKey);
+  // The paid OpenAI account IS a speech provider (Whisper), so it gets its
+  // own attempt whenever Strategy 1 was not already it. Without this, a
+  // dedicated key that fails — wrong key, wrong base URL, expired credit —
+  // left only chat `input_audio` behind it, which a gateway answers with
+  // silence: every voice note was flagged for manual review while the paid
+  // key the admin already pays for sat unused. Skipping when Strategy 1 was
+  // literally this account (same key, same base URL — how config.js wires
+  // OPENAI_API_KEY into aiTranscribe) keeps one account from being billed
+  // twice for the same file.
+  const paidOpenaiStt = !!(config.openai && config.openai.apiKey);
+  const paidAlreadyTried = dedicatedStt
+    && config.aiTranscribe.apiKey === config.openai.apiKey
+    && config.aiTranscribe.baseUrl === config.openai.baseUrl;
+  if (dedicatedStt) {
     try {
       console.log(`[ai] Transcribing audio via ${config.aiTranscribe.model} at ${config.aiTranscribe.baseUrl}...`);
-      // Node 18+ has built-in FormData and Blob
-      const formData = new FormData();
-      const blob = new Blob([audioBuffer], { type: mimeType });
-      formData.append('file', blob, `audio.${ext}`);
-      formData.append('model', config.aiTranscribe.model);
-      formData.append('language', 'en');
-      formData.append('response_format', 'text');
-      formData.append('prompt', questionText);
-
-      const controller = new AbortController();
-      const res = await withHardTimeout(
-        fetch(`${config.aiTranscribe.baseUrl}/audio/transcriptions`, {
-          method: 'POST',
-          headers: { Authorization: `Bearer ${config.aiTranscribe.apiKey}` },
-          body: formData,
-          signal: controller.signal,
-        }),
-        effectiveTimeout,
-        () => controller.abort()
-      );
-
-      if (res.ok) {
-        const text = await res.text();
-        if (text && text.trim() && text.trim() !== '[inaudible]') {
-          console.log(`[ai] Audio transcribed via ${config.aiTranscribe.model}: "${text.trim().slice(0, 150)}..."`);
-          return text.trim();
-        }
-        // A 200 with an empty body means the endpoint accepted the file but
-        // could not decode it. Falling through to input_audio would then try
-        // a chat model, which on a gateway answers 200 with no transcript too.
-        throw new AIError(`${config.aiTranscribe.model} returned an empty transcript`);
-      } else {
-        const errText = await res.text().catch(() => '');
-        console.warn(`[ai] Transcribe API returned ${res.status}: ${errText.slice(0, 200)}`);
-      }
+      const text = await whisperTranscribe(config.aiTranscribe, audioBuffer, {
+        ext, mimeType, prompt: questionText, timeoutMs: effectiveTimeout,
+      });
+      console.log(`[ai] Audio transcribed via ${config.aiTranscribe.model}: "${text.slice(0, 150)}..."`);
+      return text;
     } catch (err) {
       console.warn(`[ai] Transcribe API failed: ${err.message}`);
     }
-  } else {
+  }
+  if (paidOpenaiStt && !paidAlreadyTried) {
+    // whisper-1, not AI_TRANSCRIBE_MODEL: that setting names the DEDICATED
+    // provider's model (often a Groq/local spelling OpenAI does not have),
+    // and the paid account's own endpoint only takes OpenAI's.
+    try {
+      console.log(`[ai] Transcribing audio via the paid OpenAI account (whisper-1) at ${config.openai.baseUrl}...`);
+      const text = await whisperTranscribe(
+        { baseUrl: config.openai.baseUrl, apiKey: config.openai.apiKey, model: 'whisper-1' },
+        audioBuffer,
+        { ext, mimeType, prompt: questionText, timeoutMs: effectiveTimeout }
+      );
+      console.log(`[ai] Audio transcribed via openai (whisper-1): "${text.slice(0, 150)}..."`);
+      return text;
+    } catch (err) {
+      console.warn(`[ai] Paid OpenAI transcription failed: ${err.message}`);
+    }
+  }
+  if (!dedicatedStt && !paidOpenaiStt) {
     console.warn(
-      '[ai] No speech-to-text provider configured (set AI_TRANSCRIBE_API_KEY). ' +
+      '[ai] No speech-to-text provider configured (set OPENAI_API_KEY or AI_TRANSCRIBE_API_KEY). ' +
       'Voice notes cannot be transcribed - they will be flagged for manual review.'
     );
   }
