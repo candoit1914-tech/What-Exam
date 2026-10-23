@@ -133,7 +133,10 @@ const config = {
     // Measured on a real 17-page paper: blocks took 28s-89s to answer. The
     // default carries extra headroom for a flagship reasoning model behind a
     // gateway, which is slower than the host the range was measured on.
-    blockTimeoutMs: parseInt(process.env.AI_BLOCK_TIMEOUT_MS || '360000', 10),
+    // Raised to 10 minutes (was 6): the admin asked for more patience on slow
+    // generations, and with jobs running in the background a long block only
+    // means a longer progress stage — nothing times out waiting for it.
+    blockTimeoutMs: parseInt(process.env.AI_BLOCK_TIMEOUT_MS || '600000', 10),
     // How many question-generation batches may be in flight at once. A batch of
     // 10 questions takes ~19s on the gateway, so this dominates how long a paper
     // takes. It used to be hardcoded to 2 "to avoid 429s", which serialized a

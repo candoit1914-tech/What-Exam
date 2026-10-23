@@ -950,38 +950,34 @@ router.post('/exams/:id/scheme/:qid/generate', asyncWrap(async (req, res) => {
   res.json({ ok: true, scheme });
 }));
 
-// ── AI generation ──────────────────────────────────────────────────────
+// ── AI generation (background job + polling) ──────────────────────────────
+//
+// Generation runs as a BACKGROUND JOB in the jobs table — exactly like a PDF
+// import — not inside the HTTP request. A full paper takes minutes, and
+// Render's proxy drops any request that outlives ~100 seconds: the dashboard
+// used to receive "Failed to fetch" (and show a failure) while the server was
+// still generating, so slow papers looked broken and got re-submitted into
+// duplicates. The POST below answers instantly with a jobId; the dialog polls
+// GET /api/jobs/:id for progress, and the questions land whether or not the
+// browser stays connected.
 
-router.post('/exams/:id/generate', asyncWrap(async (req, res) => {
-  const exam = db.prepare('SELECT * FROM exams WHERE id = ?').get(req.params.id);
-  if (!exam) return res.status(404).json({ error: 'Exam not found' });
-  if (exam.status === 'live' || exam.status === 'ended') {
-    return res.status(400).json({ error: 'Exam is already live/ended.' });
-  }
-  const { subject, topics, count, objectiveCount, theoryCount, types, difficulty, instructions, pool, poolMultiplier } = req.body;
-  const typeList = Array.isArray(types) && types.length ? types : ['objective', 'theory'];
-  const hasObjective = typeList.includes('objective');
-  const hasTheory = typeList.includes('theory');
+/**
+ * Run one AI generation to completion, updating its job row as it goes.
+ * `p` carries the counts the route already validated — invalid input never
+ * reaches this function, so there is nothing to reject here, only work to do.
+ */
+async function runGenerateJob(jobId, exam, p) {
+  const fail = (message) => {
+    console.error('[generate] failed:', message);
+    pdfImport.updateJob(jobId, { status: 'error', stage: 'Failed', progress: 0, count: 0, error: message });
+  };
 
-  // Respect the selected types: if a type is not selected, its count must be 0.
-  let objN = hasObjective ? Math.min(Math.max(parseInt(objectiveCount) || 0, 0), 50) : 0;
-  let theoN = hasTheory ? Math.min(Math.max(parseInt(theoryCount) || 0, 0), 50) : 0;
-  // A caller that sends only `count` (the older shape) still gets the legacy
-  // split across the selected types rather than an empty request.
-  if (objN === 0 && theoN === 0) {
-    const legacy = Math.min(Math.max(parseInt(count) || 0, 0), 150);
-    if (legacy > 0) {
-      if (hasObjective) objN = hasTheory ? Math.max(1, Math.round(legacy / typeList.length)) : legacy;
-      if (hasTheory) theoN = legacy - objN;
-    }
-  }
-  if (objN === 0 && theoN === 0) {
-    return res.status(400).json({ error: 'Choose how many questions to generate — at least one objective or theory question.' });
-  }
-  const totalFromTypes = (objN || 0) + (theoN || 0);
-  const n = Math.min(Math.max(totalFromTypes, 1), 150);
-  const multiplier = pool ? Math.min(Math.max(parseInt(poolMultiplier) || 2, 2), 7) : 1;
-  console.log(`[generate] exam=${exam.id} objN=${objN} theoN=${theoN} n=${n} pool=${pool} multiplier=${multiplier}`);
+  const { subject, topics, objN, theoN, n, multiplier, pool, types, difficulty, instructions } = p;
+  pdfImport.updateJob(jobId, {
+    status: 'running',
+    stage: 'Writing questions with AI — this can take a few minutes…',
+    progress: 10,
+  });
   const existing = db
     .prepare('SELECT text FROM questions WHERE exam_id = ? ORDER BY q_order LIMIT 20')
     .all(exam.id)
@@ -1002,11 +998,11 @@ router.post('/exams/:id/generate', asyncWrap(async (req, res) => {
     });
   } catch (err) {
     console.error('[generate] AI generation failed:', err.message);
-    return res.status(502).json({ error: `AI generation failed: ${err.message}` });
+    return fail(`AI generation failed: ${err.message}`);
   }
   console.log(`[generate] got ${generated.length} questions from AI`);
   if (generated.length === 0) {
-    return res.status(502).json({ error: 'AI returned no questions. The provider may be rate-limited or out of quota — check your AI API key and billing status, then try again.' });
+    return fail('AI returned no questions. The provider may be rate-limited or out of quota — check your AI API key and billing status, then try again.');
   }
 
   // Hard sort: ALL objective questions first, then ALL theory — matches WhatsApp
@@ -1037,11 +1033,10 @@ router.post('/exams/:id/generate', asyncWrap(async (req, res) => {
   const madeObj = active.filter((q) => q.type === 'objective').length;
   const madeTheo = active.length - madeObj;
   if (madeObj !== objN || madeTheo !== theoN) {
-    return res.status(502).json({
-      error: `The AI produced ${madeObj} of ${objN} objective and ${madeTheo} of ${theoN} theory questions — nothing was saved. Try generating again.`,
-    });
+    return fail(`The AI produced ${madeObj} of ${objN} objective and ${madeTheo} of ${theoN} theory questions — nothing was saved. Try generating again.`);
   }
 
+  pdfImport.updateJob(jobId, { stage: 'Saving questions and marking schemes…', progress: 70 });
   let nextOrder = (db.prepare('SELECT MAX(q_order) m FROM questions WHERE exam_id = ?').get(exam.id).m || 0) + 1;
   const insert = db.prepare(
     `INSERT INTO questions (exam_id, q_order, type, text, passage, options, correct_answer, marks, difficulty, learning_objective, explanation, source, image, follow_ups)
@@ -1147,7 +1142,84 @@ router.post('/exams/:id/generate', asyncWrap(async (req, res) => {
     console.error('[generate] default theory rule failed (continuing):', err.message);
   }
   marking.recomputeExamTotal(exam.id);
-  res.json({ ok: true, count: created.length, poolCount: variants.length, questions: created });
+  console.log(`[generate] saved ${created.length} questions (+${variants.length} pooled) for exam ${exam.id}`);
+  pdfImport.updateJob(jobId, {
+    status: 'done',
+    stage: 'Done',
+    progress: 100,
+    count: created.length,
+    warning: variants.length ? `${variants.length} extra variants stored in the pool for fresh attempts.` : '',
+  });
+}
+
+router.post('/exams/:id/generate', asyncWrap(async (req, res) => {
+  const exam = db.prepare('SELECT * FROM exams WHERE id = ?').get(req.params.id);
+  if (!exam) return res.status(404).json({ error: 'Exam not found' });
+  if (exam.status === 'live' || exam.status === 'ended') {
+    return res.status(400).json({ error: 'Exam is already live/ended.' });
+  }
+  const { subject, topics, count, objectiveCount, theoryCount, types, difficulty, instructions, pool, poolMultiplier } = req.body;
+  const typeList = Array.isArray(types) && types.length ? types : ['objective', 'theory'];
+  const hasObjective = typeList.includes('objective');
+  const hasTheory = typeList.includes('theory');
+
+  // Respect the selected types: if a type is not selected, its count must be 0.
+  let objN = hasObjective ? Math.min(Math.max(parseInt(objectiveCount) || 0, 0), 50) : 0;
+  let theoN = hasTheory ? Math.min(Math.max(parseInt(theoryCount) || 0, 0), 50) : 0;
+  // A caller that sends only `count` (the older shape) still gets the legacy
+  // split across the selected types rather than an empty request.
+  if (objN === 0 && theoN === 0) {
+    const legacy = Math.min(Math.max(parseInt(count) || 0, 0), 150);
+    if (legacy > 0) {
+      if (hasObjective) objN = hasTheory ? Math.max(1, Math.round(legacy / typeList.length)) : legacy;
+      if (hasTheory) theoN = legacy - objN;
+    }
+  }
+  if (objN === 0 && theoN === 0) {
+    return res.status(400).json({ error: 'Choose how many questions to generate — at least one objective or theory question.' });
+  }
+  const totalFromTypes = (objN || 0) + (theoN || 0);
+  const n = Math.min(Math.max(totalFromTypes, 1), 150);
+  const multiplier = pool ? Math.min(Math.max(parseInt(poolMultiplier) || 2, 2), 7) : 1;
+
+  // One background job per exam: a second click while one is running would
+  // otherwise start a duplicate generation (or race an import for the same
+  // rows). Same guard the PDF upload uses, shared through the jobs table.
+  const running = pdfImport.activeJobForExam(exam.id);
+  if (running) {
+    return res.status(409).json({
+      error: running.type === 'ai_generate'
+        ? 'A generation is already running for this exam. Wait for it to finish.'
+        : 'A PDF import is running for this exam. Wait for it to finish, then generate.',
+    });
+  }
+
+  console.log(`[generate] exam=${exam.id} objN=${objN} theoN=${theoN} n=${n} pool=${pool} multiplier=${multiplier}`);
+  const jobId = pdfImport.createJob(exam.id, '', 'ai_generate');
+  pdfImport.updateJob(jobId, { stage: 'Queued…', progress: 0 });
+
+  // Answer NOW and let the job run detached: the browser connection, the
+  // Render proxy timeout and page refreshes must not be able to kill a
+  // generation that is already under way.
+  res.status(202).json({
+    jobId,
+    status: 'pending',
+    message: 'Generation started in the background — follow its progress in this dialog.',
+  });
+  setImmediate(() => {
+    runGenerateJob(jobId, exam, {
+      subject, topics, objN, theoN, n, multiplier, pool, types, difficulty, instructions,
+    }).catch((err) => {
+      console.error('[generate] job crashed:', err);
+      pdfImport.updateJob(jobId, {
+        status: 'error',
+        stage: 'Failed',
+        progress: 0,
+        count: 0,
+        error: (err && err.message) || 'Unexpected error while generating.',
+      });
+    });
+  });
 }));
 
 /**

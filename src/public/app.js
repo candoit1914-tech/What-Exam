@@ -14,8 +14,12 @@ const _cache = new Map();
 const CACHE_TTL = 15_000;
 
 async function api(path, opts = {}) {
-  const isGet = !opts.method || opts.method === 'GET';
-  const key = isGet ? path : null;
+  // Pollers (job status) pass skipCache: serving a cached row would freeze
+  // their progress display for up to CACHE_TTL after the server already
+  // moved on — a finished job would show as "running" for 15 more seconds.
+  const { skipCache, ...fetchOpts } = opts;
+  const isGet = !fetchOpts.method || fetchOpts.method === 'GET';
+  const key = isGet && !skipCache ? path : null;
 
   if (key && _cache.has(key)) {
     const { data, ts } = _cache.get(key);
@@ -31,9 +35,9 @@ async function api(path, opts = {}) {
   if (token) headers.Authorization = `Bearer ${token}`;
 
   const doFetch = () => fetch(API_BASE + path, {
-    ...opts,
+    ...fetchOpts,
     headers,
-    body: hasBody ? (isForm ? opts.body : JSON.stringify(opts.body)) : undefined,
+    body: hasBody ? (isForm ? fetchOpts.body : JSON.stringify(fetchOpts.body)) : undefined,
   });
   let res;
   try {
@@ -1677,10 +1681,26 @@ async function aiGenerateForm(id) {
         <option value="5">5 variants per question (slower)</option>
       </select>
     </div>
+    <div id="ag_status"></div>
     <div class="modal-actions" style="margin-top:18px"><button id="ag_run" class="btn btn-primary">Generate</button></div>
   `);
   if (!div) return;
   const run = document.querySelector('#ag_run');
+
+  // Generation is a server-side background job. Reopening this dialog while
+  // one is running resumes its progress instead of starting a duplicate.
+  try {
+    const jobs = await api(`/api/jobs?exam_id=${id}`, { skipCache: true });
+    const active = (jobs || []).find(
+      (j) => j.type === 'ai_generate' && (j.status === 'pending' || j.status === 'running')
+    );
+    if (active) {
+      run.disabled = true;
+      run.textContent = 'Generating…';
+      return pollGenerateJob(id, div, active.id);
+    }
+  } catch { /* no jobs */ }
+
   run.addEventListener('click', async () => {
     run.disabled = true;
     run.textContent = 'Generating…';
@@ -1701,6 +1721,8 @@ async function aiGenerateForm(id) {
         poolMultiplier: parseInt(document.querySelector('#ag_variants').value) || 2,
       };
       const res = await api(`/api/exams/${id}/generate`, { method: 'POST', body });
+      if (res.jobId) return pollGenerateJob(id, div, res.jobId);
+      // Older server shape (synchronous): the questions already landed.
       invalidateCache(`/api/exams/${id}`);
       div.remove();
       toast(`Generated ${res.count} questions${res.poolCount ? ` + ${res.poolCount} variants for fresh attempts` : ''} with full marking schemes.`);
@@ -1711,6 +1733,65 @@ async function aiGenerateForm(id) {
       toast(e.message, true);
     }
   });
+}
+
+// ── AI generation (background job + polling) ──────────────────────────
+
+// Generation runs on the server as a job — a full paper takes minutes and
+// Render's proxy kills any HTTP request that outlives ~100s — so this dialog
+// only TRACKS progress. The questions land whether or not the browser stays
+// connected; a refresh simply reopens the dialog onto the same running job.
+function pollGenerateJob(examId, div, jobId) {
+  const status = document.querySelector('#ag_status');
+  const update = (text) => { if (status) status.innerHTML = `<p class="muted" style="margin:8px 0">${text}</p>`; };
+  let misses = 0;
+  const timer = setInterval(async () => {
+    let job;
+    try {
+      job = await api(`/api/jobs/${jobId}`, { skipCache: true });
+      misses = 0;
+    } catch (e) {
+      // Retry only what can plausibly recover: a 404 (job row gone) and a 401
+      // (needs a new sign-in) will never resolve by polling.
+      const permanent = e.status === 404 || e.status === 401;
+      misses++;
+      if (permanent || misses > 8) {
+        clearInterval(timer);
+        const runBtn = document.querySelector('#ag_run');
+        if (runBtn) { runBtn.disabled = false; runBtn.textContent = 'Generate'; }
+        renderImportNote(document.querySelector('#ag_status'), {
+          kind: 'error',
+          title: 'Lost contact with the generation',
+          body: `${e.message || 'Lost contact with the generation job.'} Close this dialog and reopen it — a still-running job resumes, a finished one shows its result.`,
+          dismissable: false,
+        });
+        toast(e.message || 'Lost contact with the generation job.', true);
+        return;
+      }
+      update(`<span class="spinner"></span> Connection interrupted — retrying… (attempt ${misses})`);
+      return;
+    }
+    update(`<span class="spinner"></span> ${esc(job.stage || 'Generating…')} <strong>${job.progress || 0}%</strong>`);
+    if (job.status === 'done') {
+      clearInterval(timer);
+      invalidateCache(`/api/exams/${examId}`);
+      div.remove();
+      const base = `Generated ${job.count} questions with full marking schemes.`;
+      toast(job.warning ? `${base} ${job.warning}` : base);
+      renderExam(examId);
+    } else if (job.status === 'error') {
+      clearInterval(timer);
+      const runBtn = document.querySelector('#ag_run');
+      if (runBtn) { runBtn.disabled = false; runBtn.textContent = 'Generate'; }
+      renderImportNote(document.querySelector('#ag_status'), {
+        kind: 'error',
+        title: 'Generation failed — nothing was saved',
+        body: job.error || 'Generation failed.',
+        dismissable: false,
+      });
+      toast(job.error || 'Generation failed.', true);
+    }
+  }, 1500); // Poll every 1.5s, same cadence as the import dialog
 }
 
 // ── Exam paper upload (background job + polling) ───────────────────────
@@ -1763,9 +1844,12 @@ async function pdfUploadForm(id) {
   if (!div) return;
 
   // Resume an import that is already running for this exam instead of starting a duplicate.
+  // Only pdf_import jobs belong here — an active AI generation would otherwise
+  // hijack this dialog (and its "previous import" note must not show a generation).
   try {
-    const jobs = await api(`/api/jobs?exam_id=${id}`);
-    const active = (jobs || []).find((j) => j.status === 'pending' || j.status === 'running');
+    const jobs = (await api(`/api/jobs?exam_id=${id}`, { skipCache: true })) || [];
+    const pdfJobs = jobs.filter((j) => j.type === 'pdf_import');
+    const active = pdfJobs.find((j) => j.status === 'pending' || j.status === 'running');
     if (active) {
       document.querySelector('#pdf_upload').style.display = 'none';
       return pollPdfJob(id, div, active.id);
@@ -1774,7 +1858,7 @@ async function pdfUploadForm(id) {
     // or finished with notes about skipped pages or lost diagrams — used to
     // exist only in a toast, which is why nobody could ever find the error
     // log. The upload form stays usable, so a retry is one click away.
-    const last = (jobs || [])[0]; // newest first
+    const last = pdfJobs[0]; // newest first
     if (last && last.status === 'error') {
       renderImportNote(document.querySelector('#pdf_status'), {
         kind: 'error',
@@ -1827,7 +1911,7 @@ function pollPdfJob(examId, div, jobId) {
   const timer = setInterval(async () => {
     let job;
     try {
-      job = await api(`/api/jobs/${jobId}`);
+      job = await api(`/api/jobs/${jobId}`, { skipCache: true });
       misses = 0;
     } catch (e) {
       // Retry only what can plausibly recover. A 404 will never come back

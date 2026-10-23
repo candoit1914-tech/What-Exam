@@ -67,7 +67,7 @@ services:
       - key: AI_TIMEOUT_MS
         value: "120000"
       - key: AI_BLOCK_TIMEOUT_MS
-        value: "360000"
+        value: "600000"
       - key: AI_BLOCK_CONCURRENCY
         value: "3"
       # How many question-generation batches run at once. Measured on AshnaAI:

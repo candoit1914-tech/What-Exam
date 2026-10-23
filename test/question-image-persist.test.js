@@ -10,6 +10,7 @@ const db = require('../src/db');
 const auth = require('../src/auth');
 const ai = require('../src/services/ai');
 const api = require('../src/routes/api');
+const { generateAndAwait } = require('./helpers/generate');
 
 // These exercise the real routes over HTTP. The plan's original test only
 // proved the schema accepts an `image` column, which stays green whether or not
@@ -96,13 +97,14 @@ test('an AI-generated diagram survives the generate route', async () => {
     },
   ]);
   try {
-    const res = await request('POST', `/api/exams/${eid}/generate`, {
+    const { res, job } = await generateAndAwait(request, eid, {
       count: 1,
       types: ['objective'],
       objectiveCount: 1,
       theoryCount: 0,
     });
-    assert.equal(res.status, 200, JSON.stringify(res.body));
+    assert.equal(res.status, 202, JSON.stringify(res.body));
+    assert.equal(job.status, 'done', job.error || JSON.stringify(job));
     const row = db.prepare('SELECT image FROM questions WHERE exam_id = ?').get(eid);
     assert.equal(row.image, 'generated-diagram.png', 'the generated diagram must be persisted');
   } finally {
@@ -125,7 +127,7 @@ test('an AI-generated pool variant keeps its diagram', async () => {
   // n=1 with poolMultiplier 2 means the second question overflows into the pool.
   ai.generateQuestions = async () => [withImage({}, 'a'), withImage({}, 'b')];
   try {
-    const res = await request('POST', `/api/exams/${eid}/generate`, {
+    const { res, job } = await generateAndAwait(request, eid, {
       count: 1,
       types: ['objective'],
       objectiveCount: 1,
@@ -133,10 +135,11 @@ test('an AI-generated pool variant keeps its diagram', async () => {
       pool: true,
       poolMultiplier: 2,
     });
-    assert.equal(res.status, 200, JSON.stringify(res.body));
-    assert.equal(res.body.poolCount, 1, 'one question overflowed into the pool');
-    const row = db.prepare('SELECT image FROM question_pool WHERE exam_id = ?').get(eid);
-    assert.equal(row.image, 'pool-diagram-b.png', 'the pool variant must keep its diagram');
+    assert.equal(res.status, 202, JSON.stringify(res.body));
+    assert.equal(job.status, 'done', job.error || JSON.stringify(job));
+    const pooled = db.prepare('SELECT image FROM question_pool WHERE exam_id = ?').all(eid);
+    assert.equal(pooled.length, 1, 'one question overflowed into the pool');
+    assert.equal(pooled[0].image, 'pool-diagram-b.png', 'the pool variant must keep its diagram');
   } finally {
     ai.generateQuestions = real;
   }

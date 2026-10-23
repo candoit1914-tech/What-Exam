@@ -158,6 +158,18 @@ const RATE_LIMIT_RETRIES = 2;
 // consume the rate-limit retry budget.
 const QUOTA_429_RE = /insufficient_quota|credit_balance_exhausted|quota_exceeded|billing_hard_limit_reached|billing_not_active/i;
 
+// Responses that mean the account or key can never serve ANY request: bad
+// key, out of credit, revoked access. Waiting does not fix these the way it
+// fixes a rate limit, so they are tagged `fatal`: the call fails without
+// spending retry budget AND the provider's circuit breaker opens on the very
+// first one. Before this, an out-of-credit primary was re-tried on every
+// single call of a long generation because only 429s counted as failures -
+// each call paying a full failed round-trip (or the whole AI_TIMEOUT_MS when
+// the dead endpoint just hangs), which is most of "generation is very slow".
+const FATAL_HTTP_RE = /^(401|402|403)$/;
+const FATAL_BODY_RE =
+  /insufficient_quota|credit_balance_exhausted|billing_hard_limit_reached|billing_not_active|invalid_api_key|incorrect_api_key|invalid authentication|payment required|no credits|out of (?:credit|quota)/i;
+
 async function callEndpoint({ baseUrl, apiKey, model, messages, temperature, maxTokens, timeoutMs, maxRetries }) {
   const body = buildChatBody({ model, messages, temperature, maxTokens });
 
@@ -218,9 +230,11 @@ async function callEndpoint({ baseUrl, apiKey, model, messages, temperature, max
             `AI request failed (429): ${model} account has no remaining quota — top up billing or switch provider`
           );
           // Still tagged rateLimited so the circuit breaker trips and stops
-          // sending requests to an account that cannot serve them.
+          // sending requests to an account that cannot serve them; `fatal`
+          // opens that breaker immediately instead of after three strikes.
           quotaErr.rateLimited = true;
           quotaErr.permanent = true;
+          quotaErr.fatal = true;
           throw quotaErr;
         }
         const retryAfterHeader = res.headers.get('retry-after');
@@ -245,7 +259,15 @@ async function callEndpoint({ baseUrl, apiKey, model, messages, temperature, max
       if (!res.ok) {
         const text = await res.text().catch(() => '');
         console.error(`[ai] HTTP ${res.status} from ${model} @ ${baseUrl}: ${text.slice(0, 300)}`);
-        throw new AIError(`AI request failed (${res.status}): ${text.slice(0, 300)}`);
+        const httpErr = new AIError(`AI request failed (${res.status}): ${text.slice(0, 300)}`);
+        if (FATAL_HTTP_RE.test(String(res.status)) || FATAL_BODY_RE.test(text)) {
+          // Bad key / exhausted credit: repeating the identical request can
+          // only fail again. `permanent` skips the in-call retries, `fatal`
+          // opens the provider's breaker at once (see recordProviderFailure).
+          httpErr.permanent = true;
+          httpErr.fatal = true;
+        }
+        throw httpErr;
       }
 
       const data = await res.json().catch(() => { throw new AIError('AI returned a non-JSON response'); });
@@ -346,14 +368,26 @@ function isProviderAvailable(name) {
   return true;
 }
 
-function recordProviderFailure(name) {
+function recordProviderFailure(name, { fatal = false } = {}) {
   const cb = circuitBreaker[name];
   if (!cb) return;
   cb.fails++;
-  if (cb.fails >= PROVIDER_FAILURE_THRESHOLD) {
-    const ms = providerCooldownMs(cb.fails);
+  // A fatal rejection (401/402/403, exhausted quota) cannot heal by waiting
+  // out a rate limit — only a key or billing change fixes it — so ONE is
+  // enough to skip the provider. Non-fatal failures still need the usual
+  // threshold so a transient blip never parks a healthy endpoint.
+  const opens = fatal ? cb.fails >= 1 : cb.fails >= PROVIDER_FAILURE_THRESHOLD;
+  if (opens) {
+    // Fatal failures enter the same escalating ladder from its first rung
+    // (behave as if the ordinary threshold were already met), so a dead
+    // provider is skipped for 30s, then 60s, 120s… instead of being probed
+    // on every call of a long generation.
+    const ladderFails = fatal ? cb.fails + PROVIDER_FAILURE_THRESHOLD - 1 : cb.fails;
+    const ms = providerCooldownMs(ladderFails);
     cb.skipUntil = Date.now() + ms;
-    console.warn(`[ai] Circuit breaker: ${name} failed ${cb.fails} times, skipping for ${Math.round(ms / 1000)}s`);
+    console.warn(
+      `[ai] Circuit breaker: ${name} failed ${cb.fails} time(s)${fatal ? ' (fatal)' : ''}, skipping for ${Math.round(ms / 1000)}s`
+    );
   }
 }
 
@@ -538,10 +572,12 @@ async function chatJSON(messages, { temperature = 0.4, maxRetries = 2, timeoutMs
       recordProviderSuccess(p.name);
       return result;
     } catch (err) {
-      // Record rate limiting immediately. Waiting for every provider in a race
-      // to fail before recording meant the breaker never tripped while a
-      // fallback was answering, so a saturated endpoint got no relief.
-      if (err && err.rateLimited) recordProviderFailure(p.name);
+      // Every provider failure counts toward the breaker, not just rate
+      // limits. A provider that hung (hard timeout) or answered 401/402/403
+      // forever used to be exempt, so it kept receiving every call of a long
+      // generation and every one of them paid its failure latency first.
+      // Fatal errors (bad key, exhausted credit) open the breaker immediately.
+      if (err) recordProviderFailure(p.name, { fatal: !!err.fatal });
       throw err;
     }
   };
@@ -3907,6 +3943,8 @@ module.exports = {
   batchLaunchStaggerMs,
   providerCooldownMs,
   resetCircuitBreakers,
+  isProviderAvailable,
+  recordProviderFailure,
   isReasoningModel,
   EXAMINER_PERSONA,
   examinerPrompt,

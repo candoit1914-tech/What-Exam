@@ -480,34 +480,38 @@ function deleteJob(id) {
 }
 
 /**
- * Fail every import that was left mid-flight when this server process died
+ * Fail every job that was left mid-flight when this server process died
  * (crash, Render redeploy). A stale 'running'/'pending' job would otherwise
- * keep the dashboard polling forever and block new uploads for that exam with
- * a "already running" 409. Called once at server boot, before anything starts.
+ * keep the dashboard polling forever and block new uploads/generations for
+ * that exam with a "already running" 409. Called once at server boot, before
+ * anything starts.
  */
 function recoverStaleJobs() {
   const info = db
     .prepare(
       `UPDATE jobs
        SET status='error', stage='Failed', progress=0, count=0,
-           error='The import was interrupted by a server restart. Re-upload the PDF to try again.',
+           error = CASE WHEN type = 'pdf_import'
+             THEN 'The import was interrupted by a server restart. Re-upload the PDF to try again.'
+             ELSE 'The generation was interrupted by a server restart. Click Generate again to retry.'
+           END,
            updated_at = datetime('now')
-       WHERE type='pdf_import' AND status IN ('pending','running')`
+       WHERE type IN ('pdf_import','ai_generate') AND status IN ('pending','running')`
     )
     .run();
   if (info.changes) {
-    console.log(`[pdfImport] marked ${info.changes} interrupted import job(s) as failed`);
+    console.log(`[pdfImport] marked ${info.changes} interrupted job(s) as failed`);
   }
   return info.changes;
 }
 
-function createJob(examId, filename) {
+function createJob(examId, filename, type = 'pdf_import') {
   const info = db
     .prepare(
       `INSERT INTO jobs (type, exam_id, filename, status)
-       VALUES ('pdf_import', ?, ?, 'pending')`
+       VALUES (?, ?, ?, 'pending')`
     )
-    .run(examId, String(filename || 'upload.pdf'));
+    .run(type, examId, String(filename || ''));
   return info.lastInsertRowid;
 }
 

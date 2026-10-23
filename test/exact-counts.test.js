@@ -17,6 +17,7 @@ const { before, after } = require('node:test');
 
 const config = require('../src/config');
 const ai = require('../src/services/ai');
+const { generateAndAwait } = require('./helpers/generate');
 
 function contentResponse(text) {
   const payload = { choices: [{ message: { content: text } }] };
@@ -287,7 +288,7 @@ test('the route saves exactly the split the admin asked for', async () => {
     ...Array.from({ length: 7 }, (_, i) => theory(i)),
   ];
   try {
-    const res = await request('POST', `/api/exams/${eid}/generate`, {
+    const { res, job } = await generateAndAwait(request, eid, {
       count: 45,
       types: ['objective', 'theory'],
       objectiveCount: 40,
@@ -295,7 +296,8 @@ test('the route saves exactly the split the admin asked for', async () => {
       pool: true,
       poolMultiplier: 2,
     });
-    assert.equal(res.status, 200, JSON.stringify(res.body));
+    assert.equal(res.status, 202, JSON.stringify(res.body));
+    assert.equal(job.status, 'done', job.error || JSON.stringify(job));
     const rows = db.prepare('SELECT type FROM questions WHERE exam_id = ?').all(eid);
     assert.equal(rows.filter((r) => r.type === 'objective').length, 40, 'exactly 40 objective');
     assert.equal(rows.filter((r) => r.type === 'theory').length, 5, 'exactly 5 theory');
@@ -314,13 +316,14 @@ test('a theory-only request never grows a stray objective', async () => {
   // The provider ignores the type selection and adds an objective.
   ai.generateQuestions = async () => [objective(0), ...Array.from({ length: 5 }, (_, i) => theory(i))];
   try {
-    const res = await request('POST', `/api/exams/${eid}/generate`, {
+    const { res, job } = await generateAndAwait(request, eid, {
       count: 5,
       types: ['theory'],
       objectiveCount: 0,
       theoryCount: 5,
     });
-    assert.equal(res.status, 200, JSON.stringify(res.body));
+    assert.equal(res.status, 202, JSON.stringify(res.body));
+    assert.equal(job.status, 'done', job.error || JSON.stringify(job));
     const rows = db.prepare('SELECT type FROM questions WHERE exam_id = ?').all(eid);
     assert.equal(rows.length, 5, 'five questions');
     assert.equal(rows.filter((r) => r.type === 'theory').length, 5, 'all theory');
@@ -335,14 +338,17 @@ test('a short paper is refused and nothing is saved', async () => {
   const real = ai.generateQuestions;
   ai.generateQuestions = async () => Array.from({ length: 37 }, (_, i) => objective(i));
   try {
-    const res = await request('POST', `/api/exams/${eid}/generate`, {
+    const { res, job } = await generateAndAwait(request, eid, {
       count: 40,
       types: ['objective'],
       objectiveCount: 40,
       theoryCount: 0,
     });
-    assert.equal(res.status, 502, JSON.stringify(res.body));
-    assert.match(res.body.error, /37 of 40 objective/);
+    // The job starts (the request itself only validates), then fails loudly
+    // with nothing saved — the same guarantee the old synchronous 502 gave.
+    assert.equal(res.status, 202, JSON.stringify(res.body));
+    assert.equal(job && job.status, 'error', JSON.stringify(job));
+    assert.match(job.error, /37 of 40 objective/);
     assert.equal(
       db.prepare('SELECT COUNT(*) c FROM questions WHERE exam_id = ?').get(eid).c,
       0,

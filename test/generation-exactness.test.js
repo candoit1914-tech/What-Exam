@@ -19,6 +19,7 @@ const config = require('../src/config');
 const auth = require('../src/auth');
 const ai = require('../src/services/ai');
 const api = require('../src/routes/api');
+const { generateAndAwait } = require('./helpers/generate');
 
 // ── scenario pool ─────────────────────────────────────
 // Every stem is built from deliberately plain vocabulary:
@@ -226,11 +227,12 @@ test('a legacy count-only request still splits across both types', async () => {
   ];
   try {
     // No objectiveCount/theoryCount: the older shape must still work.
-    const res = await request('POST', `/api/exams/${eid}/generate`, {
+    const { res, job } = await generateAndAwait(request, eid, {
       count: 4,
       types: ['objective', 'theory'],
     });
-    assert.equal(res.status, 200, JSON.stringify(res.body));
+    assert.equal(res.status, 202, JSON.stringify(res.body));
+    assert.equal(job.status, 'done', job.error || JSON.stringify(job));
     const objs = db.prepare("SELECT COUNT(*) c FROM questions WHERE exam_id = ? AND type = 'objective'").get(eid).c;
     const theos = db.prepare("SELECT COUNT(*) c FROM questions WHERE exam_id = ? AND type = 'theory'").get(eid).c;
     assert.equal(objs, 2);

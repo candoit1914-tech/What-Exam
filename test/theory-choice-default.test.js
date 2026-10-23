@@ -17,6 +17,7 @@ const pdfImport = require('../src/services/pdfImport');
 const documentSrc = require('../src/services/document');
 const selection = require('../src/services/selection');
 const examSvc = require('../src/services/exam');
+const { generateAndAwait } = require('./helpers/generate');
 
 function newExam(title, status = 'draft') {
   return db
@@ -191,10 +192,11 @@ test('an AI-generated exam gets the rule without anyone typing an instruction', 
     ...Array.from({ length: 6 }, (_, i) => theory(i)),
   ];
   try {
-    const res = await request('POST', `/api/exams/${eid}/generate`, {
+    const { res, job } = await generateAndAwait(request, eid, {
       types: ['objective', 'theory'], objectiveCount: 2, theoryCount: 6,
     });
-    assert.equal(res.status, 200, JSON.stringify(res.body));
+    assert.equal(res.status, 202, JSON.stringify(res.body));
+    assert.equal(job.status, 'done', job.error || JSON.stringify(job));
   } finally {
     ai.generateQuestions = real;
   }
@@ -215,10 +217,11 @@ test('pool variants join the block as options, never as compulsory questions', a
     theory(90), theory(91), // the overflow: pool-only variants
   ];
   try {
-    const res = await request('POST', `/api/exams/${eid}/generate`, {
+    const { res, job } = await generateAndAwait(request, eid, {
       types: ['theory'], objectiveCount: 0, theoryCount: 6, pool: true, poolMultiplier: 2,
     });
-    assert.equal(res.status, 200, JSON.stringify(res.body));
+    assert.equal(res.status, 202, JSON.stringify(res.body));
+    assert.equal(job.status, 'done', job.error || JSON.stringify(job));
   } finally {
     ai.generateQuestions = real;
   }
