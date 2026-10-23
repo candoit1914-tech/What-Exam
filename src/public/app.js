@@ -30,11 +30,36 @@ async function api(path, opts = {}) {
   const token = getToken();
   if (token) headers.Authorization = `Bearer ${token}`;
 
-  const res = await fetch(API_BASE + path, {
+  const doFetch = () => fetch(API_BASE + path, {
     ...opts,
     headers,
     body: hasBody ? (isForm ? opts.body : JSON.stringify(opts.body)) : undefined,
   });
+  let res;
+  try {
+    res = await doFetch();
+  } catch {
+    // The connection died before any HTTP response (browser TypeError).
+    // On Render's free plan the instance sleeps after ~15 idle minutes and
+    // the first request during its ~30s wake is often reset — and the first
+    // API call after opening the dashboard is frequently a mutation like
+    // Create Exam, which is why it kept bearing the visible blame.
+    // Reads are idempotent: one delayed retry rides out the wake. Writes
+    // are NOT retried here: the reset may have struck after the server
+    // committed, and a blind retry would duplicate the action. The error
+    // is tagged `network` so callers can reconcile instead (see createExam).
+    if (isGet) {
+      await new Promise((r) => setTimeout(r, 3000));
+      try { res = await doFetch(); } catch { res = null; }
+    }
+    if (!res) {
+      const err = new Error(
+        'Could not reach the server. If you have been idle a while it is probably waking up (~30s on the free plan) — try again in half a minute.'
+      );
+      err.network = true;
+      throw err;
+    }
+  }
   const data = await res.json().catch(() => ({}));
   if (res.status === 401 && !path.startsWith('/auth/login')) {
     clearToken();
@@ -637,7 +662,30 @@ async function createExam() {
       invalidateCache('/api/exams');
       document.querySelector('.modal-backdrop').remove();
       location.hash = `#/exams/${id}`;
-    } catch (e) { toast(e.message, true); }
+    } catch (e) {
+      // A connection reset can strike AFTER the server committed the
+      // insert; blindly re-POSTing would create a duplicate exam — the
+      // same bug class already fixed for WhatsApp sends. Reconcile
+      // instead: ask the server whether an exam matching this submission
+      // already exists, and open it rather than creating another.
+      if (e.network) {
+        try {
+          const exams = await api('/api/exams');
+          const dup = (exams || []).find((x) => {
+            if (x.title !== (body.title || 'Untitled Exam') || x.subject !== (body.subject || '')) return false;
+            const t = Date.parse(`${String(x.created_at || '').replace(' ', 'T')}Z`);
+            return Number.isFinite(t) && Date.now() - t < 5 * 60 * 1000;
+          });
+          if (dup) {
+            document.querySelector('.modal-backdrop').remove();
+            location.hash = `#/exams/${dup.id}`;
+            toast('Connection hiccup — the exam was created after all; opening it now.');
+            return;
+          }
+        } catch { /* list unreachable too: fall through to the plain message */ }
+      }
+      toast(e.message, true);
+    }
   });
 }
 

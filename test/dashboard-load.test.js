@@ -212,3 +212,57 @@ test('a question shows its figures above its text, the way the chat delivers the
   assert.ok(text >= 0, 'the question text is rendered');
   assert.ok(first < text && second < text, 'both figures sit above the question text');
 });
+
+// ── Network failures: the free plan's waking instance ──────────────────
+// Render free sleeps after ~15 idle minutes; the first request during the
+// ~30s wake is often connection-reset, and that first request is frequently
+// a mutation ("Create Exam"). These pin the dashboard's answer to it: reads
+// ride out the wake with one retry, writes reconcile instead of duplicating.
+
+test('api() retries a GET once when the connection dies, then succeeds', async () => {
+  const { sandbox } = boot();
+  await settle();
+  sandbox.invalidateCache('/api/exams');
+  sandbox.setTimeout = (fn) => fn(); // the 3s retry delay must not be real time
+  let calls = 0;
+  sandbox.fetch = async () => {
+    calls += 1;
+    if (calls === 1) throw new TypeError('Failed to fetch');
+    return { ok: true, status: 200, json: async () => [{ id: 9 }] };
+  };
+  const data = await sandbox.api('/api/exams');
+  assert.deepEqual(data, [{ id: 9 }]);
+  assert.equal(calls, 2, 'exactly one retry, no more');
+});
+
+test('api() never retries a write — a reset may have struck after the commit', async () => {
+  const { sandbox } = boot();
+  await settle();
+  sandbox.setTimeout = (fn) => fn();
+  let calls = 0;
+  sandbox.fetch = async () => { calls += 1; throw new TypeError('Failed to fetch'); };
+  await assert.rejects(
+    () => sandbox.api('/api/exams', { method: 'POST', body: { title: 'X' } }),
+    (err) => {
+      assert.equal(err.network, true, 'tagged so the caller can reconcile');
+      assert.match(err.message, /waking up/);
+      return true;
+    }
+  );
+  assert.equal(calls, 1, 'no blind re-POST that could duplicate the action');
+});
+
+test('createExam reconciles a network-failed create against the server instead of duplicating it', () => {
+  // Asserted on source: the modal/DOM dance is what the fake DOM cannot
+  // express, but the invariant is textual — the catch path asks the server
+  // BEFORE any re-POST could happen, and only reports failure if the exam
+  // genuinely is not there.
+  const src = APP;
+  const createExamAt = src.indexOf('async function createExam()');
+  const tagAt = src.indexOf('if (e.network)', createExamAt);
+  const reconcileAt = src.indexOf("await api('/api/exams')", tagAt);
+  const endAt = src.indexOf('// ── Exam editor', createExamAt);
+  assert.ok(createExamAt > -1 && tagAt > -1, 'createExam inspects network failures');
+  assert.ok(reconcileAt > -1 && reconcileAt < endAt,
+    'the catch reconciles against the exam list within createExam');
+});

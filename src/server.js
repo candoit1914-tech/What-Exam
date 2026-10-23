@@ -34,6 +34,11 @@ function originAllowed(origin) {
     return false;
   }
 }
+// Origins that were refused, logged once each: a cross-origin dashboard that
+// is not allow-listed fails in the browser as an opaque "Failed to fetch"
+// with nothing actionable in either the page or the response — naming the
+// origin here turns the mystery into one log line with the fix.
+const warnedOrigins = new Set();
 app.use((req, res, next) => {
   const origin = req.headers.origin;
   if (origin && originAllowed(origin)) {
@@ -47,6 +52,9 @@ app.use((req, res, next) => {
     // chose (including its UTF-8 form for non-ASCII exam titles).
     res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
     res.setHeader('Vary', 'Origin');
+  } else if (origin && !warnedOrigins.has(origin)) {
+    warnedOrigins.add(origin);
+    console.warn(`[cors] blocked origin ${origin} — a dashboard served from that address cannot call the API (the browser will only show "Failed to fetch"). Set CORS_ORIGIN (comma-separated) to allow it.`);
   }
   if (req.method === 'OPTIONS') return res.sendStatus(204);
   next();
