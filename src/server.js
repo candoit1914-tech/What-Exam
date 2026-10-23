@@ -176,7 +176,33 @@ function endpointLink(m, p) {
   return `<code>${p}</code>`;
 }
 
-app.get('/', (req, res) => {
+// ── The dashboard ───────────────────────────────────────────────────────
+// Served by THIS server so the SPA and the API share one origin by
+// construction: no CORS configuration to misconfigure, no local frontend
+// process to keep alive, and the same root URL works from the admin's
+// phone, a second office machine or Termux — the exact setups that used to
+// fail as an unexplainable "Failed to fetch" because a non-localhost origin
+// is refused by default. frontend.js keeps serving these identical files
+// for local development (its /config.js answers with config.appUrl).
+//
+// /config.js is registered BEFORE the static middleware, exactly like
+// frontend.js does, so the committed fallback file never wins.
+app.get('/config.js', (req, res) => {
+  res.type('application/javascript');
+  // The server that served the page IS the API — wherever the page was
+  // opened from (onrender.com, a LAN address, localhost).
+  res.send('window.API_BASE = window.location.origin;');
+});
+app.use(express.static(path.join(__dirname, 'public'), {
+  // The dashboard ships new JS with every deploy; heuristically cached
+  // copies are how an admin ends up staring at last week's bug. Revalidate
+  // (304s are cheap — these files are kilobytes).
+  setHeaders: (res) => res.setHeader('Cache-Control', 'no-cache'),
+}));
+
+// The API reference index — formerly at '/', which now belongs to the
+// dashboard: the root URL is what an admin types.
+app.get('/api-docs', (req, res) => {
   const wa = config.whatsapp.accessToken ? 'on' : 'off';
   const ai = config.ai.apiKey ? 'on' : 'off';
   const rows = API_GROUPS.map(

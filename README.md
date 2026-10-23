@@ -188,8 +188,19 @@ explain why the code is shaped this way, names say what they mean.
 > `npm install --no-bin-links` (sdcard cannot create symlinks). Everything runs
 > from plain JS + the built-in SQLite module, so no native builds are required.
 
-The admin dashboard is then at http://localhost:8080 (or http://<your-termux-ip>:8080),
-talking to the backend API at http://localhost:3000.
+The admin dashboard is served **by the backend itself**, so the simplest
+invocation is the only one you need: open **http://localhost:3000** —
+dashboard and API share one origin there. The optional second process
+(`npm run start:frontend`, or `start:all`) serves the same dashboard on
+http://localhost:8080 for people who like a separate tab.
+
+> ⚠️ Open the dashboard via `localhost` (or 127.0.0.1), not via your
+> machine's LAN IP or hostname — a non-localhost origin is refused by the
+> API's CORS rules and every call fails as "Failed to fetch" (the server
+> logs it as `[cors] blocked origin …`). On **Render the deployed
+> dashboard is at the service URL itself** — https://what-exam.onrender.com
+> — same origin with the API, so it works from any phone or office machine
+> with no local setup at all.
 
 ## WhatsApp Cloud API setup
 
