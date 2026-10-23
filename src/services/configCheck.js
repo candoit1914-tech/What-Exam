@@ -24,7 +24,7 @@ const CHECKS = [
   // features a chat gateway cannot serve: voice notes (unless a dedicated
   // AI_TRANSCRIBE_API_KEY already covers transcription) and photo answers.
   ['OPENAI_API_KEY', 'warning', 'Voice-note answers cannot be transcribed (unless AI_TRANSCRIBE_API_KEY is set) and photo answers fall back to OCR alone, which reads handwriting poorly.', 'Set OPENAI_API_KEY to the secret key of a paid OpenAI platform account (platform.openai.com/api-keys): its Whisper transcribes voice notes and its vision model reads photo answers.'],
-  ['CORS_ORIGIN', 'info', 'Only loopback browser origins are allowed by default. A separately hosted dashboard needs its origin allowed.', 'Set CORS_ORIGIN to the comma-separated origins of separately hosted dashboards.'],
+  ['CORS_ORIGIN', 'info', 'Loopback and the deployed dashboard (what-exam.vercel.app) are allowed by default. Any OTHER separately hosted dashboard is refused — its calls fail as "Failed to fetch".', 'Set CORS_ORIGIN to the comma-separated origins of any additional separately hosted dashboards.'],
 ];
 
 function checkConfig(config = {}, env = process.env) {

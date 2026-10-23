@@ -84,3 +84,58 @@ test('the API reference index lives at /api-docs (the root belongs to the dashbo
     assert.doesNotMatch(health.body, /<html/i, 'health stays JSON');
   });
 });
+
+/** A browser preflight, as sent before a cross-origin POST with JSON + token. */
+function preflight(base, origin) {
+  const http = require('node:http');
+  const url = new URL(`${base}/api/exams`);
+  return new Promise((resolve, reject) => {
+    const req = http.request(
+      {
+        hostname: url.hostname,
+        port: url.port,
+        path: url.pathname,
+        method: 'OPTIONS',
+        headers: {
+          Origin: origin,
+          'Access-Control-Request-Method': 'POST',
+          'Access-Control-Request-Headers': 'content-type,authorization',
+        },
+      },
+      (res) => {
+        res.resume();
+        res.on('end', () => resolve({ status: res.statusCode, allow: res.headers['access-control-allow-origin'] }));
+      }
+    );
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+// The shipped dashboard's origin MUST stay allow-listed in source. It was
+// once carried by CORS_ORIGIN alone, was removed as "unneeded" in an env
+// audit, and every dashboard action — creating an exam above all — died as
+// an opaque "Failed to fetch". This pins the regression directly.
+test('the Vercel dashboard origin passes the preflight with no env vars set', async () => {
+  await withServer(async (base) => {
+    const res = await preflight(base, 'https://what-exam.vercel.app');
+    assert.equal(res.status, 204);
+    assert.equal(res.allow, 'https://what-exam.vercel.app',
+      'the shipped dashboard must be allowed without CORS_ORIGIN being set');
+  });
+});
+
+test('a stranger origin is still refused — the default is not a wildcard', async () => {
+  await withServer(async (base) => {
+    const res = await preflight(base, 'https://someone-else.example');
+    assert.equal(res.status, 204, 'the OPTIONS answer itself always succeeds');
+    assert.equal(res.allow, undefined, 'no allow header: the browser will block this origin');
+  });
+});
+
+test('loopback origins keep working (the local dashboard)', async () => {
+  await withServer(async (base) => {
+    const res = await preflight(base, 'http://localhost:8080');
+    assert.equal(res.allow, 'http://localhost:8080');
+  });
+});

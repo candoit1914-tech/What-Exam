@@ -55,10 +55,24 @@ const config = {
   appUrl: (process.env.APP_URL || `http://localhost:${process.env.PORT || 3000}`).replace(/\/$/, ''),
   frontendPort: parseInt(process.env.FRONTEND_PORT || '8080', 10),
   frontendUrl: (process.env.FRONTEND_URL || `http://localhost:${process.env.FRONTEND_PORT || 8080}`).replace(/\/$/, ''),
-  corsOrigins: (process.env.CORS_ORIGIN || '')
-    .split(',')
-    .map((s) => s.trim())
-    .filter(Boolean),
+  // Browser origins allowed to call the API cross-origin, IN ADDITION to
+  // loopback (localhost/127.0.0.1/[::1]), which server.js always allows.
+  //
+  // The first entry is THIS app's own deployed dashboard (vercel.json serves
+  // src/public at https://what-exam.vercel.app, and its config.js points the
+  // API at APP_URL on Render). It is built in on purpose: when this lived
+  // only in the environment it was removed as "unneeded" during a variable
+  // audit, and every dashboard action — creating an exam above all — died as
+  // an opaque "Failed to fetch" that no log line explained. A dashboard the
+  // product ships with must not depend on a variable nobody remembers.
+  // CORS_ORIGIN appends any ADDITIONAL hosted dashboards, comma-separated.
+  corsOrigins: [
+    'https://what-exam.vercel.app',
+    ...(process.env.CORS_ORIGIN || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean),
+  ],
 
   // Storage. Both must point at a PERSISTENT volume on Render: the container
   // filesystem is discarded on every deploy and restart, so leaving these on the

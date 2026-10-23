@@ -194,13 +194,14 @@ dashboard and API share one origin there. The optional second process
 (`npm run start:frontend`, or `start:all`) serves the same dashboard on
 http://localhost:8080 for people who like a separate tab.
 
-> ⚠️ Open the dashboard via `localhost` (or 127.0.0.1), not via your
-> machine's LAN IP or hostname — a non-localhost origin is refused by the
-> API's CORS rules and every call fails as "Failed to fetch" (the server
-> logs it as `[cors] blocked origin …`). On **Render the deployed
-> dashboard is at the service URL itself** — https://what-exam.onrender.com
-> — same origin with the API, so it works from any phone or office machine
-> with no local setup at all.
+> ⚠️ Two dashboards ship with the app and **both work out of the box**:
+> the one **on Render at the service URL itself** (same origin as the API)
+> and the one **on Vercel** at https://what-exam.vercel.app (its origin is
+> allow-listed in the source, so no configuration is needed). If you host a
+> dashboard anywhere else yourself, open it via `localhost` or add its
+> origin to `CORS_ORIGIN` — a non-allow-listed origin is refused by the API
+> and every call fails as "Failed to fetch" (the server logs it as
+> `[cors] blocked origin …`).
 
 ## WhatsApp Cloud API setup
 
