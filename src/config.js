@@ -257,6 +257,23 @@ const config = {
     apiKey: process.env.PUTER_API_KEY || '',
   },
 
+  // Persistence on hosts WITHOUT a disk (Render free tier): the container
+  // filesystem is erased on every deploy/restart, so the database and uploads
+  // are backed up to a PRIVATE GitHub repo on an interval and restored at boot
+  // before any module opens the database. Off unless BOTH are set. The repo
+  // MUST be private — it holds student answers and photos.
+  backup: {
+    token: (process.env.BACKUP_GITHUB_TOKEN || '').trim(),
+    repo: (process.env.BACKUP_GITHUB_REPO || '').trim()
+      .replace(/^https?:\/\/github\.com\//i, '')
+      .replace(/\.git$/i, '')
+      .replace(/\/+$/, ''),
+    branch: (process.env.BACKUP_GITHUB_BRANCH || 'backup').trim(),
+    // Floor of a minute: this pushes two blobs on every tick, and a typo'd
+    // value of 0 would hammer the API until the token is rate-limited.
+    intervalMs: Math.max(60000, parseInt(process.env.BACKUP_INTERVAL_MS || '300000', 10) || 300000),
+  },
+
   admin: {
     password: adminPassword,
     isGenerated: adminPasswordIsGenerated,

@@ -3,6 +3,19 @@ const path = require('path');
 const fs = require('fs');
 const config = require('./config');
 const { checkConfig } = require('./services/configCheck');
+
+// On a plan WITHOUT a disk (Render free tier) the container filesystem is
+// erased on every deploy — there is nothing to mount, so persistence lives in
+// a private GitHub repo instead. The restore MUST finish before ./routes/api
+// below is required: that require opens (and on a fresh container CREATES) the
+// database file, and a restore racing it would lose. Synchronous on purpose —
+// CommonJS has no top-level await — the download happens in a child process
+// (services/backupWorker.js) that this call blocks on. No-op unless
+// BACKUP_GITHUB_TOKEN and BACKUP_GITHUB_REPO are set.
+if (require.main === module) {
+  require('./services/backup').restoreSync();
+}
+
 const api = require('./routes/api');
 const webhook = require('./routes/webhook');
 const results = require('./services/results');
@@ -305,6 +318,15 @@ if (require.main === module) {
     // sweep makes the unlock independent of the webhook arriving.
     require('./services/payments').startPaymentSweep();
 
+    // Diskless plan (Render free): everything below rides on the GitHub
+    // backup. If the restore at the top of this file succeeded, the data
+    // this boot just loaded IS the previous deployment's — push it back out
+    // immediately, then on the interval, and once more on SIGTERM when
+    // Render replaces the container.
+    const backup = require('./services/backup');
+    backup.startBackupLoop();
+    backup.flushOnShutdown();
+
     // Loud, unmissable warning when storage is still on the container
     // filesystem. Render discards that on every deploy and restart, which
     // silently wipes the database - students, sessions and graded answers - and
@@ -322,12 +344,18 @@ if (require.main === module) {
     // The check runs only on Render (RENDER env var): elsewhere the mount
     // table of a developer's machine would report ./data as "ephemeral" and
     // cry wolf on every local boot.
+    //
+    // Exception: on a plan WITHOUT disks (Render free tier) a disk cannot be
+    // mounted at all — the GitHub backup configured above IS the persistence.
+    // Then the risk is real only if the restore at boot failed or never
+    // succeeded, and the banner below says exactly that instead.
     const onRender = !!process.env.RENDER;
     const unsetStorage = !process.env.DB_PATH && !process.env.UPLOADS_DIR;
     const onEphemeralStorage = unsetStorage
       || (onRender && require('./services/storageHealth')
         .ephemeralPaths([config.dbPath, config.uploadsDir]).length > 0);
-    if (onEphemeralStorage) {
+    const restoreStatus = (backup.getStatus().lastRestore || {}).status;
+    if (onEphemeralStorage && !backup.isConfigured()) {
       console.warn('');
       console.warn('  ============================================================================');
       console.warn(unsetStorage
@@ -346,10 +374,37 @@ if (require.main === module) {
         console.warn('   dashboard -> service -> Disks) for these paths to survive a deploy.');
       }
       console.warn('');
-      console.warn('   Fix: mount a Render disk at /opt/render/project/src/data, then set');
+      console.warn('   Paid plan:  mount a Render disk at /opt/render/project/src/data, then set');
       console.warn('        DB_PATH=/opt/render/project/src/data/exams.db');
       console.warn('        UPLOADS_DIR=/opt/render/project/src/data/uploads');
       console.warn('        (render.yaml in the repo has this ready to apply.)');
+      console.warn('   Free plan:  disks do not exist there — set instead');
+      console.warn('        BACKUP_GITHUB_TOKEN=<private-repo token>');
+      console.warn('        BACKUP_GITHUB_REPO=<you/private-backup-repo>');
+      console.warn('        and the app restores from GitHub at boot and pushes backups');
+      console.warn('        on an interval. The repo MUST be private: it holds student data.');
+      console.warn('  ============================================================================');
+      console.warn('');
+    } else if (onEphemeralStorage && restoreStatus === 'error') {
+      // Backup is configured but this boot could NOT restore: it is running
+      // empty exactly like the un-backuped case. Doom applies again.
+      console.warn('');
+      console.warn('  ============================================================================');
+      console.warn('   DATA LOSS RISK: storage is ephemeral AND the GitHub restore FAILED.');
+      console.warn(`        ${(backup.getStatus().lastRestore || {}).error || 'unknown error'}`);
+      console.warn('   This boot started from an empty database. The remote copy is intact —');
+      console.warn('   check the [backup] lines above (token, repo name, repo is private).');
+      console.warn('  ============================================================================');
+      console.warn('');
+    } else if (onEphemeralStorage) {
+      // Ephemeral, but the GitHub backup is configured and this boot either
+      // restored successfully or provably had nothing to restore.
+      console.warn('');
+      console.warn('  ============================================================================');
+      console.warn('   Storage is the container filesystem (no disk on this plan): every');
+      console.warn('   deploy would normally DELETE all students, sessions and uploads.');
+      console.warn(`   GitHub backup is ON: restore at boot -> ${restoreStatus}; pushes every`);
+      console.warn(`   ${Math.round(config.backup.intervalMs / 60000)} min to ${config.backup.repo}@${config.backup.branch}.`);
       console.warn('  ============================================================================');
       console.warn('');
     }
@@ -360,14 +415,18 @@ if (require.main === module) {
         if (s.seeded) {
           console.log(`[seed] DB was empty — seeded exam "${s.title}" (id ${s.examId}, status ${s.status})`);
           // An empty database is NORMAL on a first boot against a fresh
-          // persistent disk. On an already-deployed service it means the disk is
-          // not mounted, so a redeploy destroyed the previous data - say so
-          // plainly, because the seed line above reads like routine startup.
-          if (onEphemeralStorage) {
+          // persistent disk — and on the first boot of a GitHub-backuped
+          // service, before the first backup exists. On an already-deployed
+          // service it means the disk is not mounted (or the restore failed),
+          // so a redeploy destroyed the previous data — say so plainly,
+          // because the seed line above reads like routine startup.
+          const restoredThisBoot = ['no-backup', 'restored', 'local-data'].includes(restoreStatus);
+          if (onEphemeralStorage && !(backup.isConfigured() && restoredThisBoot)) {
             console.error(
               '[seed] WARNING: this re-seeded an empty database on an already-deployed service. ' +
               'If exams have run before, that data was lost with the container filesystem. ' +
-              'Mount a persistent disk and set DB_PATH/UPLOADS_DIR.'
+              'Mount a persistent disk and set DB_PATH/UPLOADS_DIR, or configure the ' +
+              'GitHub backup (BACKUP_GITHUB_TOKEN + BACKUP_GITHUB_REPO) on a free plan.'
             );
           }
         }

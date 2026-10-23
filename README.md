@@ -297,6 +297,37 @@ the first question and its options, and `{{3}}` duration in minutes. Both use
 ordinary WhatsApp messages, which work only while the 24-hour service window is
 open. Meta must approve these templates before they can be sent.
 
+## Surviving redeploys without a disk (Render free tier)
+
+Render's free plan has **no persistent disks**: the container filesystem —
+SQLite database *and* every upload — is erased on each deploy and restart,
+which previously destroyed all students, sessions and grades three deploys in a
+row. The app fixes that with a GitHub-backed backup: on an interval it pushes
+`exams.db` (a consistent `VACUUM INTO` snapshot) plus an `uploads.zip` to a
+**private** repository as a single parentless commit, and at boot it restores
+the latest backup onto the fresh container *before* any code opens the
+database.
+
+Setup (once, ~5 minutes):
+
+1. Create a **private** repo, e.g. `you/what-exam-backup`. It must never be the
+   public app repo — the backup contains student answers and photos.
+2. GitHub → Settings → Developer settings → Personal access tokens →
+   Fine-grained: scope the token to that repo only, **Contents: Read and
+   write**.
+3. In the Render dashboard set:
+   `BACKUP_GITHUB_TOKEN=github_pat_...` and
+   `BACKUP_GITHUB_REPO=you/what-exam-backup`.
+4. Deploy. The boot log changes from `DATA LOSS RISK` to
+   `GitHub backup is ON: restore at boot -> …`. The first boot has nothing to
+   restore (normal); from the second deploy on, students and uploads reappear
+   automatically.
+
+A failed push is logged (`[backup] push FAILED: …`) and retried on the next
+tick; a corrupt backup is never applied — the container keeps the local file
+and boots empty with a visible error instead. On a **paid** plan, prefer a
+mounted Render disk (see `render.yaml`); the two mechanisms are independent.
+
 ## Directories
 
 ```
@@ -315,6 +346,8 @@ src/
   services/payments.js  Paystack paywall for paid exams
   services/results.js  score computation + WhatsApp result + web report
   services/whatsapp.js  WhatsApp Cloud API client
+  services/backup.js   GitHub backup/restore for diskless hosts (free tier)
+  services/storageHealth.js  detects container-filesystem storage on Render
   public/            admin dashboard (vanilla JS SPA)
 scripts/send-exam.js   CLI: npm run send -- <examId> <phone> <phone>...
 scripts/start-all.js   runs backend + frontend together (npm run start:all)

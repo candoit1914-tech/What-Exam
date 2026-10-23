@@ -17,6 +17,12 @@ services:
     #
     # The mount path MUST match DB_PATH and UPLOADS_DIR below, otherwise the app
     # keeps writing to the ephemeral filesystem and the problem returns.
+    #
+    # FREE PLAN: disks do not exist there — do NOT declare a disk; instead set
+    # BACKUP_GITHUB_TOKEN + BACKUP_GITHUB_REPO in the dashboard (see the secrets
+    # list below). The app then pushes the database and uploads to a PRIVATE
+    # GitHub repo on an interval and restores them at boot before opening the
+    # database, which replaces the disk entirely.
     disk:
       name: what-exam-data
       mountPath: /opt/render/project/src/data
@@ -71,6 +77,14 @@ services:
       - key: AI_GENERATE_CONCURRENCY
         value: "6"
       # ── Secrets: set these in the Render dashboard, NOT here ────────────
+      # BACKUP_GITHUB_TOKEN        (fine-grained PAT, Contents: Read and write,
+      #                             scoped to ONE private repo; together with
+      #                             BACKUP_GITHUB_REPO this enables automatic
+      #                             backup/restore - the FREE-plan replacement
+      #                             for a disk. The repo MUST be private: it
+      #                             holds student answers and photos)
+      # BACKUP_GITHUB_REPO         (e.g. you/what-exam-backup - never the
+      #                             public app repo)
       # AI_API_KEY                 (AshnaAI)
       # OPENAI_API_KEY             (paid OpenAI platform key - transcribes voice
       #                             notes with Whisper, reads photo answers
