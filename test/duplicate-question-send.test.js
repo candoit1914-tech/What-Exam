@@ -20,7 +20,12 @@ const wa = require('../src/services/whatsapp');
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 let seq = 0;
-const phone = () => `233dup${++seq}${String(Date.now()).slice(-5)}`;
+// Letter-prefixed: a synthetic key the phone normalizer passes through
+// untouched. The old '233dup…' prefix made the digits 9–10 long, which
+// normalizePhone read as a real Ghanaian number and rewrote — so the
+// inbound handler resolved a different (ghost) student than this fixture
+// seeded, and the race below never saw its question.
+const phone = () => `dup${++seq}${String(Date.now()).slice(-5)}`;
 
 /**
  * A live objective paper, seated and already inside question 1: the invite is

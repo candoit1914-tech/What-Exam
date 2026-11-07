@@ -345,6 +345,12 @@ if (require.main === module) {
     // Start periodic background cleanup so expired sessions are finalized
     // automatically instead of only on server restart.
     require('./services/exam').startStaleSessionCleanup();
+    // Replay question sends the ledger still owes — a crash or redeploy between
+    // the outbox write and the send, or a WhatsApp rejection that spent its
+    // retries, used to leave the student stuck on their last question forever,
+    // because nothing ever ran the recovery. First pass fires immediately
+    // (background), then the interval keeps draining.
+    require('./services/exam').startQueuedSendRecovery();
 
     // Settle payments the Paystack webhook never reached, and open the
     // paper for anyone who paid but still has no attempt. Without this

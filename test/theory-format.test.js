@@ -35,7 +35,12 @@ function theoryPaper({ count = 3, followUps = SUBS } = {}) {
   const eid = db
     .prepare("INSERT INTO exams(title,duration_minutes,status) VALUES ('Weather',30,'live')")
     .run().lastInsertRowid;
-  const phone = '2330' + digits(8);
+  // Canonical (normalized) form — the same shape addRecipients and
+  // getOrCreateStudent store, and the shape handleInbound resolves. Two
+  // traps live here: a stray trunk-0 form ('2330…') is collapsed by
+  // normalizePhone, and a random national part starting with 0 CREATES one
+  // — so the leading digit is forced nonzero and the row is stable.
+  const phone = '233' + digits(9).replace(/^0/, '1');
   const studentId = db.prepare('INSERT INTO students(phone) VALUES (?)').run(phone).lastInsertRowid;
   const sid = db
     .prepare('INSERT INTO sessions(exam_id,student_id,started_at) VALUES (?,?,?)')

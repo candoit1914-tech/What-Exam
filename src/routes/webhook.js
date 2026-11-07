@@ -7,6 +7,10 @@ const examService = require('../services/exam');
 
 const router = express.Router();
 
+// Warned once per boot that unsigned webhook POSTs are being accepted
+// (WHATSAPP_APP_SECRET unset). Repeating it per event would drown the logs.
+let warnedUnsigned = false;
+
 function timingSafeEqualHex(a, b) {
   const bufA = Buffer.from(String(a), 'hex');
   const bufB = Buffer.from(String(b), 'hex');
@@ -33,17 +37,26 @@ router.get('/', (req, res) => {
 });
 
 router.post('/', express.raw({ type: () => true, limit: '1mb' }), async (req, res) => {
-  if (!config.whatsapp.appSecret) {
-    console.error('[webhook] WHATSAPP_APP_SECRET not configured — rejecting unsigned webhook');
-    return res.status(403).send('Webhook signature verification unavailable');
-  }
-
-  const signature = String(req.headers['x-hub-signature-256'] || '');
-  const expected = signature.startsWith('sha256=') ? signature.slice(7) : '';
-  const computed = crypto.createHmac('sha256', config.whatsapp.appSecret).update(req.body || Buffer.alloc(0)).digest('hex');
-  if (!expected || !timingSafeEqualHex(computed, expected)) {
-    console.warn('[webhook] signature mismatch — rejecting spoofed webhook event');
-    return res.status(403).send('Signature verification failed');
+  if (config.whatsapp.appSecret) {
+    const signature = String(req.headers['x-hub-signature-256'] || '');
+    const expected = signature.startsWith('sha256=') ? signature.slice(7) : '';
+    const computed = crypto.createHmac('sha256', config.whatsapp.appSecret).update(req.body || Buffer.alloc(0)).digest('hex');
+    if (!expected || !timingSafeEqualHex(computed, expected)) {
+      console.warn('[webhook] signature mismatch — rejecting spoofed webhook event');
+      return res.status(403).send('Signature verification failed');
+    }
+  } else {
+    // Unsigned mode. The alternative — rejecting every POST — made the bot
+    // DEAF: Meta delivered each student reply, was answered 403, retried for a
+    // while and then gave up, so no exam ever opened and no question ever
+    // moved, with nothing in the logs past one line at boot. Accepting keeps
+    // the exam running; the loud warning (once per boot) names the cost —
+    // student replies cannot be authenticated, so a forged webhook event is
+    // possible until the secret is set.
+    if (!warnedUnsigned) {
+      warnedUnsigned = true;
+      console.warn('[webhook] WHATSAPP_APP_SECRET not configured — accepting UNSIGNED webhook POSTs (spoofing possible). Set the App secret from Meta app Settings > Basic to verify student replies.');
+    }
   }
 
   let body;

@@ -104,7 +104,11 @@ function makeExam({ pricing = 'free', amount = 0, status = 'live' } = {}) {
 }
 
 function addStudent(eid) {
-  const phone = `233pay${++seq}${String(eid).padStart(4, '0')}`;
+  // Letter-prefixed and digit-stable: a fake key the phone normalizer passes
+  // through untouched at any eid. A numeric prefix ('233pay…') grew past the
+  // 9-digit Ghana rule once the exam ids hit two digits, and handleInbound's
+  // normalization resolved a ghost row instead of this student.
+  const phone = `pay${++seq}${String(eid).padStart(4, '0')}`;
   const sid = db.prepare('INSERT INTO students(phone) VALUES (?)').run(phone).lastInsertRowid;
   db.prepare('INSERT INTO exam_recipients(exam_id, student_id) VALUES (?,?)').run(eid, sid);
   // Two questions on purpose: answering the last one finalises the session,

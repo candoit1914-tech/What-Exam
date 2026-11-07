@@ -1992,8 +1992,18 @@ async function enterExam(session, student) {
  * run in parallel, as they always have.
  */
 async function handleInbound(phone, body, meta = {}) {
-  const key = normalizePhone(phone) || String(phone == null ? '' : phone);
-  return runExclusive(inboundChains, key, () => handleInboundNow(phone, body, meta));
+  // The student is keyed on the NORMALIZED number everywhere else — recipients
+  // are imported through addRecipients (normalizePhone) and every delivery is
+  // addressed to that stored form — so the inbound handler must resolve the
+  // same row. Reading the raw string in handleInboundNow created a SECOND
+  // student whenever the wire format differed (a leading '+', a local-format
+  // or '00'-prefixed number): the ghost had no exam recipients and no session,
+  // so every message the student sent was answered "You have no pending exams
+  // right now" while their real attempt sat waiting on the normalized row.
+  // Normalizing FIRST, before anything reads the database, makes the ghost
+  // impossible whatever format a webhook (or a future caller) delivers.
+  const normalized = normalizePhone(phone) || String(phone == null ? '' : phone);
+  return runExclusive(inboundChains, normalized, () => handleInboundNow(normalized, body, meta));
 }
 
 async function handleInboundNow(phone, body, meta = {}) {
@@ -3146,6 +3156,45 @@ function stopStaleSessionCleanup() {
   }
 }
 
+// ── Queued-send recovery ─────────────────────────────────────────────────
+//
+// A question whose delivery was recorded but never confirmed — a crash or
+// redeploy between the outbox write and the send, a WhatsApp rejection that
+// spent its retry budget, the "question 1 is on its way" path in enterExam —
+// sits in message_outbox as 'queued'. recoverQueuedSends() replays exactly
+// those rows, but nothing ever CALLED it: the recovery the whole delivery
+// ledger was designed around was dead code, so a student the process died in
+// front of stayed on their last received question with nothing running the
+// send the ledger still owed them. A short interval turns the ledger back
+// into what every caller already assumes it is. Safe to run while a delivery
+// is in flight — sendQuestionTo serializes per question behind runExclusive
+// and deliverOneQuestion re-reads the row inside the lock, so a replay can
+// never double-send a question.
+
+let queuedSendTimer = null;
+
+function startQueuedSendRecovery() {
+  if (queuedSendTimer) return; // already running
+  const intervalMs = Math.max(10000, config.exam.sendRetryDelayMs || 5000);
+  const tick = () =>
+    recoverQueuedSends().catch((err) =>
+      console.error('[recovery] queued-send replay error:', err.message)
+    );
+  // First pass right away (background, boot continues), then on the interval.
+  setImmediate(tick);
+  queuedSendTimer = setInterval(tick, intervalMs);
+  // Recovery must never be the reason a process stays alive.
+  if (queuedSendTimer.unref) queuedSendTimer.unref();
+  console.log(`[recovery] queued-send recovery started (interval: ${intervalMs}ms)`);
+}
+
+function stopQueuedSendRecovery() {
+  if (queuedSendTimer) {
+    clearInterval(queuedSendTimer);
+    queuedSendTimer = null;
+  }
+}
+
 // ── Admin: send exam to recipients ─────────────────────────────────────
 
 /** Run fn over items with at most `limit` promises in flight. */
@@ -3456,4 +3505,6 @@ module.exports = {
   splitSectionMeta,
   startStaleSessionCleanup,
   stopStaleSessionCleanup,
+  startQueuedSendRecovery,
+  stopQueuedSendRecovery,
 };
