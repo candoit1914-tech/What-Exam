@@ -1745,18 +1745,24 @@ function pollGenerateJob(examId, div, jobId) {
   const status = document.querySelector('#ag_status');
   const update = (text) => { if (status) status.innerHTML = `<p class="muted" style="margin:8px 0">${text}</p>`; };
   let misses = 0;
-  const timer = setInterval(async () => {
+  let timer;
+  const poll = async () => {
     let job;
     try {
       job = await api(`/api/jobs/${jobId}`, { skipCache: true });
       misses = 0;
     } catch (e) {
-      // Retry only what can plausibly recover: a 404 (job row gone) and a 401
-      // (needs a new sign-in) will never resolve by polling.
-      const permanent = e.status === 404 || e.status === 401;
+      // A 401 needs a new sign-in. Give 404s two quick retries in case a
+      // Render deploy or service wake briefly routed this request to a
+      // different instance before treating the job record as gone.
+      const permanent = e.status === 401;
       misses++;
-      if (permanent || misses > 8) {
-        clearInterval(timer);
+      // Render's free instances can take about 30 seconds to wake. The API
+      // helper already retries a failed GET once; stopping this poll after
+      // roughly 12 seconds turned a recoverable cold start into a false
+      // "Lost contact" message while the server was still waking up.
+      if (permanent || (e.status === 404 && misses > 2) || misses > 60) {
+        clearTimeout(timer);
         const runBtn = document.querySelector('#ag_run');
         if (runBtn) { runBtn.disabled = false; runBtn.textContent = 'Generate'; }
         renderImportNote(document.querySelector('#ag_status'), {
@@ -1769,18 +1775,19 @@ function pollGenerateJob(examId, div, jobId) {
         return;
       }
       update(`<span class="spinner"></span> Connection interrupted — retrying… (attempt ${misses})`);
+      timer = setTimeout(poll, 1500);
       return;
     }
     update(`<span class="spinner"></span> ${esc(job.stage || 'Generating…')} <strong>${job.progress || 0}%</strong>`);
     if (job.status === 'done') {
-      clearInterval(timer);
+      clearTimeout(timer);
       invalidateCache(`/api/exams/${examId}`);
       div.remove();
       const base = `Generated ${job.count} questions with full marking schemes.`;
       toast(job.warning ? `${base} ${job.warning}` : base);
       renderExam(examId);
     } else if (job.status === 'error') {
-      clearInterval(timer);
+      clearTimeout(timer);
       const runBtn = document.querySelector('#ag_run');
       if (runBtn) { runBtn.disabled = false; runBtn.textContent = 'Generate'; }
       renderImportNote(document.querySelector('#ag_status'), {
@@ -1790,8 +1797,13 @@ function pollGenerateJob(examId, div, jobId) {
         dismissable: false,
       });
       toast(job.error || 'Generation failed.', true);
+      return;
     }
-  }, 1500); // Poll every 1.5s, same cadence as the import dialog
+    // Schedule after each request completes. setInterval launched overlapping
+    // requests whenever a cold Render instance took longer than 1.5s to reply.
+    timer = setTimeout(poll, 1500);
+  };
+  timer = setTimeout(poll, 0);
 }
 
 // ── Exam paper upload (background job + polling) ───────────────────────
@@ -1908,20 +1920,23 @@ function pollPdfJob(examId, div, jobId) {
   const status = document.querySelector('#pdf_status');
   const update = (text) => { if (status) status.innerHTML = `<p class="muted" style="margin:8px 0">${text}</p>`; };
   let misses = 0;
-  const timer = setInterval(async () => {
+  let timer;
+  const poll = async () => {
     let job;
     try {
       job = await api(`/api/jobs/${jobId}`, { skipCache: true });
       misses = 0;
     } catch (e) {
-      // Retry only what can plausibly recover. A 404 will never come back
-      // (job row gone / server restarted losing it) and a 401 needs a new
-      // sign-in; reporting those as "Server unreachable — retrying" is what
-      // left users staring at a spinner that could never resolve.
-      const permanent = e.status === 404 || e.status === 401;
+      // A 401 needs a new sign-in. Give 404s two quick retries in case a
+      // Render deploy or service wake briefly routed this request to a
+      // different instance before treating the job record as gone.
+      const permanent = e.status === 401;
       misses++;
-      if (permanent || misses > 8) {
-        clearInterval(timer);
+      // Keep the import attached through the same Render cold-start window
+      // as generation. A background job can keep running while the browser's
+      // first status requests fail during wake-up.
+      if (permanent || (e.status === 404 && misses > 2) || misses > 60) {
+        clearTimeout(timer);
         // Keep the failure where it can be read instead of closing the only
         // place it was ever shown; reopening the dialog resumes a job that is
         // in fact still running, or starts a fresh one.
@@ -1939,11 +1954,12 @@ function pollPdfJob(examId, div, jobId) {
       // Don't silently freeze on the last stage: keep retrying, it recovers
       // after a redeploy.
       update(`<span class="spinner"></span> Connection interrupted — retrying… (attempt ${misses})`);
+      timer = setTimeout(poll, 1500);
       return;
     }
     update(`<span class="spinner"></span> ${esc(job.stage || 'Processing…')} <strong>${job.progress || 0}%</strong>`);
     if (job.status === 'done') {
-      clearInterval(timer);
+      clearTimeout(timer);
       invalidateCache(`/api/exams/${examId}`);
       const base = `Extracted ${job.count} questions (schemes generated automatically).`;
       if (job.warning) {
@@ -1962,7 +1978,7 @@ function pollPdfJob(examId, div, jobId) {
       }
       renderExam(examId);
     } else if (job.status === 'error') {
-      clearInterval(timer);
+      clearTimeout(timer);
       // The failure stays on screen — with the upload form back, so the admin
       // can read what happened and immediately try another file — instead of
       // removing the only place the error ever appeared.
@@ -1975,8 +1991,13 @@ function pollPdfJob(examId, div, jobId) {
         dismissable: false,
       });
       toast(job.error || 'Extraction failed.', true);
+      return;
     }
-  }, 1500); // Poll every 1.5s for faster feedback
+    // Never start another status request until this one has finished; a slow
+    // wake-up previously let interval requests pile up and lose job contact.
+    timer = setTimeout(poll, 1500);
+  };
+  timer = setTimeout(poll, 0);
 }
 
 // ── Scheme actions ───────────────────────────────────────────────

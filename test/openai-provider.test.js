@@ -1,9 +1,7 @@
 'use strict';
-// The admin's own PAID OpenAI account (OPENAI_API_KEY) lights up the three
-// features a chat gateway cannot serve: Whisper transcription for voice
-// notes, a vision-capable model asked FIRST for photo answers, and a chat
-// FALLBACK when the primary provider fails. One key, all three — and with no
-// key the app behaves exactly as before.
+// OpenAI is the default primary AI provider. One OPENAI_API_KEY enables chat,
+// PDF extraction, marking, Whisper transcription and vision. Compatible
+// gateways remain selectable explicitly for deployments that need them.
 //
 // Config is read at load, so each config case is a FRESH load with only its
 // own variables set (the way a Render deploy sees them). No network: every
@@ -45,6 +43,11 @@ function loadConfig(env) {
 test('OPENAI_API_KEY alone enables Whisper transcription and photo vision', () => {
   const fresh = loadConfig({ OPENAI_API_KEY: 'sk-live-openai-test' });
 
+  assert.equal(fresh.ai.provider, 'openai');
+  assert.equal(fresh.ai.apiKey, 'sk-live-openai-test');
+  assert.equal(fresh.ai.baseUrl, 'https://api.openai.com/v1');
+  assert.equal(fresh.ai.model, 'gpt-4o-mini');
+
   assert.equal(fresh.aiTranscribe.enabled, true, 'the paid key alone is enough for voice notes');
   assert.equal(fresh.aiTranscribe.apiKey, 'sk-live-openai-test');
   assert.equal(fresh.aiTranscribe.baseUrl, 'https://api.openai.com/v1', 'transcription goes to OpenAI itself');
@@ -55,8 +58,22 @@ test('OPENAI_API_KEY alone enables Whisper transcription and photo vision', () =
   assert.equal(fresh.openai.baseUrl, 'https://api.openai.com/v1');
 });
 
+test('legacy gateway settings cannot override the selected OpenAI primary', () => {
+  const fresh = loadConfig({
+    OPENAI_API_KEY: 'sk-live-openai-test',
+    AI_BASE_URL: 'https://api.ashna.ai/v1/api',
+    AI_API_KEY: 'legacy-gateway-key',
+    AI_MODEL: 'legacy-model',
+  });
+  assert.equal(fresh.ai.provider, 'openai');
+  assert.equal(fresh.ai.baseUrl, 'https://api.openai.com/v1');
+  assert.equal(fresh.ai.apiKey, 'sk-live-openai-test');
+  assert.equal(fresh.ai.model, 'gpt-4o-mini');
+});
+
 test('a dedicated transcribe key wins over the paid OpenAI account', () => {
   const fresh = loadConfig({
+    AI_PROVIDER: 'compatible',
     AI_TRANSCRIBE_API_KEY: 'sk-dedicated-stt',
     OPENAI_API_KEY: 'sk-live-openai-test',
   });
@@ -66,6 +83,7 @@ test('a dedicated transcribe key wins over the paid OpenAI account', () => {
 
 test('a gateway chat key never becomes a speech key', () => {
   const fresh = loadConfig({
+    AI_PROVIDER: 'compatible',
     AI_BASE_URL: 'https://api.ashna.ai/v1/api',
     AI_API_KEY: 'gateway-chat-key',
   });
@@ -75,8 +93,8 @@ test('a gateway chat key never becomes a speech key', () => {
   );
 });
 
-test('chat pointed at OpenAI itself still feeds transcription', () => {
-  const fresh = loadConfig({ AI_BASE_URL: 'https://api.openai.com/v1', AI_API_KEY: 'sk-chat-openai-test' });
+test('compatible chat pointed at OpenAI itself still feeds transcription', () => {
+  const fresh = loadConfig({ AI_PROVIDER: 'compatible', AI_BASE_URL: 'https://api.openai.com/v1', AI_API_KEY: 'sk-chat-openai-test' });
   assert.equal(fresh.aiTranscribe.enabled, true, 'when chat IS OpenAI, its key is a real speech key');
   assert.equal(fresh.aiTranscribe.apiKey, 'sk-chat-openai-test');
 });
@@ -158,6 +176,26 @@ test('photo answers are read by the paid OpenAI account first', async () => {
       assert.equal(calls.length, 1, 'the paid account answered, so no other provider is billed');
       assert.equal(calls[0].url, 'https://api.openai.com/v1/chat/completions');
       assert.equal(JSON.parse(calls[0].body).model, 'gpt-4o-mini');
+    });
+  } finally {
+    global.fetch = savedFetch;
+  }
+});
+
+test('OpenAI photo reader does not retry its identical primary after an error', async () => {
+  const savedFetch = global.fetch;
+  const calls = [];
+  try {
+    global.fetch = async (url) => {
+      calls.push(String(url));
+      return { ok: false, status: 500, text: async () => 'temporary failure' };
+    };
+    await withProviders({
+      openai: { baseUrl: 'https://api.openai.com/v1', apiKey: 'sk-live-openai-test', visionModel: 'gpt-4o-mini' },
+      chatBase: 'https://api.openai.com/v1', chatKey: 'sk-live-openai-test', chatModel: 'gpt-4o-mini',
+    }, async () => {
+      await assert.rejects(() => ai.readPhotoAnswer(PHOTO, 'What is 2 + 2?'));
+      assert.equal(calls.length, 1, 'the same endpoint, key and model must not be billed again as the primary');
     });
   } finally {
     global.fetch = savedFetch;
@@ -265,21 +303,56 @@ test('openaiConfigured mirrors the key, and gates open with it', () => {
   }
 });
 
-// ── chat fallback: the paid account rescues a failed primary ───────────
+// ── compatible-provider fallback: OpenAI rescues a failed primary ──────
 //
-// The third job of OPENAI_API_KEY. An import used to die of "the AI provider
-// did not answer in time" when the chat primary was down — with this paid
-// account sitting unused. chatJSON now falls through to it (after CLAUDE_*,
-// before XAI_*), only when a provider above it FAILED.
+// When AI_PROVIDER=compatible, chatJSON falls through to OpenAI only if the
+// configured primary fails; in the default configuration OpenAI is primary.
 
-test('OPENAI_API_KEY also sets the chat fallback model', () => {
+test('OPENAI_API_KEY sets the primary model and compatible-provider fallback', () => {
   const fresh = loadConfig({ OPENAI_API_KEY: 'sk-live-openai-test' });
   assert.equal(fresh.openai.model, 'gpt-4o-mini', 'a fast, JSON-reliable default');
+  assert.equal(fresh.ai.model, 'gpt-4o-mini', 'OpenAI model is used by primary chat and generation');
   assert.equal(
     loadConfig({ OPENAI_API_KEY: 'sk-x', OPENAI_MODEL: 'gpt-4o' }).openai.model,
     'gpt-4o',
     'OPENAI_MODEL overrides the fallback model'
   );
+  assert.equal(loadConfig({ OPENAI_API_KEY: 'sk-x', OPENAI_MODEL: 'gpt-4o' }).ai.model, 'gpt-4o');
+});
+
+test('OpenAI primary is not called a second time as its own fallback', async () => {
+  const savedFetch = global.fetch;
+  const saved = {
+    ai: { ...config.ai }, openai: config.openai,
+    claude: config.claude, xai: config.xai,
+  };
+  let calls = 0;
+  try {
+    ai.resetCircuitBreakers();
+    config.ai.provider = 'openai';
+    config.ai.baseUrl = 'https://api.openai.com/v1';
+    config.ai.apiKey = 'sk-live-openai-test';
+    config.ai.model = 'gpt-4o-mini';
+    config.openai = {
+      baseUrl: 'https://api.openai.com/v1', apiKey: 'sk-live-openai-test',
+      model: 'gpt-4o-mini', visionModel: 'gpt-4o-mini',
+    };
+    config.claude = { baseUrl: '', apiKey: '', model: '' };
+    config.xai = { baseUrl: '', apiKey: '', model: '' };
+    global.fetch = async () => {
+      calls++;
+      return { ok: false, status: 500, text: async () => 'temporary failure' };
+    };
+    await assert.rejects(() => ai.chatJSON([{ role: 'user', content: 'test' }], { maxRetries: 0 }));
+    assert.equal(calls, 1, 'same URL, key and model should not retry as a separate OpenAI fallback');
+  } finally {
+    global.fetch = savedFetch;
+    config.ai = saved.ai;
+    config.openai = saved.openai;
+    config.claude = saved.claude;
+    config.xai = saved.xai;
+    ai.resetCircuitBreakers();
+  }
 });
 
 test('a whole extraction survives a dead primary on the paid OpenAI account', async () => {

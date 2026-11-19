@@ -3,12 +3,30 @@ const path = require('path');
 const crypto = require('crypto');
 
 const root = path.resolve(__dirname, '..');
+// The Render disk in render.yaml is mounted at src/data. Prefer that mount by
+// default on Render so a missing DB_PATH/UPLOADS_DIR variable does not quietly
+// put exams on the disposable project filesystem. Local installs keep using
+// ./data as before.
+const defaultDataDir = process.env.RENDER
+  ? path.join(root, 'src', 'data')
+  : path.join(root, 'data');
 
 function valid(v) {
   if (!v || typeof v !== 'string') return false;
   const s = v.trim();
   // Case-insensitive: 'YOUR_API_KEY' or 'Example' were previously accepted as real.
   return s !== '' && !/your_|example|changeme/i.test(s);
+}
+
+function secondaryModelFromEnv(value) {
+  const model = String(value || '').trim();
+  // NVIDIA retired this model on 2026-10-03. Existing Render services may
+  // still have the old CLAUDE_MODEL value stored as an env var, which
+  // overrides render.yaml; map it so the configured fallback remains usable.
+  if (/^(?:nvidia\/)?nemotron-3-super-120b-a12b$/i.test(model)) {
+    return 'nvidia/nemotron-3.5-super-vl-120b-a12b';
+  }
+  return model;
 }
 
 const adminPassword = (() => {
@@ -18,26 +36,17 @@ const adminPassword = (() => {
 })();
 const adminPasswordIsGenerated = !valid(process.env.ADMIN_PASSWORD || '');
 
-// Shipped AI defaults, declared once. The `ai` block and the tests both read
-// these, so a test asserting the default really does pin the value the runtime
-// uses - a duplicated literal in two places could drift and still pass.
-const DEFAULT_AI_BASE_URL = 'https://api.ashna.ai/v1/api';
-// gpt-5-mini, not the flagship gpt-6-astra. A single paper costs ~80 AI calls,
-// so per-call price multiplies fast and a flagship burns a small credit balance
-// within a few papers. It is the same reasoning family, so `reasoning_effort`
-// applies and reasoning tokens can be held down - the dominant cost term at
-// this call volume. Measured on a PDF-extraction block through this gateway:
-// 3275 total tokens against astra's 4923 for the same 8 questions. Raise to
-// gpt-5.4 or gpt-6-astra via AI_MODEL if hard-paper question quality needs it.
-const DEFAULT_AI_MODEL = 'gpt-5-mini';
-// 'low' keeps reasoning tokens down without dropping the structured extraction
-// quality the app depends on. 'none' is accepted by this gateway and measured
-// slightly cheaper still (3213 vs 3275 tokens on a PDF block), so it is a valid
-// cheaper setting - but 'low' is the shipped default because the margin is small
-// and hard-paper extraction quality is worth more than ~2% of the token spend.
-// Raise to 'medium'/'high' if extraction degrades. Set AI_REASONING_EFFORT=''
-// to omit the field.
-const DEFAULT_REASONING_EFFORT = 'low';
+// OpenAI is the app's default AI provider. An explicitly selected compatible
+// provider can still be used for deployments that need one, but old AI_BASE_URL
+// and AI_API_KEY variables do not silently override the OpenAI choice.
+const AI_PROVIDER = String(process.env.AI_PROVIDER || 'openai').trim().toLowerCase() === 'compatible'
+  ? 'compatible'
+  : 'openai';
+const DEFAULT_AI_BASE_URL = 'https://api.openai.com/v1';
+// gpt-4o-mini supports the chat-completions request format used by this app and
+// also handles image input for PDF figure rescue and photo answers.
+const DEFAULT_AI_MODEL = 'gpt-4o-mini';
+const DEFAULT_REASONING_EFFORT = AI_PROVIDER === 'compatible' ? 'low' : '';
 
 // The two halves of a paper's 100 points, read once and normalised so a pair
 // that does not sum to 100 (THEORY_WEIGHT=70 alone, say) still describes a
@@ -82,8 +91,12 @@ const config = {
   //
   // Warnings on boot when the path is still the ephemeral default, so a new
   // deploy does not quietly destroy a live exam database again.
-  dbPath: path.resolve(root, process.env.DB_PATH || './data/exams.db'),
-  uploadsDir: path.resolve(root, process.env.UPLOADS_DIR || './data/uploads'),
+  dbPath: process.env.DB_PATH
+    ? path.resolve(root, process.env.DB_PATH)
+    : path.join(defaultDataDir, 'exams.db'),
+  uploadsDir: process.env.UPLOADS_DIR
+    ? path.resolve(root, process.env.UPLOADS_DIR)
+    : path.join(defaultDataDir, 'uploads'),
 
   whatsapp: {
     accessToken: valid(process.env.WHATSAPP_ACCESS_TOKEN) ? process.env.WHATSAPP_ACCESS_TOKEN : '',
@@ -114,15 +127,20 @@ const config = {
   },
 
   ai: {
-    // AshnaAI is a multi-model gateway that speaks the OpenAI chat-completions
-    // contract, so switching the primary provider is a base-URL change, not a
-    // code change. Point AI_BASE_URL/AI_MODEL at any OpenAI-compatible host to
-    // trade quality for cost.
-    baseUrl: (process.env.AI_BASE_URL || DEFAULT_AI_BASE_URL).replace(/\/$/, ''),
-    apiKey: valid(process.env.AI_API_KEY) ? process.env.AI_API_KEY : '',
+    // OpenAI is primary by default. For another OpenAI-compatible service,
+    // explicitly set AI_PROVIDER=compatible and provide AI_BASE_URL/AI_API_KEY.
+    provider: AI_PROVIDER,
+    baseUrl: (AI_PROVIDER === 'openai'
+      ? (process.env.OPENAI_BASE_URL || DEFAULT_AI_BASE_URL)
+      : (process.env.AI_BASE_URL || '')).replace(/\/$/, ''),
+    apiKey: valid(AI_PROVIDER === 'openai' ? process.env.OPENAI_API_KEY : process.env.AI_API_KEY)
+      ? (AI_PROVIDER === 'openai' ? process.env.OPENAI_API_KEY : process.env.AI_API_KEY)
+      : '',
     defaultModel: DEFAULT_AI_MODEL,
     defaultReasoningEffort: DEFAULT_REASONING_EFFORT,
-    model: process.env.AI_MODEL || DEFAULT_AI_MODEL,
+    model: AI_PROVIDER === 'openai'
+      ? (process.env.OPENAI_MODEL || DEFAULT_AI_MODEL)
+      : (process.env.AI_MODEL || DEFAULT_AI_MODEL),
     reasoningEffort: process.env.AI_REASONING_EFFORT !== undefined
       ? process.env.AI_REASONING_EFFORT
       : DEFAULT_REASONING_EFFORT,
@@ -131,22 +149,14 @@ const config = {
     // larger than timeoutMs: a block that overruns is not retried into
     // oblivion, it is SKIPPED, so a tight budget silently deletes questions.
     // Measured on a real 17-page paper: blocks took 28s-89s to answer. The
-    // default carries extra headroom for a flagship reasoning model behind a
-    // gateway, which is slower than the host the range was measured on.
+    // default carries extra headroom for slow models and provider congestion.
     // Raised to 10 minutes (was 6): the admin asked for more patience on slow
     // generations, and with jobs running in the background a long block only
     // means a longer progress stage — nothing times out waiting for it.
     blockTimeoutMs: parseInt(process.env.AI_BLOCK_TIMEOUT_MS || '600000', 10),
-    // How many question-generation batches may be in flight at once. A batch of
-    // 10 questions takes ~19s on the gateway, so this dominates how long a paper
-    // takes. It used to be hardcoded to 2 "to avoid 429s", which serialized a
-    // 15-call paper into 8 waves. Measured against AshnaAI: 4 concurrent batches
-    // finished in 29.5s and 8 in 29.6s, with zero 429s at either level - the
-    // wall-clock is the provider's latency, not a queue. Rate limits are handled
-    // by retry-with-backoff in chatJSON, which is the correct place for them.
-    // The default is 10: at or above the measured 8, so a provider with
-    // headroom collapses a paper into a single wave, and chatJSON's
-    // backoff absorbs any 429 a tighter account does see.
+    // How many question-generation batches may be in flight at once. The client
+    // retries rate limits; lower this value if the configured account has a
+    // tighter request limit.
     generateConcurrency: parseInt(process.env.AI_GENERATE_CONCURRENCY || '10', 10),
     vision: process.env.AI_VISION === 'true',
     // How many pages ONE import may show to the vision rescue: the pages whose
@@ -158,13 +168,8 @@ const config = {
     visionPageLimit: parseInt(process.env.AI_VISION_PAGE_LIMIT || '0', 10),
   },
 
-  // Speech-to-text is a SEPARATE provider from chat, deliberately. The chat
-  // primary is AshnaAI, whose catalog holds no speech model at all (90 chat
-  // models, no whisper), /audio/transcriptions 404s, and every model that
-  // accepts an `input_audio` part returns 200 with no transcript. So audio
-  // cannot share the chat base URL, and the previous arrangement - gating the
-  // Whisper call on the chat base URL containing "api.openai.com" - meant
-  // moving chat to a gateway silently disabled voice notes.
+  // Speech-to-text uses a dedicated audio endpoint. OpenAI chat models do not
+  // transcribe audio through /chat/completions, so voice notes use Whisper.
   //
   // Any OpenAI-compatible /audio/transcriptions endpoint works here (OpenAI,
   // Groq, a self-hosted faster-whisper). Setting only the key is enough: the
@@ -174,14 +179,14 @@ const config = {
   //
   // Three keys are honoured, in order: a dedicated AI_TRANSCRIBE_API_KEY; the
   // admin's own paid OpenAI account (OPENAI_API_KEY — its Whisper is one of
-  // the two things that key is for, the other being photo answers below); and
-  // last the chat key, but ONLY when chat itself is OpenAI — a gateway key
-  // has no speech model behind it, so it is never guessed at here.
+  // the same account used for chat and photo answers); and last the compatible
+  // chat key, but ONLY when that endpoint itself is OpenAI.
   aiTranscribe: (() => {
-    const chatIsOpenAI = /api\.openai\.com/i.test(process.env.AI_BASE_URL || '');
+    const compatibleChatIsOpenAI = AI_PROVIDER === 'compatible'
+      && /api\.openai\.com/i.test(process.env.AI_BASE_URL || '');
     const key = process.env.AI_TRANSCRIBE_API_KEY
       || process.env.OPENAI_API_KEY
-      || (chatIsOpenAI ? process.env.AI_API_KEY : '');
+      || (compatibleChatIsOpenAI ? process.env.AI_API_KEY : '');
     const usable = valid(key);
     return {
       baseUrl: (process.env.AI_TRANSCRIBE_BASE_URL || process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1')
@@ -192,21 +197,15 @@ const config = {
     };
   })(),
 
-  // OpenAI direct — the admin's own PAID platform account, kept apart from the
-  // chat primary (a gateway). One OPENAI_API_KEY lights up three features:
-  // Whisper speech-to-text for voice notes (through aiTranscribe above), a
-  // vision model for photo answers (asked first in ai.readPhotoAnswer), and —
-  // when the chat primary fails or times out — a chat fallback, so an import
-  // can never die of "the AI provider did not answer in time" while a paid
-  // account sits unused. Set the key and all three work; leave it blank and
-  // the app is exactly as it was.
+  // OpenAI account shared by primary chat, vision and (through aiTranscribe)
+  // voice transcription. With AI_PROVIDER=openai this is the primary account;
+  // in compatible-provider mode it remains an optional fallback and media key.
   openai: {
     baseUrl: (process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1').replace(/\/$/, ''),
     apiKey: valid(process.env.OPENAI_API_KEY) ? process.env.OPENAI_API_KEY : '',
-    // Chat fallback model, used ONLY when the primary provider fails — the
-    // primary is still preferred and OpenAI is never billed for a call the
-    // primary would have answered. gpt-4o-mini: fast, cheap, JSON-reliable.
-    model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
+    // Primary model by default; in compatible-provider mode it is the chat
+    // fallback. gpt-4o-mini is fast, inexpensive and vision-capable.
+    model: process.env.OPENAI_MODEL || DEFAULT_AI_MODEL,
     // Vision model for reading handwritten photo answers. gpt-4o-mini is the
     // shipped default: vision-native and cheap per photo. Override with
     // OPENAI_VISION_MODEL for a stronger reader on hard handwriting.
@@ -220,7 +219,7 @@ const config = {
   claude: {
     baseUrl: (process.env.CLAUDE_BASE_URL || '').replace(/\/$/, ''),
     apiKey: valid(process.env.CLAUDE_API_KEY) ? process.env.CLAUDE_API_KEY : '',
-    model: process.env.CLAUDE_MODEL || '',
+    model: secondaryModelFromEnv(process.env.CLAUDE_MODEL),
     timeoutMs: parseInt(process.env.CLAUDE_TIMEOUT_MS || '0', 10),
   },
 

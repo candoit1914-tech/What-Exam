@@ -2022,7 +2022,14 @@ async function enterExam(session, student) {
   // paid paper: its entry moment is the "Payment received" bubble it already
   // read.
   if (exam && !payments.isPaidExam(exam)) {
-    await wa.sendText(student.phone, entryConfirmedMessage(exam));
+    // This confirmation is informational. A rejected text bubble (for example
+    // a transient WhatsApp rate limit) must not strand the session after its
+    // clock has been armed and prevent question 1 from being attempted.
+    try {
+      await wa.sendText(student.phone, entryConfirmedMessage(exam));
+    } catch (err) {
+      console.warn('[exam] entry confirmation failed; continuing with question 1:', friendlyError(err));
+    }
   }
   if (entered.selection_state === 'selecting') {
     await selection.sendSelector(student.phone, entered.id, entered.selection_section);
@@ -2121,7 +2128,15 @@ async function handleInboundNow(phone, body, meta = {}) {
   const invited = db.prepare("SELECT id FROM message_outbox WHERE session_id=? AND kind='intro' AND state='sent'").get(session.id);
   const questionSent = db.prepare("SELECT id FROM message_outbox WHERE session_id=? AND kind='question' AND state='sent'").get(session.id);
   const selectorOpen = session.selection_state === 'selecting';
-  if (invited && !questionSent && !selectorOpen && sessionHasNoAnswers(session.id)) {
+  const noAnswers = sessionHasNoAnswers(session.id);
+  const entryRequested = isEntryRequest(body, meta);
+  // Prefer a deliberate Start tap over the invitation outbox state. Meta can
+  // deliver the quick-reply webhook while the send request is still returning,
+  // before sendIntro() has marked the intro row `sent`; gating entry on that
+  // row made the tap get treated as an answer and Q1 never left the waiting
+  // room. The question/answer and selector guards keep this shortcut scoped to
+  // an unopened paper rather than replaying the start flow mid-exam.
+  if ((invited || entryRequested) && !questionSent && !selectorOpen && noAnswers) {
     // The waiting room. A FREE paper invites first and opens on request: the
     // student has the card, and nothing behind it — no question, no ticking
     // clock — until they say they want to begin. Every other message ("what is
@@ -2137,7 +2152,7 @@ async function handleInboundNow(phone, body, meta = {}) {
     //     row unsent), so a retry must go through rather than nag.
     if (!session.started_at) {
       const examRow = db.prepare('SELECT * FROM exams WHERE id = ?').get(session.exam_id);
-      if (!payments.isPaidExam(examRow) && !isEntryRequest(body, meta)) {
+      if (!payments.isPaidExam(examRow) && !entryRequested) {
         await wa.sendText(student.phone, entryReminderMessage());
         return { started: false, ok: true, reason: 'awaiting_entry' };
       }
