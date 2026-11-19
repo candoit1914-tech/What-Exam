@@ -30,8 +30,13 @@ function checkConfig(config = {}, env = process.env) {
       ? { key, level: 'info', status, problem: 'Configured. Validity has not been verified.', fix: '' }
       : { key, level, status, problem, fix };
   });
-  const provider = String(env.AI_PROVIDER || 'openai').trim().toLowerCase();
-  const openaiPrimary = provider !== 'compatible';
+  const explicitProvider = String(env.AI_PROVIDER || '').trim().toLowerCase();
+  const openaiKeyStatus = statusOf(env.OPENAI_API_KEY);
+  // Mirror src/config.js: a legacy gateway deployment (AI_BASE_URL + AI_API_KEY,
+  // no OPENAI_API_KEY) really is configured and must not be reported as broken.
+  const legacyGatewayReady = statusOf(env.AI_API_KEY) === 'set' && statusOf(env.AI_BASE_URL) === 'set';
+  const openaiPrimary = explicitProvider !== 'compatible'
+    && !(legacyGatewayReady && openaiKeyStatus !== 'set');
   const primaryKey = openaiPrimary ? 'OPENAI_API_KEY' : 'AI_API_KEY';
   const primaryStatus = statusOf(env[primaryKey]);
   const primaryConfigured = openaiPrimary || statusOf(env.AI_BASE_URL) === 'set';

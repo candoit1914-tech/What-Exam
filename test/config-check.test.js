@@ -33,6 +33,12 @@ test('unsafe public URLs warn once without exposing values',()=>{
 test('missing OpenAI primary warns without preventing manual exam delivery',()=>{
  const r=checkConfig(cfg,{...FULL,OPENAI_API_KEY:''}); assert.equal(r.ok,true); assert.equal(find(r,'OPENAI_API_KEY').level,'warning');
 });
+test('a half-migrated gateway deployment is not reported as having no AI',()=>{
+  const r=checkConfig(cfg,{...FULL,AI_PROVIDER:'openai',OPENAI_API_KEY:'',AI_API_KEY:'ai-private',AI_BASE_URL:'https://gateway.test/v1'});
+  assert.equal(r.ok,true);
+  assert.equal(find(r,'AI_API_KEY').level,'info');
+  assert.equal(find(r,'OPENAI_API_KEY').level,'warning');
+});
 test('compatible provider mode checks its key and endpoint',()=>{
  const missing=checkConfig(cfg,{...FULL,AI_PROVIDER:'compatible',AI_API_KEY:'',AI_BASE_URL:''});
  assert.equal(find(missing,'AI_API_KEY').level,'warning');

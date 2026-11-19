@@ -3,10 +3,11 @@ const path = require('path');
 const crypto = require('crypto');
 
 const root = path.resolve(__dirname, '..');
-// The Render disk in render.yaml is mounted at src/data. Prefer that mount by
-// default on Render so a missing DB_PATH/UPLOADS_DIR variable does not quietly
-// put exams on the disposable project filesystem. Local installs keep using
-// ./data as before.
+// On Render, keep the default data directory under src/data: render.yaml sets
+// DB_PATH/UPLOADS_DIR to the same place, and on the Free plan there is no disk,
+// so a missing variable must not silently move exams elsewhere. Local installs
+// keep using ./data as before. Persistence on Free comes from the GitHub backup,
+// not from this path.
 const defaultDataDir = process.env.RENDER
   ? path.join(root, 'src', 'data')
   : path.join(root, 'data');
@@ -36,10 +37,17 @@ const adminPassword = (() => {
 })();
 const adminPasswordIsGenerated = !valid(process.env.ADMIN_PASSWORD || '');
 
-// OpenAI is the app's default AI provider. An explicitly selected compatible
-// provider can still be used for deployments that need one, but old AI_BASE_URL
-// and AI_API_KEY variables do not silently override the OpenAI choice.
-const AI_PROVIDER = String(process.env.AI_PROVIDER || 'openai').trim().toLowerCase() === 'compatible'
+// OpenAI is the app's default AI provider. Deployments created before the
+// OpenAI switch may have AI_BASE_URL + AI_API_KEY in the Render dashboard but
+// no OPENAI_API_KEY — including ones whose blueprint already says
+// AI_PROVIDER=openai. With no usable OpenAI key, use the configured gateway as
+// the primary rather than leave that deployment with NO working AI at all.
+// Once OPENAI_API_KEY is set it always wins, so a half-migrated environment
+// cannot silently override the intended OpenAI primary.
+const explicitProvider = String(process.env.AI_PROVIDER || '').trim().toLowerCase();
+const legacyGatewayReady = valid(process.env.AI_API_KEY) && valid(process.env.AI_BASE_URL);
+const AI_PROVIDER = explicitProvider === 'compatible'
+  || (legacyGatewayReady && !valid(process.env.OPENAI_API_KEY))
   ? 'compatible'
   : 'openai';
 const DEFAULT_AI_BASE_URL = 'https://api.openai.com/v1';
@@ -61,7 +69,10 @@ const paperWeights = (() => {
 
 const config = {
   port: parseInt(process.env.PORT || '3000', 10),
-  appUrl: (process.env.APP_URL || `http://localhost:${process.env.PORT || 3000}`).replace(/\/$/, ''),
+  // Render sets RENDER_EXTERNAL_URL to the service's public HTTPS address.
+  // Falling back to it means report links, webhook display and the config
+  // self-check are correct even when APP_URL was never added to the dashboard.
+  appUrl: (process.env.APP_URL || process.env.RENDER_EXTERNAL_URL || `http://localhost:${process.env.PORT || 3000}`).replace(/\/$/, ''),
   frontendPort: parseInt(process.env.FRONTEND_PORT || '8080', 10),
   frontendUrl: (process.env.FRONTEND_URL || `http://localhost:${process.env.FRONTEND_PORT || 8080}`).replace(/\/$/, ''),
   // Browser origins allowed to call the API cross-origin, IN ADDITION to
@@ -83,11 +94,12 @@ const config = {
       .filter(Boolean),
   ],
 
-  // Storage. Both must point at a PERSISTENT volume on Render: the container
-  // filesystem is discarded on every deploy and restart, so leaving these on the
-  // default ./data wipes the database, every student and every graded answer,
-  // plus uploaded photos and voice notes. render.yaml mounts a disk at
-  // /opt/render/project/src/data and sets both variables to match.
+  // Storage. The container filesystem is discarded on every deploy, restart
+  // and (on Render's Free plan) every 15-minute idle spin-down. render.yaml
+  // points both at src/data; on Free that directory is still ephemeral, so
+  // BACKUP_GITHUB_TOKEN + BACKUP_GITHUB_REPO are what actually preserve the
+  // database, students, grades and uploads. On a paid plan the same path can
+  // be a mounted disk instead — no variable needs to change either way.
   //
   // Warnings on boot when the path is still the ephemeral default, so a new
   // deploy does not quietly destroy a live exam database again.
@@ -279,8 +291,11 @@ const config = {
   // before any module opens the database. Off unless BOTH are set. The repo
   // MUST be private — it holds student answers and photos.
   backup: {
-    token: (process.env.BACKUP_GITHUB_TOKEN || '').trim(),
-    repo: (process.env.BACKUP_GITHUB_REPO || '').trim()
+    // A placeholder such as YOUR_TOKEN must not count as "configured": on a
+    // diskless host a failed restore makes server.js refuse to boot, which
+    // Render reports as a failed deploy. Treat placeholder values as unset.
+    token: valid(process.env.BACKUP_GITHUB_TOKEN) ? process.env.BACKUP_GITHUB_TOKEN.trim() : '',
+    repo: (valid(process.env.BACKUP_GITHUB_REPO) ? process.env.BACKUP_GITHUB_REPO.trim() : '')
       .replace(/^https?:\/\/github\.com\//i, '')
       .replace(/\.git$/i, '')
       .replace(/\/+$/, ''),

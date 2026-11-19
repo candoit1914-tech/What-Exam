@@ -2215,8 +2215,14 @@ async function sendPaidStartTemplate(session, student, exam, firstQ) {
   // but it cannot carry an arbitrary question image. Once the gate has gone
   // out, duplicate payment notifications must not repeat it.
   if (needsImageGate) {
+    // Look for the PAID-START GATE, not any 'intro' row. The invitation already
+    // wrote an intro row for this session, so querying kind='intro' here made
+    // the very first payment look like a repeat: the "Reply START" template was
+    // skipped and the student never got a way into their paper. A dedicated
+    // kind also avoids the (session_id, question_id, kind) UNIQUE collision
+    // when the gate row is enqueued below.
     const priorGate = db
-      .prepare("SELECT id FROM message_outbox WHERE session_id = ? AND question_id = 0 AND kind = 'intro' AND state = 'sent'")
+      .prepare("SELECT id FROM message_outbox WHERE session_id = ? AND question_id = 0 AND kind = 'paid_gate' AND state = 'sent'")
       .get(session.id);
     if (priorGate) {
       recordAcceptance(session);
@@ -2265,7 +2271,7 @@ async function sendPaidStartTemplate(session, student, exam, firstQ) {
   ]);
 
   if (needsImageGate) {
-    const gate = outbox.enqueue({ sessionId: session.id, kind: 'intro', recipient: student.phone });
+    const gate = outbox.enqueue({ sessionId: session.id, kind: 'paid_gate', recipient: student.phone });
     outbox.markSent(gate.id);
     recordAcceptance(session);
     return true;

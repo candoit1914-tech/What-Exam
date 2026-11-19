@@ -71,6 +71,38 @@ test('legacy gateway settings cannot override the selected OpenAI primary', () =
   assert.equal(fresh.ai.model, 'gpt-4o-mini');
 });
 
+test('a half-migrated deployment keeps its configured gateway as primary', () => {
+  // render.yaml sets AI_PROVIDER=openai, so an older service can genuinely have
+  // that value plus legacy gateway keys and NO OpenAI key. It must not boot
+  // with an unusable AI config after the OpenAI switch.
+  const fresh = loadConfig({
+    AI_PROVIDER: 'openai',
+    AI_BASE_URL: 'https://api.ashna.ai/v1/api',
+    AI_API_KEY: 'legacy-gateway-key',
+    AI_MODEL: 'gpt-5-mini',
+  });
+  assert.equal(fresh.ai.provider, 'compatible');
+  assert.equal(fresh.ai.apiKey, 'legacy-gateway-key');
+  assert.equal(fresh.ai.baseUrl, 'https://api.ashna.ai/v1/api');
+  assert.equal(fresh.ai.model, 'gpt-5-mini');
+});
+
+test('Render public URL is used when APP_URL is not configured', () => {
+  const savedApp = process.env.APP_URL;
+  const savedRender = process.env.RENDER_EXTERNAL_URL;
+  try {
+    delete process.env.APP_URL;
+    process.env.RENDER_EXTERNAL_URL = 'https://what-exam.onrender.com';
+    const fresh = loadConfig({ OPENAI_API_KEY: 'sk-live-openai-test' });
+    assert.equal(fresh.appUrl, 'https://what-exam.onrender.com');
+  } finally {
+    if (savedApp === undefined) delete process.env.APP_URL;
+    else process.env.APP_URL = savedApp;
+    if (savedRender === undefined) delete process.env.RENDER_EXTERNAL_URL;
+    else process.env.RENDER_EXTERNAL_URL = savedRender;
+  }
+});
+
 test('a dedicated transcribe key wins over the paid OpenAI account', () => {
   const fresh = loadConfig({
     AI_PROVIDER: 'compatible',

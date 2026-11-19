@@ -56,6 +56,7 @@ const orig = {};
 before(() => {
   orig.vision = config.ai.vision;
   orig.apiKey = config.ai.apiKey;
+  orig.baseUrl = config.ai.baseUrl;
   orig.openaiKey = config.openai.apiKey;
   orig.aiConfigured = aiMod.aiConfigured;
   orig.locateFigures = aiMod.locateFigures;
@@ -67,12 +68,17 @@ before(() => {
   // key is pinned OFF for the same reason — the cases below are about the chat
   // provider, and one test turns the paid key on for itself.
   config.ai.apiKey = 'test-key';
+  // aiConfigured() requires BOTH a key and an endpoint. isolate.js clears the
+  // base URL, so a key alone would make every real locateFigures() gate below
+  // return [] and the rescues under test would never run.
+  config.ai.baseUrl = 'https://vision.test/v1';
   config.openai.apiKey = '';
   aiMod.aiConfigured = () => true;
 });
 after(() => {
   config.ai.vision = orig.vision;
   config.ai.apiKey = orig.apiKey;
+  config.ai.baseUrl = orig.baseUrl;
   config.openai.apiKey = orig.openaiKey;
   aiMod.aiConfigured = orig.aiConfigured;
   aiMod.locateFigures = orig.locateFigures;

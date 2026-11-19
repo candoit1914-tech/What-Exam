@@ -28,7 +28,7 @@
     "tesseract.js": "^7.0.0"
   },
   "engines": {
-    "node": ">=22.5"
+    "node": ">=22.16.0 <27"
   },
   "devDependencies": {
     "pdfkit": "^0.19.1"
