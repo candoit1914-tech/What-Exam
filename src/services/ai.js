@@ -796,13 +796,41 @@ async function mapLimit(items, limit, fn) {
  * happens to sit first in the block.
  */
 const ORPHAN_FIGURE_REF =
-  /\b(?:figure|diagram|illustration|graph|chart|picture|photograph|drawing|plate|map|table)\b/i;
+  /\b(?:figure|diagram|illustration|graph|chart|picture|photograph|drawing|plate|map|table|apparatus|specimen|experiment(?:al)?|laboratory|set[- ]?up|circuit|organism|sample|equipment|microscope|reagent|stomata)\b/i;
 const ORPHAN_FIGURE_CONTEXT =
-  /\b(?:above|below|shown|shows|given|overleaf|opposite|labelled|labeled|study|studies|examine|refer|referred|depicted|illustrat\w*)\b/i;
+  /\b(?:above|below|shown|shows|given|overleaf|opposite|labelled|labeled|study|studies|examine|refer|referred|depicted|illustrat\w*|observe|identify|record|measure|draw|set\s+up|carry\s+out|use\s+the|based\s+on)\b/i;
 
 function namesAFigure(q) {
-  const text = `${q.text || ''} ${q.passage || ''}`;
+  const parts = Array.isArray(q.follow_ups) ? q.follow_ups.map((part) => part && part.text).join(' ') : '';
+  const text = `${q.text || ''} ${q.passage || ''} ${parts}`;
   return ORPHAN_FIGURE_REF.test(text) && ORPHAN_FIGURE_CONTEXT.test(text);
+}
+
+/**
+ * Use the printed question nearest a marker in the source block when the
+ * model omitted that marker from its JSON. Figures may sit just before or
+ * after the stem, so choose the nearest question start; inline math belongs
+ * to the most recent question start.
+ */
+function questionAtSourcePosition(qs, marker, sourceBlock, mode = 'nearest') {
+  if (!Array.isArray(qs) || !qs.length || !sourceBlock || !Number.isFinite(Number(marker && marker.offset))) return null;
+  const starts = [];
+  const numberedStart = /^\s*(?:Q\s*)?(\d{1,3})\s*(?:[.)]|\t)(?=\s|$)/gim;
+  for (const match of String(sourceBlock).matchAll(numberedStart)) {
+    starts.push({ number: Number(match[1]), offset: match.index });
+  }
+  if (!starts.length) return null;
+
+  const offset = Number(marker.offset);
+  let start;
+  if (mode === 'preceding') {
+    start = starts.filter((item) => item.offset <= offset).at(-1) || starts[0];
+  } else {
+    start = starts.reduce((best, item) =>
+      Math.abs(item.offset - offset) < Math.abs(best.offset - offset) ? item : best
+    );
+  }
+  return qs.find((q) => Number(q && q.number) === start.number) || null;
 }
 
 /**
@@ -817,7 +845,9 @@ function namesAFigure(q) {
  * answered blind. Only when no question in the block mentions a figure at all
  * does the old first-question fallback apply.
  */
-function orphanFigureTarget(qs, gifts) {
+function orphanFigureTarget(qs, gifts, marker, sourceBlock) {
+  const positioned = questionAtSourcePosition(qs, marker, sourceBlock, 'nearest');
+  if (positioned) return positioned;
   const candidates = qs.filter(namesAFigure);
   const pool = candidates.length ? candidates : [qs[0]];
   const bare = pool.filter((q) => !(q.figureIndices || []).length);
@@ -853,7 +883,7 @@ function orphanFigureTarget(qs, gifts) {
  * markers whose block yielded no questions at all (skipped blocks), so the
  * caller can warn.
  */
-function attachMarkers(questionsByBlock, markersByBlock, mathByBlock) {
+function attachMarkers(questionsByBlock, markersByBlock, mathByBlock, sourceBlocks = []) {
   const used = new Set();
   const usedMath = new Set();
   const allMarkers = [];
@@ -865,12 +895,21 @@ function attachMarkers(questionsByBlock, markersByBlock, mathByBlock) {
     const orphanGifts = new Map();
     for (const m of markersByBlock[b] || []) {
       allMarkers.push(m);
-      let target = null;
+      let explicitTarget = null;
       for (const q of qs) {
-        const textQ = String(q.text || '') + ' ' + String(q.passage || '');
-        if (textQ.includes(`[IMG:${m.idx}]`)) { target = q; break; }
+        const parts = Array.isArray(q.follow_ups) ? q.follow_ups.map((part) => part && part.text).join(' ') : '';
+        const textQ = String(q.text || '') + ' ' + String(q.passage || '') + ' ' + parts;
+        if (textQ.includes(`[IMG:${m.idx}]`)) { explicitTarget = q; break; }
       }
-      if (!target && qs.length) target = orphanFigureTarget(qs, orphanGifts);
+      const positionedTarget = questionAtSourcePosition(qs, m, sourceBlocks[b], 'nearest');
+      // A line-only parser can leave a marker on the preceding question even
+      // when the next question explicitly refers to the figure. In that case
+      // the nearest source question that names a visual is authoritative.
+      let target = positionedTarget && namesAFigure(positionedTarget)
+        ? positionedTarget
+        : explicitTarget;
+      if (!target && positionedTarget) target = positionedTarget;
+      if (!target && qs.length) target = orphanFigureTarget(qs, orphanGifts, m, sourceBlocks[b]);
       if (target) {
         // Every figure the question names, in document order. `markerIndex`
         // stays the first one — a single field cannot hold a second figure,
@@ -887,10 +926,13 @@ function attachMarkers(questionsByBlock, markersByBlock, mathByBlock) {
       for (const q of qs) {
         const textQ =
           String(q.text || '') + ' ' + String(q.passage || '') + ' ' +
-          (Array.isArray(q.options) ? q.options.join(' ') : String(q.options || ''));
+          (Array.isArray(q.options) ? q.options.join(' ') : String(q.options || '')) + ' ' +
+          (Array.isArray(q.follow_ups) ? q.follow_ups.map((part) => part && part.text).join(' ') : '');
         if (textQ.includes(`[MATH:${m.idx}]`)) { target = q; break; }
       }
-      if (!target && qs.length) target = qs[0];
+      if (!target && qs.length) {
+        target = questionAtSourcePosition(qs, m, sourceBlocks[b], 'preceding') || qs[0];
+      }
       if (target) {
         (target.markerIndices = target.markerIndices || []).push(m.idx);
         usedMath.add(m.idx);
@@ -1777,10 +1819,10 @@ async function extractQuestionsFromText(rawText, onProgress, onWarning, opts = {
   const markersPresent = Array.isArray(opts.markers) && opts.markers.length > 0;
   const mathMarkersPresent = Array.isArray(opts.mathMarkers) && opts.mathMarkers.length > 0;
   const markersByBlock = markersPresent
-    ? blocks.map((blk) => [...blk.matchAll(/\[IMG:(\d+)\]/g)].map((mm) => ({ idx: Number(mm[1]) })))
+    ? blocks.map((blk) => [...blk.matchAll(/\[IMG:(\d+)\]/g)].map((mm) => ({ idx: Number(mm[1]), offset: mm.index })))
     : null;
   const mathByBlock = mathMarkersPresent
-    ? blocks.map((blk) => [...blk.matchAll(/\[MATH:(\d+)\]/g)].map((mm) => ({ idx: Number(mm[1]) })))
+    ? blocks.map((blk) => [...blk.matchAll(/\[MATH:(\d+)\]/g)].map((mm) => ({ idx: Number(mm[1]), offset: mm.index })))
     : null;
   const questionsByBlock = blocks.map(() => []);
 
@@ -1828,6 +1870,7 @@ Theory:
 }
 
 Rules:
+- VERBATIM TRANSCRIPTION (highest priority): copy every question stem, option, passage, caption, practical task and sub-question exactly as printed. Do not paraphrase, summarize, simplify, correct spelling or grammar, translate, normalize notation, change punctuation, or omit repeated wording. Preserve all numbers, units, symbols, labels and meaningful line order. Only remove the printed question number from the stem, paper-wide instructions/furniture, and watermarks as specified below. Keep instructions that form part of a question (for example, "draw and label", "record your observations", "show your working", or "state the precautions").
 - Preserve each question's original number from the paper in the "number" field (as an integer, e.g. "number": 1) and DROP the number from the text. Keep any instruction that is part of the question stem (e.g. "Read the passage below and answer questions 1 to 5.") inside text when it belongs to a single question, otherwise it stays as context.
 - SUB-QUESTIONS: the parts of a numbered question — "(a) …", "(b) …", "(c) …" or "(i) …", "(ii) …" — are NOT questions of their own and must NEVER be returned as separate entries with their own "number". Put them in the parent question's "follow_ups" array, with the letter or roman label removed from each text, keeping every mark allocation. Only a question with no numbered question above it (a comprehension passage's lettered questions) is an entry of its own.
 - If the document contains an answer key (e.g. "Answers: 1-B, 2-C" or similar), use it to fill correct_answer (the option LETTER) AND correct_index (the 0-based position of that option in the options array you return).
@@ -1843,8 +1886,9 @@ Rules:
 - Do NOT invent answer keys that are not in the document. Leave correct_answer as "" and correct_index as null when unknown.
 - WATERMARK LINES: Never copy watermark, source, or download footer/header lines (e.g. "Downloaded from sronu.com", "Source: www.example.com", "DOWNLOADED FROM SRONU") into text, passage, or instructions. Always drop such lines.
 - PAGE FURNITURE: The paper's own furniture is never content. Never copy it into "text" or "passage": the running header/footer ("2027 BECE French Mock | Original practice material Page 8", "Page 8"), the paper's title block ("PAPER 2: WRITTEN AND COMMUNICATIVE SKILLS"), its time and marks lines ("Time: 1 hour 25 minutes", "Suggested raw marks: 100"), a printed "INSTRUCTIONS: …" block addressed to the whole paper, or the "Question 1 [40 marks]" label above a question (the number already goes in "number" — drop the label and keep the stem). Keep the READING TEXT itself verbatim, and keep section-level instructions in the first question's passage exactly as rule "SECTION INSTRUCTIONS" above requires: only the printed furniture is dropped. A heading or directive line standing on its own ("SECTION B", "Answer all questions in this section.") is furniture in exactly this sense — it becomes that rule's context in the first question's passage, never an entry of its own.
-- FIGURE MARKERS: Raw text may contain lines like "[IMG:5]" — those are real figure markers from the paper. If a marker belongs to this question's stem or its figure caption, PRESERVE it verbatim in the "text" or "passage" field of that question (never invent or move markers).
-- MATH MARKERS: Raw text may contain inline markers like "[MATH:3]" — those are real math-expression bubbles (fractions, powers, matrices, surd stacks) that cannot be typeset as text. PRESERVE them verbatim wherever they appear: in the "text" field, inside the "passage" field, AND inside option strings (e.g. "A. [MATH:3] + 4"). Never invent, renumber, or drop markers, and never move a marker from one option to another.
+- FIGURE MARKERS: Raw text may contain lines like "[IMG:5]" — those are real figure markers from the paper. If a marker belongs to this question's stem, caption, passage, or a sub-question, PRESERVE it verbatim in the matching "text", "passage", or "follow_ups" field (never invent or move markers).
+- SCIENCE PRACTICALS AND FIGURE-BASED QUESTIONS: Keep every practical or theory question and every part, including questions that ask students to study a specimen, apparatus, experimental set-up, circuit, photograph, or other printed visual. Keep each figure marker with its nearest referring question; do not omit a question because its answer depends on an image, and do not invent or redraw a missing image.
+- MATH MARKERS: Raw text may contain inline markers like "[MATH:3]" — those are real math-expression bubbles (fractions, powers, matrices, surd stacks) that cannot be typeset as text. PRESERVE them verbatim wherever they appear: in the "text", "passage", "follow_ups", and option strings (e.g. "A. [MATH:3] + 4"). Never invent, renumber, or drop markers, and never move a marker to another question, part, or option.
 - COMPACT OUTPUT: keep option text short, leave explanation and learning_objective empty, and do not repeat the passage for later questions. Output ONLY the JSON object.
 `;
 
@@ -2182,10 +2226,43 @@ Rules:
     if (!result) continue; // skipped block (timed out / failed) — keep the rest
     const bp = blockPrompts[i];
     const list = topUpMissingQuestions(bp, Array.isArray(result) ? result : result.questions);
+    // When the local reader can identify a question unambiguously, use its
+    // source wording and option/part text in preference to the model's copy.
+    // This keeps the exact exam wording (and any [IMG]/[MATH] tokens) intact
+    // while leaving the model to classify and structure irregular layouts.
+    const localByNumber = new Map();
+    for (const local of parseQuestionsLocally(bp.block, bp.header)) {
+      const number = Number(local.number);
+      if (!localByNumber.has(number)) localByNumber.set(number, []);
+      localByNumber.get(number).push(local);
+    }
     let cur = bp.shared;
     let headerDone = false;
+    let sharedAttached = false;
     for (const q of list || []) {
       if (q && typeof q === 'object') {
+        const sourceMatches = localByNumber.get(Number(q.number)) || [];
+        // A model may number each limb with its parent's number. Never replace
+        // a labeled limb with the parent's locally parsed stem just because the
+        // printed number matches; that would turn (a), (b), etc. into copies of
+        // the full question and feed those copies back as follow-ups.
+        if (sourceMatches.length === 1 && sourceMatches[0].type === q.type && !subLabelOf(q.text)) {
+          const sourceQuestion = sourceMatches[0];
+          // A math marker represents a rendered expression that the PDF text
+          // layer could not read. Keep any readable expression text the vision
+          // pass supplied beside that marker instead of replacing it with the
+          // incomplete text-layer stem.
+          if (!/\[MATH:\d+\]/i.test(String(q.text || ''))) q.text = sourceQuestion.text;
+          if (
+            q.type === 'objective' && sourceQuestion.options.length &&
+            !(Array.isArray(q.options) && q.options.some((option) => /\[MATH:\d+\]/i.test(String(option || ''))))
+          ) {
+            q.options = sourceQuestion.options;
+          }
+          if (q.type === 'theory' && sourceQuestion.follow_ups.length) {
+            q.follow_ups = sourceQuestion.follow_ups;
+          }
+        }
         // Strip solution text out of the limbs too, then drop an entry whose
         // stem is a solution line (and, once its limbs are gone, has nothing
         // left to ask).
@@ -2220,15 +2297,20 @@ Rules:
             if (m && m[1] && squash(m[1]) !== squash(stem)) q.text = m[1].trim();
           }
         }
-        // Attach passage/instructions to every question. Prefer the passage the
-        // AI attached (first question of a group), then carry that forward to
-        // the following questions of the group, and fall back to this block's
-        // shared context so instructions are never lost even if the AI omitted
-        // them. This is authoritative: students always see what they need.
-        const p = q.passage && String(q.passage).trim();
-        if (p) cur = p;
-        if (!cur && bp.shared) cur = bp.shared;
-        if (!q.passage || !String(q.passage).trim()) q.passage = cur;
+        // Keep shared context from the source text verbatim, then carry it to
+        // the later questions through the importer. Without split context,
+        // retain and carry any passage the model identified within the block.
+        if (bp.shared) {
+          // The block splitter gives the source's exact lead context. Keep it
+          // once and let the importer carry it to later questions in the run.
+          q.passage = sharedAttached ? '' : bp.shared;
+          cur = bp.shared;
+          sharedAttached = true;
+        } else {
+          const p = q.passage && String(q.passage).trim();
+          if (p) cur = p;
+          if (!q.passage || !String(q.passage).trim()) q.passage = cur;
+        }
         // The block's leading section header is prepended to its first
         // question, so each group keeps its section name.
         if (bp.header && !headerDone) {
@@ -2261,11 +2343,25 @@ Rules:
       // sub-questions under an empty heading, and dropping those threw the
       // real questions away.
       const limbs = Array.isArray(q && q.follow_ups) ? q.follow_ups : [];
-      const limbKey = limbs
-        .map((fu) => String((fu && fu.text) || '').replace(/\s+/g, ' ').trim().toLowerCase())
-        .join('');
-      const identity = t || (limbKey ? `limbs:${limbKey}` : '');
-      if (identity) {
+      const normalizeIdentity = (value) => String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+      const limbKey = limbs.map((fu) => normalizeIdentity(fu && fu.text)).filter(Boolean);
+      const optionKey = (Array.isArray(q && q.options) ? q.options : []).map(normalizeIdentity);
+      const passageKey = normalizeIdentity(q && q.passage);
+      const figureKey = (markersByBlock?.[i] || [])
+        .filter((m) => questionAtSourcePosition([q], m, blocks[i], 'nearest'))
+        .map((m) => m.idx);
+      const mathKey = (mathByBlock?.[i] || [])
+        .filter((m) => questionAtSourcePosition([q], m, blocks[i], 'preceding'))
+        .map((m) => m.idx);
+      const identity = JSON.stringify({
+        text: t,
+        passage: passageKey,
+        options: optionKey,
+        limbs: limbKey,
+        figures: [...new Set(figureKey)].sort((a, b) => a - b),
+        math: [...new Set(mathKey)].sort((a, b) => a - b),
+      });
+      if (t || passageKey || optionKey.length || limbKey.length) {
         const dedupeKey = `${q && q.type ? q.type : ''}|${Number(q && q.number) || 0}|${identity}`;
         if (!seen.has(dedupeKey)) {
           seen.add(dedupeKey);
@@ -2278,9 +2374,14 @@ Rules:
 
   // Hand every figure and math marker to the question that kept it, with a
   // fallback to the first question of its block; then markers never leak into
-  // stored text/passage/options whether or not any were attached.
+  // stored question text, passages, options, or follow-ups.
   if (markersPresent || mathMarkersPresent) {
-    const { unused, unusedMath } = attachMarkers(questionsByBlock, markersByBlock || blocks.map(() => []), mathByBlock || blocks.map(() => []));
+    const { unused, unusedMath } = attachMarkers(
+      questionsByBlock,
+      markersByBlock || blocks.map(() => []),
+      mathByBlock || blocks.map(() => []),
+      blocks
+    );
     const warnings = [];
     if (unused.length) {
       warnings.push(`Detected ${unused.length} diagram(s) that could not be matched to a question - check them after import.`);
@@ -2294,6 +2395,11 @@ Rules:
     q.text = stripMarkers(q.text);
     q.passage = stripMarkers(q.passage);
     if (Array.isArray(q.options)) q.options = q.options.map((o) => (typeof o === 'string' ? stripMarkers(o) : o));
+    if (Array.isArray(q.follow_ups)) {
+      q.follow_ups = q.follow_ups.map((part) => part && typeof part === 'object'
+        ? { ...part, text: stripMarkers(part.text) }
+        : part);
+    }
   }
   // Fold "(a) / (b) / (c)" limbs back under the question that carries their
   // number, so they are delivered as 1a, 1b, 1c in one bubble instead of
@@ -2390,6 +2496,7 @@ function mergeSubQuestions(list) {
   const out = [];
   let parent = null;   // the question currently accepting parts
   let stage = null;    // null = closed, 'first' = any label, else {kind, label}
+  const normalizePartText = (text) => String(text || '').replace(/\s+/g, ' ').trim().toLowerCase();
 
   const accepts = (q, part) => {
     if (!parent || parent.type !== 'theory' || q.type !== 'theory') return false;
@@ -2415,13 +2522,25 @@ function mergeSubQuestions(list) {
       continue;
     }
     const part = subLabelOf(q.text);
+    if (
+      !part && parent && parent.type === 'theory' && q.type === 'theory' &&
+      sameNumber(q) && normalizePartText(q.text) === normalizePartText(parent.text)
+    ) {
+      // Some model responses repeat the parent as a second entry under its
+      // printed number. It is the same question, not a new part.
+      continue;
+    }
     if ((part && accepts(q, part)) || (!part && sameNumber(q))) {
       const parts = normalizeFollowUps(parent.follow_ups);
-      parts.push({
-        text: part ? part.rest : String(q.text || '').trim(),
-        marks: Number(q.marks) > 0 ? Number(q.marks) : 0,
-        difficulty: String(q.difficulty || 'medium'),
-      });
+      const text = part ? part.rest : String(q.text || '').trim();
+      const normalizedText = normalizePartText(text);
+      if (!parts.some((existing) => normalizePartText(existing.text) === normalizedText)) {
+        parts.push({
+          text,
+          marks: Number(q.marks) > 0 ? Number(q.marks) : 0,
+          difficulty: String(q.difficulty || 'medium'),
+        });
+      }
       parent.follow_ups = parts;
       // The parts are read against the figure — a photo or diagram the model
       // handed to one of them travels up with the group, or the student is
@@ -2431,6 +2550,10 @@ function mergeSubQuestions(list) {
       if (q.figureIndices && q.figureIndices.length) {
         const figures = (parent.figureIndices = parent.figureIndices || []);
         for (const idx of q.figureIndices) if (!figures.includes(idx)) figures.push(idx);
+      }
+      if (q.markerIndices && q.markerIndices.length) {
+        const expressions = (parent.markerIndices = parent.markerIndices || []);
+        for (const idx of q.markerIndices) if (!expressions.includes(idx)) expressions.push(idx);
       }
       if (part && stage === 'first') stage = { kind: part.kind, label: nextSubLabel(part.kind, part.label) };
       else if (part && stage) stage = { kind: stage.kind, label: nextSubLabel(stage.kind, stage.label) };
@@ -2814,6 +2937,7 @@ function parseQuestionsLocally(text, section = '') {
   const append = (chunk) => {
     const value = String(chunk || '').trim();
     if (!value || !cur) return;
+    if (cur.target === 'skip') return;
     if (cur.target === 'stem') cur.stem.push(value);
     else if (cur.target.startsWith('part:')) cur.parts[Number(cur.target.slice(5))].text += ' ' + value;
     else {
@@ -2825,6 +2949,14 @@ function parseQuestionsLocally(text, section = '') {
   for (const raw of lines) {
     const line = String(raw || '').trim();
     if (!line) continue;
+
+    // A figure or typeset expression is carried by its own marker bubble.
+    // Do not let a caption immediately below that marker drift into the exact
+    // question stem (or into an option when the paper is multiple choice).
+    if (/^\[(?:IMG|MATH):\d+\]$/i.test(line)) {
+      if (cur) cur.target = 'skip';
+      continue;
+    }
 
     const num = line.match(LOCAL_NUMBERED);
     const run = splitOptionRun(line);

@@ -195,7 +195,7 @@ test('every bubble a question carries is sent above its text, in reading order',
   });
 });
 
-test('a question with one figure still sends it, and only it', async () => {
+test('a primary uploaded figure is sent before other bubbles on the same question', async () => {
   const eid = db
     .prepare("INSERT INTO exams(title,duration_minutes,status) VALUES ('OneFigure',30,'live')")
     .run().lastInsertRowid;
@@ -204,6 +204,9 @@ test('a question with one figure still sends it, and only it', async () => {
     `INSERT INTO questions(exam_id,q_order,type,text,marks,image,section_key)
      VALUES (?,1,'theory','What does the diagram show?',5,'only-fig.png','')`
   ).run(eid);
+  const qid = db.prepare('SELECT id FROM questions WHERE exam_id = ?').get(eid).id;
+  db.prepare("INSERT INTO question_images(question_id,position,image,kind) VALUES (?,0,'only-expr.png','math')")
+    .run(qid);
 
   const session = exam.createSession(eid, studentId);
   const student = db.prepare('SELECT * FROM students WHERE id = ?').get(studentId);
@@ -211,8 +214,11 @@ test('a question with one figure still sends it, and only it', async () => {
   await withChat(async (calls) => {
     await exam.sendQuestionTo(session, student);
     const images = calls.filter((c) => c.type === 'image');
-    assert.equal(images.length, 1, 'the legacy single-image column still delivers');
-    assert.match(images[0].file, /only-fig\.png$/);
+    assert.deepEqual(
+      images.map((image) => path.basename(image.file)),
+      ['only-fig.png', 'only-expr.png'],
+      'the uploaded primary figure is included and comes first'
+    );
   });
 });
 

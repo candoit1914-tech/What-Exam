@@ -1,8 +1,8 @@
 // Turn an uploaded file into the text the extractor reads, whatever it was
 // written as. The pipeline downstream only ever wants a string of exam text —
 // `ai.extractQuestionsFromText` does not know or care whether a human typed it
-// into Notepad, exported it from Word, or printed it to PDF — so every format
-// converges on the same shape and only the reader differs.
+// into Notepad, exported it from Word, Excel or PDF — so every format converges
+// on exam text plus optional image markers, and only the reader differs.
 //
 // JSON is the exception, and deliberately so: a JSON upload is ALREADY
 // structured questions, so it is imported verbatim (exact text, exact options,
@@ -10,6 +10,7 @@
 // answer sheet through a probabilistic parser would only risk corrupting work
 // someone already did correctly.
 const { readZip } = require('./zip');
+const path = require('path');
 
 /** The formats this endpoint will read, in the order the UI should offer them. */
 const SUPPORTED_EXTENSIONS = ['.pdf', '.txt', '.text', '.docx', '.xlsx', '.json'];
@@ -52,19 +53,40 @@ function decodeXml(s) {
 }
 
 /**
- * Read the paragraph text of a .docx.
+ * Read paragraph text and embedded pictures from a .docx.
  *
  * Word splits a paragraph across many <w:t> runs (spell-check breaks, tracked
  * changes, a bolded word), so the text is assembled per <w:p> (paragraph) and
  * not per run — otherwise every paragraph would shatter into fragments the
  * parser reads as separate questions. <w:tab/> and <w:br/> become spacing so a
- * two-column layout does not run two questions together.
+ * two-column layout does not run two questions together. Embedded image
+ * relationships become [IMG:n] markers at their paragraph position so the
+ * question importer can attach each figure to the nearby question.
  */
-function docxText(buf) {
+function docxSource(buf) {
   const parts = readZip(buf);
   const doc = parts['word/document.xml'];
   if (!doc) throw new Error('not a Word document: word/document.xml is missing');
   const xml = doc.toString('utf8');
+  const relXml = parts['word/_rels/document.xml.rels']
+    ? parts['word/_rels/document.xml.rels'].toString('utf8')
+    : '';
+  const relTargets = new Map();
+  for (const match of relXml.matchAll(/<Relationship\b[^>]*\/?\s*>/g)) {
+    const tag = match[0];
+    const id = /\bId="([^"]+)"/.exec(tag)?.[1];
+    const target = /\bTarget="([^"]+)"/.exec(tag)?.[1];
+    const external = /\bTargetMode="External"/i.test(tag);
+    if (!id || !target || external) continue;
+    let decoded = target.replace(/\\/g, '/');
+    try { decoded = decodeURIComponent(decoded); } catch (_) {}
+    const resolved = decoded.startsWith('/')
+      ? path.posix.normalize(decoded.slice(1))
+      : path.posix.normalize(path.posix.join('word', decoded));
+    relTargets.set(id, resolved);
+  }
+  const images = [];
+  const markers = [];
   const paras = [];
   // Split on the paragraph element, keeping each paragraph's own XML.
   for (const chunk of xml.split(/<\/w:p>/)) {
@@ -74,20 +96,43 @@ function docxText(buf) {
     // document order alongside the runs. `<w:t` must be followed by whitespace
     // or ">" or `<w:tab/>` would match as a run opening and swallow the text
     // after it — markup leaking into the question.
-    const tokens = chunk.match(/<w:t(?:\s[^>]*)?>[\s\S]*?<\/w:t>|<w:tab\s*\/>|<w:br\s*\/>|<w:cr\s*\/>/g) || [];
+    const tokens = chunk.match(/<w:t(?:\s[^>]*)?>[\s\S]*?<\/w:t>|<w:tab\s*\/>|<w:br\s*\/>|<w:cr\s*\/>|<a:blip\b[^>]*>|<v:imagedata\b[^>]*>/g) || [];
     for (const tok of tokens) {
       // A text run, not a tab/br/cr: `<w:tab/>` also starts with "<w:t", so
       // the test must be the run's opening ">" and not its first four letters.
       if (/^<w:t(?:\s[^>]*)?>/.test(tok)) {
         const inner = tok.replace(/^<w:t(?:\s[^>]*)?>/, '').replace(/<\/w:t>$/, '');
         line += decodeXml(inner);
+      } else if (/^<(?:a:blip|v:imagedata)\b/.test(tok)) {
+        const relId = /\b(?:r:embed|r:id)="([^"]+)"/.exec(tok)?.[1];
+        const mediaPath = relId && relTargets.get(relId);
+        const media = mediaPath && parts[mediaPath];
+        if (media) {
+          const idx = images.length;
+          images.push({
+            kind: 'uploaded',
+            page: 1,
+            filename: path.posix.basename(mediaPath),
+            buffer: Buffer.from(media),
+          });
+          markers.push({ idx, page: 1 });
+          line += ` [IMG:${idx}] `;
+        }
       } else {
         line += ' ';
       }
     }
     paras.push(line.replace(/\s+/g, ' ').trim());
   }
-  return paras.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+  return {
+    text: paras.join('\n').replace(/\n{3,}/g, '\n\n').trim(),
+    images,
+    markers,
+  };
+}
+
+function docxText(buf) {
+  return docxSource(buf).text;
 }
 
 // ── XLSX ───────────────────────────────────────────────────────────────
@@ -110,9 +155,10 @@ function sharedStrings(xml) {
  * convention that makes it work is: the first column carries the question and
  * the columns to its right carry its options/answer, exactly as a teacher
  * would type it. Inline strings are handled as well as the shared-string table
- * because both occur in the wild.
+ * because both occur in the wild. Drawing images are anchored back to their
+ * worksheet row and inserted as markers beside that row's question text.
  */
-function xlsxText(buf) {
+function xlsxSource(buf) {
   const parts = readZip(buf);
   const shared = parts['xl/sharedStrings.xml']
     ? sharedStrings(parts['xl/sharedStrings.xml'].toString('utf8'))
@@ -126,6 +172,7 @@ function xlsxText(buf) {
   const rows = [];
   for (const rowXml of sheet.split(/<\/row>/)) {
     if (!/<row[\s>]/.test(rowXml)) continue;
+    const rowNumber = Number(/\br="(\d+)"/.exec(rowXml)?.[1]) || rows.length + 1;
     const cells = [];
     for (const c of rowXml.match(/<c\b[\s\S]*?(?:\/>|<\/c>)/g) || []) {
       // r="B2" gives the column; sparse sheets omit empty cells, so the column
@@ -146,9 +193,77 @@ function xlsxText(buf) {
       cells[idx] = value;
     }
     const line = cells.map((c) => String(c).replace(/\s+/g, ' ').trim()).join('\t').trim();
-    if (line) rows.push(line);
+    if (line) rows.push({ row: rowNumber, text: line });
   }
-  return rows.join('\n');
+
+  const sheetDir = path.posix.dirname(sheetName);
+  const sheetRelsName = path.posix.join(sheetDir, '_rels', `${path.posix.basename(sheetName)}.rels`);
+  const sheetRelsXml = parts[sheetRelsName] ? parts[sheetRelsName].toString('utf8') : '';
+  const sheetRels = new Map();
+  for (const match of sheetRelsXml.matchAll(/<Relationship\b[^>]*\/?\s*>/g)) {
+    const tag = match[0];
+    const id = /\bId="([^"]+)"/.exec(tag)?.[1];
+    const target = /\bTarget="([^"]+)"/.exec(tag)?.[1];
+    if (!id || !target || /\bTargetMode="External"/i.test(tag)) continue;
+    let decoded = target.replace(/\\/g, '/');
+    try { decoded = decodeURIComponent(decoded); } catch (_) {}
+    const resolved = decoded.startsWith('/')
+      ? path.posix.normalize(decoded.slice(1))
+      : path.posix.normalize(path.posix.join(sheetDir, decoded));
+    sheetRels.set(id, resolved);
+  }
+
+  const drawingId = /<drawing\b[^>]*\br:id="([^"]+)"/.exec(sheet)?.[1];
+  const drawingName = drawingId && sheetRels.get(drawingId);
+  const drawingXml = drawingName && parts[drawingName] ? parts[drawingName].toString('utf8') : '';
+  const drawingRelsName = drawingName
+    ? path.posix.join(path.posix.dirname(drawingName), '_rels', `${path.posix.basename(drawingName)}.rels`)
+    : '';
+  const drawingRelsXml = drawingRelsName && parts[drawingRelsName]
+    ? parts[drawingRelsName].toString('utf8')
+    : '';
+  const drawingRels = new Map();
+  for (const match of drawingRelsXml.matchAll(/<Relationship\b[^>]*\/?\s*>/g)) {
+    const tag = match[0];
+    const id = /\bId="([^"]+)"/.exec(tag)?.[1];
+    const target = /\bTarget="([^"]+)"/.exec(tag)?.[1];
+    if (!id || !target || /\bTargetMode="External"/i.test(tag)) continue;
+    let decoded = target.replace(/\\/g, '/');
+    try { decoded = decodeURIComponent(decoded); } catch (_) {}
+    const resolved = decoded.startsWith('/')
+      ? path.posix.normalize(decoded.slice(1))
+      : path.posix.normalize(path.posix.join(path.posix.dirname(drawingName), decoded));
+    drawingRels.set(id, resolved);
+  }
+
+  const images = [];
+  const markers = [];
+  const markersByRow = new Map();
+  const anchors = drawingXml.match(/<xdr:(?:twoCellAnchor|oneCellAnchor|absoluteAnchor)\b[\s\S]*?<\/xdr:(?:twoCellAnchor|oneCellAnchor|absoluteAnchor)>/g) || [];
+  for (const anchor of anchors) {
+    const row = Number(/<xdr:from>[\s\S]*?<xdr:row>(\d+)<\/xdr:row>/.exec(anchor)?.[1]);
+    const relId = /<a:blip\b[^>]*\br:embed="([^"]+)"/.exec(anchor)?.[1];
+    const mediaPath = relId && drawingRels.get(relId);
+    const media = mediaPath && parts[mediaPath];
+    if (!Number.isFinite(row) || !media) continue;
+    const idx = images.length;
+    images.push({ kind: 'uploaded', page: 1, filename: path.posix.basename(mediaPath), buffer: Buffer.from(media) });
+    markers.push({ idx, page: 1 });
+    if (!markersByRow.has(row + 1)) markersByRow.set(row + 1, []);
+    markersByRow.get(row + 1).push(`[IMG:${idx}]`);
+  }
+
+  const rowMap = new Map(rows.map((item) => [item.row, item.text]));
+  for (const row of markersByRow.keys()) if (!rowMap.has(row)) rowMap.set(row, '');
+  const text = [...rowMap.entries()]
+    .sort(([a], [b]) => a - b)
+    .map(([row, rowText]) => [rowText, ...(markersByRow.get(row) || [])].filter(Boolean).join('\t'))
+    .join('\n');
+  return { text, images, markers };
+}
+
+function xlsxText(buf) {
+  return xlsxSource(buf).text;
 }
 
 /** "A" -> 0, "B" -> 1, "AA" -> 26. Spreadsheet column letters to a 0-based index. */
@@ -175,7 +290,7 @@ function plainText(buf) {
  *
  * @param {Buffer} buffer
  * @param {string} filename
- * @returns {{format: string, text?: string, questions?: object[]}}
+ * @returns {{format: string, text?: string, images?: object[], markers?: object[], questions?: object[]}}
  */
 function readExamSource(buffer, filename) {
   const format = formatOf(filename);
@@ -187,8 +302,8 @@ function readExamSource(buffer, filename) {
   switch (format) {
     case 'pdf': return { format, pdf: buffer };
     case 'txt': return { format, text: plainText(buffer) };
-    case 'docx': return { format, text: docxText(buffer) };
-    case 'xlsx': return { format, text: xlsxText(buffer) };
+    case 'docx': return { format, ...docxSource(buffer) };
+    case 'xlsx': return { format, ...xlsxSource(buffer) };
     case 'json': return { format, questions: parseQuestionsJson(buffer, filename) };
     default: throw new Error(`Unsupported file type: ${filename}`);
   }
@@ -270,6 +385,8 @@ module.exports = {
   readExamSource,
   parseQuestionsJson,
   docxText,
+  docxSource,
   xlsxText,
+  xlsxSource,
   plainText,
 };

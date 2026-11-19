@@ -1,6 +1,7 @@
 const db = require('../db');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const config = require('../config');
 const auth = require('../auth');
 const wa = require('./whatsapp');
@@ -279,18 +280,77 @@ function createSession(examId, studentId) {
  * presents the full exam. Copies keep session_questions.question_id pointing
  * at question_pool rows, which its FK constraint requires.
  */
+function storedArray(value) {
+  if (Array.isArray(value)) return value;
+  if (value == null || value === '') return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : [value];
+  } catch (_) {
+    return [value];
+  }
+}
+
+const poolImageDigestCache = new Map();
+
+function poolImageDigest(file) {
+  const safeName = path.basename(String(file || ''));
+  if (!safeName) return '';
+  try {
+    const fullPath = path.join(config.uploadsDir, safeName);
+    const stat = fs.statSync(fullPath);
+    const cacheKey = `${safeName}:${stat.size}:${stat.mtimeMs}`;
+    if (poolImageDigestCache.has(cacheKey)) return poolImageDigestCache.get(cacheKey);
+    const digest = crypto.createHash('sha256').update(fs.readFileSync(fullPath)).digest('hex');
+    poolImageDigestCache.set(cacheKey, digest);
+    if (poolImageDigestCache.size > 5000) poolImageDigestCache.delete(poolImageDigestCache.keys().next().value);
+    return digest;
+  } catch (_) {
+    // A missing image is reported by delivery diagnostics. It must not make
+    // otherwise identical rows unique just because their filenames differ.
+    return '';
+  }
+}
+
+/**
+ * A duplicate is the same student-facing question, including its passage,
+ * choices, parts and any printed figure/formula. The printed number and
+ * internal row id are deliberately excluded so OCR duplicates do not repeat
+ * in WhatsApp; comparing the stem alone used to erase legitimate questions
+ * with the same stem but different options or practical material.
+ */
+function poolQuestionKey(question) {
+  const normalize = (value) => String(value == null ? '' : value).replace(/\s+/g, ' ').trim().toLowerCase();
+  const visibleOption = (value) => {
+    if (!value || typeof value !== 'object') return normalize(value);
+    const key = value.key || value.label || '';
+    const text = value.text || value.value || value.option || '';
+    return normalize([key, text].filter(Boolean).join(' '));
+  };
+  const text = normalize(question && question.text);
+  const passage = normalize(question && question.passage);
+  const options = storedArray(question && question.options).map(visibleOption);
+  const parts = storedArray(question && question.follow_ups)
+    .map((part) => normalize(part && typeof part === 'object' ? (part.text || part.question) : part))
+    .filter(Boolean);
+  const imageDigests = [...new Set(questionImageFiles(question || {}).map(poolImageDigest).filter(Boolean))];
+  if (!text && !passage && !options.length && !parts.length) return '';
+  return JSON.stringify({ text, passage, options, parts, images: imageDigests });
+}
+
 function drawSessionQuestions(sessionId, examId) {
   const n = db.prepare('SELECT COUNT(*) c FROM questions WHERE exam_id = ?').get(examId).c;
   if (!n) return 0;
-  const pool = db.prepare('SELECT id, text FROM question_pool WHERE exam_id = ?').all(examId);
+  const pool = db.prepare('SELECT * FROM question_pool WHERE exam_id = ?').all(examId);
   if (pool.length < n) topUpPool(examId, pool, n);
   // Sort pool questions: objective first, then theory, maintaining original order within each type
-  // Deduplicate by question text to prevent the same question appearing twice in one exam
-  const poolRows = db.prepare('SELECT id, type, text, is_compulsory, section_key FROM question_pool WHERE exam_id = ? ORDER BY id').all(examId);
+  // Deduplicate identical student-facing content while retaining same-stem
+  // questions whose choices, parts, passages, or figures make them different.
+  const poolRows = db.prepare('SELECT * FROM question_pool WHERE exam_id = ? ORDER BY id').all(examId);
   const seenTexts = new Set();
   const uniqueRows = [];
   for (const row of poolRows) {
-    const key = String(row.text || '').trim().toLowerCase();
+    const key = poolQuestionKey(row);
     if (key && seenTexts.has(key)) continue;
     if (key) seenTexts.add(key);
     uniqueRows.push(row);
@@ -365,7 +425,7 @@ function drawSessionQuestions(sessionId, examId) {
 
 /** Copy template questions into the pool until it holds at least `target` rows. */
 function topUpPool(examId, currentPool, target) {
-  const inPool = new Set(currentPool.map((r) => String(r.text || '').trim()));
+  const inPool = new Set(currentPool.map(poolQuestionKey).filter(Boolean));
   const templates = db.prepare('SELECT * FROM questions WHERE exam_id = ? ORDER BY q_order').all(examId);
   const insertPool = db.prepare(
     `INSERT INTO question_pool (exam_id, type, text, passage, options, correct_answer, marks, difficulty, learning_objective, explanation, scheme_json, source, image, is_compulsory, section_key, follow_ups, template_id)
@@ -374,8 +434,8 @@ function topUpPool(examId, currentPool, target) {
   let added = 0;
   for (const t of templates) {
     if (currentPool.length + added >= target) break;
-    const text = String(t.text || '').trim();
-    if (inPool.has(text)) continue; // already represented in the pool
+    const key = poolQuestionKey(t);
+    if (key && inPool.has(key)) continue; // already represented in the pool
     const scheme = db.prepare('SELECT scheme FROM marking_schemes WHERE question_id = ?').get(t.id);
     insertPool.run(
       examId, t.type, t.text, t.passage || '', t.options || null, t.correct_answer || null,
@@ -388,7 +448,7 @@ function topUpPool(examId, currentPool, target) {
       // land on an id another question already owns.
       t.id
     );
-    inPool.add(text);
+    if (key) inPool.add(key);
     added++;
   }
 }
@@ -1236,9 +1296,9 @@ function recordAcceptance(session) {
 }
 
 /**
- * Every bubble a question carries, in reading order: the figures and maths
- * expressions stored as question_images rows, or — when there are none — the
- * single figure in questions.image.
+ * Every bubble a question carries, in reading order: its primary image from
+ * questions.image followed by the figures and maths expressions stored as
+ * question_images rows, with duplicates removed.
  *
  * question_images hangs off the TEMPLATE question, and a drawn attempt reads
  * a pool row whose own id comes from a different table's sequence — so the
@@ -1249,8 +1309,14 @@ function questionImageFiles(question) {
   const rows = db
     .prepare('SELECT image FROM question_images WHERE question_id = ? ORDER BY position')
     .all(imageOwnerId);
-  if (rows.length) return rows.map((r) => r.image);
-  return question.image ? [question.image] : [];
+  const files = rows.map((r) => r.image);
+  // A manually uploaded primary image lives in questions.image, while
+  // extracted figures and math bubbles live in question_images. Keep both:
+  // returning only the rows silently dropped an uploaded diagram whenever the
+  // same question also had a rendered math bubble. The primary image leads the
+  // sequence, and imported figures already present in both places stay unique.
+  if (question.image && !files.includes(question.image)) files.unshift(question.image);
+  return files;
 }
 
 /**
@@ -2039,10 +2105,9 @@ async function handleInboundNow(phone, body, meta = {}) {
     }
   }
 
-  // A paid paper's first question may have gone out inside a template, and a
-  // template cannot carry the figure that question refers to. This message is
-  // what opens the 24-hour window, so the owed figure lands now — before the
-  // reply that answers that question is graded.
+  // A legacy paid template may have carried text before its figure. This
+  // message opens the 24-hour window, so any still-owed figure is delivered
+  // with its question before the reply is graded.
   await deliverOwedFigures(session);
 
   // An approved template invites a reply; it does not open the service
@@ -2122,13 +2187,27 @@ async function handleInboundNow(phone, body, meta = {}) {
 
 /**
  * The first outbound message after a paid checkout may be outside WhatsApp's
- * 24-hour service window. An approved utility template opens the paper and
- * carries Q1 in that same message; the student's reply then opens the window
- * for the regular question flow.
+ * 24-hour service window. An approved utility template can carry a text-only
+ * Q1; when Q1 has an image, it asks the student to reply first so the regular
+ * question flow can send the image above the question.
  */
 async function sendPaidStartTemplate(session, student, exam, firstQ) {
   const template = config.whatsapp.paidStartTemplateName;
   if (!template) return false;
+
+  const needsImageGate = !selection.needsChoice(session, firstQ) && questionImageFiles(firstQ).length > 0;
+  // This template opens the conversation outside WhatsApp's service window,
+  // but it cannot carry an arbitrary question image. Once the gate has gone
+  // out, duplicate payment notifications must not repeat it.
+  if (needsImageGate) {
+    const priorGate = db
+      .prepare("SELECT id FROM message_outbox WHERE session_id = ? AND question_id = 0 AND kind = 'intro' AND state = 'sent'")
+      .get(session.id);
+    if (priorGate) {
+      recordAcceptance(session);
+      return true;
+    }
+  }
 
   let questionText;
   if (selection.needsChoice(session, firstQ)) {
@@ -2138,6 +2217,11 @@ async function sendPaidStartTemplate(session, student, exam, firstQ) {
     // attempt can hold a different set. The student must only ever be offered
     // what they were actually drawn.
     questionText = selection.choiceText(session.id, firstQ.section_key);
+  } else if (needsImageGate) {
+    // Sending the question in the template would put it above its image. Ask
+    // for a reply instead; that opens WhatsApp's service window, and the reply
+    // path then sends the image followed by its question as one delivery.
+    questionText = 'Reply START to receive Question 1 and its image before the exam begins.';
   } else {
     const sequence = sessionQuestionSequence(session);
     const index = sequence.findIndex((q) => q.id === firstQ.id);
@@ -2164,6 +2248,13 @@ async function sendPaidStartTemplate(session, student, exam, firstQ) {
     { type: 'text', text: questionText },
     { type: 'text', text: String(exam.duration_minutes) },
   ]);
+
+  if (needsImageGate) {
+    const gate = outbox.enqueue({ sessionId: session.id, kind: 'intro', recipient: student.phone });
+    outbox.markSent(gate.id);
+    recordAcceptance(session);
+    return true;
+  }
 
   if (!selection.needsChoice(session, firstQ)) {
     const entry = outbox.enqueue({

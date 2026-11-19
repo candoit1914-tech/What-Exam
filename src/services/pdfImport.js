@@ -32,7 +32,7 @@ const DROP_REASON_TEXT = {
  * either reports what was attached or names the rule that rejected what the
  * page scan actually found.
  */
-function figureSummary(diagnostics) {
+function figureSummary(diagnostics, noun = 'PDF') {
   const figures = diagnostics && diagnostics.figures;
   if (!figures) return '';
   const pages = figures.pages || 0;
@@ -42,10 +42,15 @@ function figureSummary(diagnostics) {
   if (found > 0) {
     const what = found === 1 ? 'image or diagram' : 'images or diagrams';
     const byAi = vision ? ` (${vision} of them located by the AI reading the page image)` : '';
-    return `Found ${found} ${what} across ${pages} page${pages === 1 ? '' : 's'} and attached each to its question${byAi}.`;
+    const location = noun === 'PDF'
+      ? `across ${pages} page${pages === 1 ? '' : 's'}`
+      : `in this ${noun}`;
+    return `Found ${found} ${what} ${location} and attached each to its question${byAi}.`;
   }
   if (!candidates) {
-    return `No images or diagrams were found in this PDF (${pages} page${pages === 1 ? '' : 's'} scanned).`;
+    return noun === 'PDF'
+      ? `No images or diagrams were found in this PDF (${pages} page${pages === 1 ? '' : 's'} scanned).`
+      : `No images or diagrams were found in this ${noun}.`;
   }
   const reasons = Object.entries(figures.dropped || {})
     .filter(([, n]) => n > 0)
@@ -68,7 +73,7 @@ function figureSummary(diagnostics) {
  *   attached  — files actually rendered and stored for them,
  *   failures  — why the difference, in the renderer's own words.
  */
-function attachmentSummary({ requested = 0, attached = 0, failures = [], diagnostics } = {}) {
+function attachmentSummary({ requested = 0, attached = 0, failures = [], diagnostics, noun = 'PDF' } = {}) {
   const figures = (diagnostics && diagnostics.figures) || {};
   const pages = figures.pages || 0;
   const kept = figures.kept || 0;
@@ -83,20 +88,20 @@ function attachmentSummary({ requested = 0, attached = 0, failures = [], diagnos
     // would announce figures the student is never going to be shown.
     if (kept > 0) {
       return (
-        `Found ${kept} ${plural(kept)} in this PDF, but no saved question references ${kept === 1 ? 'it' : 'them'}, ` +
+        `Found ${kept} ${plural(kept)} in this ${noun}, but no saved question references ${kept === 1 ? 'it' : 'them'}, ` +
         `so none were attached — ${kept === 1 ? 'that question reaches' : 'those questions reach'} the student ` +
         `${kept === 1 ? 'without its figure' : 'without their figures'}.`
       );
     }
-    return figureSummary(diagnostics);
+    return figureSummary(diagnostics, noun);
   }
   if (attached >= requested && attached > 0 && kept === requested) {
-    return figureSummary(diagnostics) || `Found ${requested} ${plural(requested)} and attached each to its question.`;
+    return figureSummary(diagnostics, noun) || `Found ${requested} ${plural(requested)} and attached each to its question.`;
   }
   if (attached >= requested && attached > 0) {
     return (
       `Attached ${attached} ${plural(attached)} to the questions that reference ${attached === 1 ? 'it' : 'them'}${byAi} ` +
-      `(${kept} ${kept === 1 ? 'was' : 'were'} found in the PDF in total — the others belong to questions this import did not save).`
+      `(${kept} ${kept === 1 ? 'was' : 'were'} found in the ${noun} in total — the others belong to questions this import did not save).`
     );
   }
   if (attached > 0) {
@@ -112,6 +117,23 @@ function attachmentSummary({ requested = 0, attached = 0, failures = [], diagnos
     `Those questions will reach the student WITHOUT ${requested === 1 ? 'their figure' : 'their figures'} — ` +
     'check the server log for "diagram attachment failed".'
   );
+}
+
+/** Explain math bubbles that the PDF scanner found but WhatsApp cannot show. */
+function mathAttachmentSummary({ requested = 0, attached = 0, diagnostics, typeFiltered = false } = {}) {
+  const detected = Number(diagnostics && diagnostics.mathExpressions) || 0;
+  const missingMarkers = Number(diagnostics && diagnostics.missingMathMarkers) || 0;
+  if (requested > attached) {
+    const absent = requested - attached;
+    return `Attached ${attached} of ${requested} math expression${requested === 1 ? '' : 's'}; ${absent} could not be rendered or saved and will be missing from those questions.`;
+  }
+  if (missingMarkers > 0) {
+    return `The PDF scanner found ${missingMarkers} math expression${missingMarkers === 1 ? '' : 's'} whose markers did not reach the question text; check the original paper because those expressions may be missing.`;
+  }
+  if (requested === 0 && detected > 0 && !typeFiltered) {
+    return `Detected ${detected} math expression${detected === 1 ? '' : 's'} in the PDF, but none were attached to saved questions.`;
+  }
+  return '';
 }
 
 // ── Vision rescue ──────────────────────────────────────────────────────
@@ -706,9 +728,21 @@ async function startJob(jobId, buffer, opts = {}) {
       }
     } else {
       // .txt/.docx/.xlsx: already exam text, read by document.readExamSource.
+      const sourceImages = Array.isArray(source.images) ? source.images : [];
       sourceText = {
         text: String(source.text || ''),
-        images: [], markers: [], mathExprs: [], rowsByPage: [], diagnostics: {},
+        images: sourceImages,
+        markers: Array.isArray(source.markers) ? source.markers : [],
+        mathExprs: [], rowsByPage: [],
+        diagnostics: sourceImages.length ? {
+          figures: {
+            pages: 1,
+            kept: sourceImages.length,
+            candidates: { raster: sourceImages.length, vector: 0 },
+            paths: { raster: sourceImages.length, vector: 0 },
+            dropped: {},
+          },
+        } : {},
       };
       if (!sourceText.text.trim()) {
         throw new Error(
@@ -930,6 +964,8 @@ async function startJob(jobId, buffer, opts = {}) {
     let figureRequested = 0;
     let figureAttached = 0;
     const figureFailures = [];
+    let mathRequested = 0;
+    let mathAttached = 0;
     for (const g of filtered) {
       // Paper furniture (running header, paper title, time/marks lines, the
       // printed INSTRUCTIONS block, "Question 1 [40 marks]") is stripped from
@@ -967,11 +1003,12 @@ async function startJob(jobId, buffer, opts = {}) {
           continue;
         }
         try {
-          figureFiles.push(path.basename(
-            await (entry.kind === 'vector'
+          const rendered = entry.kind === 'uploaded'
+            ? await require('sharp')(entry.buffer, { limitInputPixels: false }).rotate().png().toFile(dest)
+            : await (entry.kind === 'vector'
               ? pdf.renderVectorRegion(buffer, entry, dest)
-              : pdf.renderImage(buffer, entry, dest))
-          ));
+              : pdf.renderImage(buffer, entry, dest));
+          figureFiles.push(path.basename(rendered && rendered.path ? rendered.path : dest));
         } catch (e) {
           console.warn('[pdf-import] diagram attachment failed', { jobId, questionOrder: nextOrder,
             marker: `[IMG:${markerIndex}]`, page: entry.page, error: e.message || e.code || e.name });
@@ -1014,7 +1051,9 @@ async function startJob(jobId, buffer, opts = {}) {
         );
         created.push(info.lastInsertRowid);
         savedRows.push(info.lastInsertRowid);
-        await storeQuestionImages(info.lastInsertRowid, figureRowFiles, g, sourceText.mathExprs || [], pageCache, buffer, job.exam_id, nextOrder);
+        const mathResult = await storeQuestionImages(info.lastInsertRowid, figureRowFiles, g, sourceText.mathExprs || [], pageCache, buffer, job.exam_id, nextOrder);
+        mathRequested += mathResult.requested;
+        mathAttached += mathResult.attached;
         db.prepare(
           `INSERT INTO marking_schemes (question_id, type, scheme) VALUES (?, 'objective', ?)
            ON CONFLICT(question_id) DO UPDATE SET scheme=excluded.scheme, updated_at=datetime('now')`
@@ -1041,7 +1080,9 @@ async function startJob(jobId, buffer, opts = {}) {
         const q = db.prepare('SELECT * FROM questions WHERE id = ?').get(info.lastInsertRowid);
         created.push(q.id);
         savedRows.push(q.id);
-        await storeQuestionImages(q.id, figureRowFiles, g, sourceText.mathExprs || [], pageCache, buffer, job.exam_id, nextOrder);
+        const mathResult = await storeQuestionImages(q.id, figureRowFiles, g, sourceText.mathExprs || [], pageCache, buffer, job.exam_id, nextOrder);
+        mathRequested += mathResult.requested;
+        mathAttached += mathResult.attached;
         // Preserve ANY marking-scheme content the paper provides (model answer,
         // key points, rubric). A partial scheme is kept verbatim and then passed
         // to buildMarkingScheme, which fills the missing parts with AI while
@@ -1072,10 +1113,17 @@ async function startJob(jobId, buffer, opts = {}) {
       attached: figureAttached,
       failures: figureFailures,
       diagnostics: sourceText.diagnostics,
+      noun: isPdf ? 'PDF' : 'document',
     });
-    if (figureNote) {
+    const mathNote = mathAttachmentSummary({
+      requested: mathRequested,
+      attached: mathAttached,
+      diagnostics: sourceText.diagnostics,
+      typeFiltered: !!typeFilter,
+    });
+    if (figureNote || mathNote) {
       const prior = (getJob(jobId) || {}).warning;
-      updateJob(jobId, { warning: [prior, figureNote].filter(Boolean).join(' ') });
+      updateJob(jobId, { warning: [prior, figureNote, mathNote].filter(Boolean).join(' ') });
     }
 
     updateJob(jobId, { stage: 'Building marking schemes…', progress: 70 });

@@ -1,7 +1,7 @@
 'use strict';
-// Migration rehearsal for the selection columns. The schema change adds nine
+// Migration rehearsal for the selection columns. The schema change adds twelve
 // columns and creates exam_sections, and two pre-existing sessions rebuilds now
-// copy selection_state/section/tentative/paper_total. Every other selection test
+// copy selection_state/section/tentative/page/paper_total. Every other selection test
 // runs against a FRESH database, where CREATE TABLE alone satisfies it — they
 // would all still pass if the migration path were missing or wrong entirely.
 //
@@ -21,7 +21,7 @@ after(() => fs.rmSync(tmp, { recursive: true, force: true }));
 const NEW_COLUMNS = {
   questions: ['is_compulsory', 'section_key', 'source_number'],
   question_pool: ['is_compulsory', 'section_key'],
-  sessions: ['selection_state', 'selection_section', 'selection_tentative', 'paper_total'],
+  sessions: ['selection_state', 'selection_section', 'selection_tentative', 'selection_page', 'paper_total'],
   session_questions: ['is_selected', 'section_key'],
 };
 
@@ -52,7 +52,7 @@ function boot(dbFile) {
       // what keeps an existing exam behaving exactly as it did before.
       legacyQuestions: db.prepare('SELECT is_compulsory, section_key FROM questions ORDER BY id').all(),
       legacySession: db.prepare(
-        'SELECT selection_state, selection_section, selection_tentative, paper_total, started_at FROM sessions ORDER BY id LIMIT 1'
+        'SELECT selection_state, selection_section, selection_tentative, selection_page, paper_total, started_at FROM sessions ORDER BY id LIMIT 1'
       ).get() || null,
       legacySessionQuestions: db.prepare('SELECT is_selected, section_key FROM session_questions ORDER BY session_id, q_order').all(),
       stillNotNull: /started_at\\s+TEXT\\s+NOT\\s+NULL/i.test(sql),
@@ -150,14 +150,14 @@ test('an existing question arrives compulsory and ungrouped', () => {
   assert.deepEqual(after.legacySessionQuestions, [{ is_selected: 1, section_key: '' }],
     'a legacy session question stays selected and ungrouped');
   assert.deepEqual(after.legacySession, {
-    selection_state: '', selection_section: '', selection_tentative: '',
+    selection_state: '', selection_section: '', selection_tentative: '', selection_page: 0,
     paper_total: 0, started_at: '2026-01-01 09:00:00',
   }, 'the new session columns default empty and the start time survives verbatim');
 });
 
 test('the sessions rebuilds carry the new columns through', () => {
   // Both rebuilds are keyed on legacy DDL and now INSERT..SELECT selection_state,
-  // selection_section, selection_tentative and paper_total. ensureColumn must have
+  // selection_section, selection_tentative, selection_page and paper_total. ensureColumn must have
   // run first or those column references fail outright.
   for (const variant of ['unique', 'notnull']) {
     const dbFile = path.join(tmp, `rebuild-${variant}.db`);

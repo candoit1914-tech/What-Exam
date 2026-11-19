@@ -32,7 +32,7 @@ test('every selection column exists', () => {
   for (const c of ['is_compulsory', 'section_key']) {
     assert.ok(cols('question_pool').includes(c), `question_pool.${c}`);
   }
-  for (const c of ['selection_state', 'selection_section', 'selection_tentative', 'paper_total']) {
+  for (const c of ['selection_state', 'selection_section', 'selection_tentative', 'selection_page', 'paper_total']) {
     assert.ok(cols('sessions').includes(c), `sessions.${c}`);
   }
   for (const c of ['is_selected', 'section_key']) {
@@ -203,7 +203,7 @@ test('a rule that stops at the compulsory questions owes only them', () => {
     { marks: 5, compulsory: false, section: 'b' },
   ]);
   rule(eid, 'b', 'SECTION B', 1);
-  const sid = examSvc.createSession(eid, 1);
+  const sid = examSvc.createSession(eid, aStudent());
   const plan = selection.sessionPlan(sid.id)[0];
   assert.equal(plan.toAnswer, 1, 'the rule is live: one question is owed');
   assert.equal(plan.quota, 0, 'and it leaves nothing to pick');
@@ -411,7 +411,7 @@ function selectiveSession(quota = 2, poolSize = 3) {
   // answer_count is the section's TOTAL, because that is what the paper counts:
   // `quota` optional picks plus the compulsory question sitting beside them.
   rule(eid, 'b', 'SECTION B', quota + 1);
-  const sid = examSvc.createSession(eid, 1);
+  const sid = examSvc.createSession(eid, aStudent());
   return { eid, sid, phone: '23300000000' };
 }
 
@@ -466,14 +466,16 @@ test('the selector names the compulsory questions and the exact count', async ()
   assert.match(body, /[Cc]ompulsory/);
 });
 
-test('a pool over ten falls back to numbered text', async () => {
+test('a pool over ten is paged through tappable lists', async () => {
   const { sid, phone } = selectiveSession(3, 12);
   const cap = captureWa();
   try { await selection.sendSelector(phone, sid.id, 'b'); }
   finally { cap.restore(); }
-  assert.equal(cap.sent.find((m) => m.kind === 'list'), undefined, 'twelve rows must not use a list');
-  const text = cap.sent.find((m) => m.kind === 'text' && /Reply with the numbers/.test(m.text));
-  assert.ok(text, 'the fallback must tell the student how to reply');
+  const list = cap.sent.find((m) => m.kind === 'list');
+  assert.ok(list, 'a large pool still starts with tappable choices');
+  assert.equal(list.rows.length, 9, 'eight question rows and one page control fit the list limit');
+  assert.equal(list.rows.at(-1).id, 'sel:page:1', 'the remaining questions have a Next control');
+  assert.match(list.body, /Page 1 of 2/);
 });
 
 test('list rows never exceed ten rows or twenty-four title characters', async () => {

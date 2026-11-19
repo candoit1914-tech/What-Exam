@@ -561,7 +561,7 @@ function applySelection(sessionId, sectionKey, chosenQOrders) {
   // is deliberately KEPT: it is the only pointer handleReply has to the section,
   // so clearing it would make a later CHANGE reply an unroutable no-op.
   db.prepare(
-    `UPDATE sessions SET paper_total = ?, selection_state = '', selection_tentative = ''
+    `UPDATE sessions SET paper_total = ?, selection_state = '', selection_tentative = '', selection_page = 0
       WHERE id = ?`
   ).run(total, sessionId);
   return total;
@@ -569,24 +569,17 @@ function applySelection(sessionId, sectionKey, chosenQOrders) {
 
 // ── Selector ───────────────────────────────────────────────────────────
 //
-// WhatsApp list messages cap at ten rows and row titles at 24 characters, so
-// a bigger pool has to arrive as numbered text. Both paths speak the same
-// protocol (taps, "2,4,5", CONTINUE) so nothing downstream branches on which
-// one was used.
-//
-// The stage behaves as ONE persistent multi-select rather than a message per
-// selection: sendSelector opens it exactly once (that is what openChoice
-// guards), and every tick after it is answered by sendSelectionState — the
-// same checkbox card with a live "Selected: n/q" count, and a Continue action
-// only once the count is exact. The section header, the instructions and the
-// "Choose questions" button belong to the opening message alone; nothing that
-// happens during the selection may send them again.
+// WhatsApp list messages cap at ten rows and row titles at 24 characters. A
+// list is a one-use message: tapping a row closes it, so every tick must send a
+// fresh list with the current checkmarks. Large pools are paged with eight
+// questions plus Previous/Next rows. Typed numbers remain supported throughout.
 //
 // Every key below is a session q_order. The student is told "QUESTION 7", taps
 // row `sel:b:7`, and types "7" — so q_order is the only identifier that means
 // the same thing to all three.
 
 const LIST_ROW_CAP = 10;
+const PAGE_SIZE = LIST_ROW_CAP - 2;
 const ROW_TITLE_CAP = 24;
 const TITLE_CAP = 60;
 // "continue" is what the button on the selection card says, so the word and the
@@ -601,8 +594,102 @@ function hasSelections(examId) {
 }
 
 function beginChoice(sessionId, sectionKey) {
-  db.prepare("UPDATE sessions SET selection_state='selecting', selection_section=? WHERE id=?")
-    .run(sectionKey, sessionId);
+  db.prepare(
+    `UPDATE sessions
+        SET selection_page = CASE
+              WHEN selection_state = 'selecting' AND selection_section = ? THEN selection_page
+              ELSE 0
+            END,
+            selection_state = 'selecting', selection_section = ?
+      WHERE id = ?`
+  )
+    .run(sectionKey, sectionKey, sessionId);
+}
+
+function pageCount(plan) {
+  return plan.optional.length > LIST_ROW_CAP
+    ? Math.ceil(plan.optional.length / PAGE_SIZE)
+    : 1;
+}
+
+function sessionPage(sessionId, plan) {
+  const row = db.prepare('SELECT selection_page FROM sessions WHERE id = ?').get(sessionId);
+  const pages = pageCount(plan);
+  return Math.max(0, Math.min(pages - 1, Number(row && row.selection_page) || 0));
+}
+
+function setSessionPage(sessionId, page) {
+  db.prepare('UPDATE sessions SET selection_page = ? WHERE id = ?').run(page, sessionId);
+}
+
+function listPageBody(plan, chosen, page, opening, numbers) {
+  if (opening && plan.optional.length <= LIST_ROW_CAP) {
+    return selectorBody(plan, numbers, chosen);
+  }
+  const lines = [];
+  const label = sectionLabel(plan);
+  if (opening && label) lines.push(`*${label}*`, '');
+  const locked = plan.compulsory.length;
+  if (locked) lines.push(`🔒 Compulsory — you will answer ${locked} question${locked === 1 ? '' : 's'} first.`);
+  lines.push(`You must choose exactly ${plan.quota} of the ${plan.optional.length} questions below.`);
+  if (pageCount(plan) > 1) lines.push(`Page ${page + 1} of ${pageCount(plan)} · tap a question to select or deselect it.`);
+  else lines.push('Tap a question to select or deselect it.');
+  lines.push(`Selected: ${chosen.size}/${plan.quota}`, '');
+  const start = pageCount(plan) > 1 ? page * PAGE_SIZE : 0;
+  const end = pageCount(plan) > 1 ? Math.min(start + PAGE_SIZE, plan.optional.length) : plan.optional.length;
+  for (let i = start; i < end; i += 1) lines.push(optionLine(chosen, i + 1, plan.optional[i]));
+  return lines.join('\n');
+}
+
+function listRows(plan, chosen, page) {
+  const pages = pageCount(plan);
+  const start = pages > 1 ? page * PAGE_SIZE : 0;
+  const end = pages > 1 ? Math.min(start + PAGE_SIZE, plan.optional.length) : plan.optional.length;
+  const rows = plan.optional.slice(start, end).map((q, i) => ({
+    id: `sel:${plan.section_key}:${q.q_order}`,
+    title: rowTitle(q, start + i + 1, chosen),
+  }));
+  if (page > 0) rows.push({ id: `sel:page:${page - 1}`, title: '‹ Previous questions' });
+  if (page < pages - 1) rows.push({ id: `sel:page:${page + 1}`, title: 'Next questions ›' });
+  return rows;
+}
+
+async function sendChoiceList(phone, sessionId, sectionKey, opening = false) {
+  const plan = sessionPlan(sessionId).find((s) => s.section_key === sectionKey);
+  if (!plan || plan.quota <= 0) return;
+  const chosen = new Set(currentChoice(sessionId, sectionKey));
+  const page = sessionPage(sessionId, plan);
+  const body = listPageBody(plan, chosen, page, opening, displayNumberMap(sessionId, sectionKey));
+  const title = opening
+    ? (sectionLabel(plan) || 'Choose questions').slice(0, ROW_TITLE_CAP)
+    : 'Update choices';
+  try {
+    await wa.sendInteractiveList(
+      phone,
+      title,
+      body,
+      opening ? 'Choose questions' : 'Update choices',
+      listRows(plan, chosen, page),
+      pageCount(plan) > 1 ? `Tap to toggle · page ${page + 1}/${pageCount(plan)}` : `Tap to toggle · choose ${plan.quota}`
+    );
+  } catch (err) {
+    console.error('[selection] list message failed, using text:', err.message);
+    const nav = pageCount(plan) > 1
+      ? `\nReply NEXT or PREVIOUS to change page (page ${page + 1}/${pageCount(plan)}).`
+      : '';
+    await wa.sendText(phone, `${body}\n\nReply with the question numbers to select or deselect them.${nav}`);
+  }
+  if (chosen.size === plan.quota) {
+    const card = selectionCard(plan, chosen);
+    try {
+      await wa.sendInteractiveButtons(phone, card, [
+        { type: 'reply', reply: { id: 'sel:confirm', title: 'Continue' } },
+      ]);
+    } catch (err) {
+      console.error('[selection] continue button failed, using text:', err.message);
+      await wa.sendText(phone, `${card}\n\nReply *CONTINUE* to start the questions.`);
+    }
+  }
 }
 
 /**
@@ -788,37 +875,7 @@ function selectorBody(plan, numbers, chosen) {
  * Choose questions" loop this function is guarded against (see openChoice).
  */
 async function sendSelector(phone, sessionId, sectionKey) {
-  const plan = sessionPlan(sessionId).find((s) => s.section_key === sectionKey);
-  if (!plan || plan.quota <= 0) return;
-  const chosen = new Set(currentChoice(sessionId, sectionKey));
-  const body = selectorBody(plan, displayNumberMap(sessionId, sectionKey), chosen);
-
-  if (plan.optional.length > LIST_ROW_CAP) {
-    await wa.sendText(
-      phone,
-      `${body}\n\nReply with the numbers you choose, e.g. 1,3 — then CONTINUE.`
-    );
-    return;
-  }
-
-  const rows = plan.optional.map((q, i) => ({
-    id: `sel:${sectionKey}:${q.q_order}`,
-    title: rowTitle(q, i + 1, chosen),
-  }));
-  try {
-    await wa.sendInteractiveList(
-      phone, sectionLabel(plan) || 'Choose', body, 'Choose questions', rows,
-      `Tap to toggle · choose ${plan.quota}`
-    );
-  } catch (err) {
-    // An interactive message can be rejected outright; the numbered-text path
-    // always works, so fall back rather than stranding the student.
-    console.error('[selection] list message failed, using text:', err.message);
-    await wa.sendText(
-      phone,
-      `${body}\n\nReply with the numbers you choose, e.g. 1,3 — then CONTINUE.`
-    );
-  }
+  await sendChoiceList(phone, sessionId, sectionKey, true);
 }
 
 /**
@@ -842,36 +899,9 @@ function choiceText(sessionId, sectionKey) {
   return `${body}\n\nReply with the numbers you choose, e.g. 1,3 — then CONTINUE.`;
 }
 
-/**
- * The live state of an OPEN selection stage, sent after every tick.
- *
- * It carries the same checkboxes and the same `Selected: n/q` count as the
- * picker, but not the section header, the instructions or the "Choose questions"
- * button — those belong to the message that opened the stage and are never
- * repeated. Once the count is complete the card also carries the single
- * Continue action that lets the student through.
- */
+/** Refresh the one-use WhatsApp list after each selection so its rows stay tappable. */
 async function sendSelectionState(phone, sessionId, sectionKey) {
-  const plan = sessionPlan(sessionId).find((s) => s.section_key === sectionKey);
-  if (!plan || plan.quota <= 0) return;
-  const chosen = new Set(currentChoice(sessionId, sectionKey));
-  const card = selectionCard(plan, chosen);
-
-  if (chosen.size === plan.quota) {
-    try {
-      await wa.sendInteractiveButtons(phone, card, [
-        { type: 'reply', reply: { id: 'sel:confirm', title: 'Continue' } },
-      ]);
-    } catch (err) {
-      console.error('[selection] continue button failed, using text:', err.message);
-      await wa.sendText(phone, `${card}\n\nReply *CONTINUE* to start the questions.`);
-    }
-    return;
-  }
-  await wa.sendText(
-    phone,
-    `${card}\n\nReply with a number (e.g. 3) to select or deselect it.`
-  );
+  await sendChoiceList(phone, sessionId, sectionKey, false);
 }
 
 /**
@@ -990,6 +1020,22 @@ async function handleReply(session, student, body, meta = {}) {
   }
 
   const chosen = new Set(currentChoice(session.id, sectionKey));
+  const navMatch = String(meta.replyId || '').match(/^sel:page:(\d+)$/);
+  const requestedPage = navMatch ? Number(navMatch[1]) : null;
+  const currentPage = sessionPage(session.id, plan);
+  if (requestedPage != null) {
+    if (requestedPage >= 0 && requestedPage < pageCount(plan)) {
+      setSessionPage(session.id, requestedPage);
+      await sendSelectionState(phone, session.id, sectionKey);
+    }
+    return { handled: true, committed: false };
+  }
+  if (raw === 'next' || raw === 'previous' || raw === 'prev') {
+    const nextPage = raw === 'next' ? currentPage + 1 : currentPage - 1;
+    if (nextPage >= 0 && nextPage < pageCount(plan)) setSessionPage(session.id, nextPage);
+    await sendSelectionState(phone, session.id, sectionKey);
+    return { handled: true, committed: false };
+  }
   const parsed = parseChoice(body, meta, plan);
   const digitsInRaw = /\d/.test(raw);
   const saysConfirm = meta.replyId === 'sel:confirm' || says(CONFIRM_WORDS);

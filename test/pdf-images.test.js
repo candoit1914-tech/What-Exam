@@ -620,7 +620,7 @@ test('storeMathImages renders each expression and inserts question_images rows i
   }
 });
 
-test('WhatsApp delivery sends math expression bubbles in position order above the question text', async () => {
+test('WhatsApp sends the uploaded figure and math bubbles in position order above the question text', async () => {
   const examMod = require('../src/services/exam');
   const wa = require('../src/services/whatsapp');
   const db = require('../src/db');
@@ -640,11 +640,12 @@ test('WhatsApp delivery sends math expression bubbles in position order above th
     await examMod.sendQuestionTo(session, { phone: '233000000000' });
     const i0 = calls.indexOf('image:m0.png');
     const i1 = calls.indexOf('image:m1.png');
+    const uploaded = calls.indexOf('image:legacy.png');
     assert.ok(i0 >= 0 && i1 >= 0, 'both math bubbles are sent');
     assert.ok(i0 < i1, 'bubbles sent in position order');
+    assert.ok(uploaded >= 0 && uploaded < i0, 'the uploaded question image is sent before rendered math');
     const lastText = calls.map((c, i) => (c.startsWith('text') ? i : -1)).filter((i) => i >= 0).pop();
     assert.ok(lastText !== undefined && i1 < lastText, 'both bubbles arrive above the question text');
-    assert.ok(!calls.includes('image:legacy.png'), 'legacy single image not used when question_images exist');
   } finally {
     db.exec('ROLLBACK');
     wa.sendImage = origImg; wa.sendText = origTxt;

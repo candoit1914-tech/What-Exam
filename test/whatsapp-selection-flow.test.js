@@ -154,7 +154,7 @@ test('the section picker is sent exactly once, however many questions are tapped
   } finally { cap.restore(); }
 });
 
-test('a tap answers with the checkbox card and a live count, not a new section message', async () => {
+test('each tap refreshes the interactive list with checkmarks and a live count', async () => {
   const { sid, phone, poolOrders } = openAtSelector();
   const cap = captureWa();
   try {
@@ -162,21 +162,46 @@ test('a tap answers with the checkbox card and a live count, not a new section m
     cap.sent.length = 0;
 
     await examSvc.handleInbound(phone, '', { replyId: `sel:b:${poolOrders[0]}` });
-    const first = cards(cap.sent)[0];
-    assert.ok(first, 'a selection is answered with the state card');
-    assert.match(first.text, /☑ 1\. Question 1 body/);
-    assert.match(first.text, /☐ 2\. Question 2 body/);
-    assert.match(first.text, /\*Selected: 1\/3\*/, 'the count is on every card');
-    assert.ok(
-      !/Choose questions/.test(first.text),
-      'the card reports state; it does not re-issue the picker'
-    );
+    const first = lists(cap.sent).at(-1);
+    assert.ok(first, 'a selection is answered with a fresh interactive list');
+    assert.equal(first.buttonText, 'Update choices');
+    assert.match(first.body, /☑ 1\. Question 1 body/);
+    assert.match(first.body, /☐ 2\. Question 2 body/);
+    assert.match(first.body, /Selected: 1\/3/, 'the count is on every list');
+    assert.match(first.rows[0].title, /^☑ 1\./, 'the tappable row carries its checkmark');
 
     cap.sent.length = 0;
     await examSvc.handleInbound(phone, '', { replyId: `sel:b:${poolOrders[1]}` });
-    const second = cards(cap.sent)[0];
-    assert.match(second.text, /☑ 1\.[\s\S]*☑ 2\./);
-    assert.match(second.text, /\*Selected: 2\/3\*/);
+    const second = lists(cap.sent).at(-1);
+    assert.match(second.body, /☑ 1\.[\s\S]*☑ 2\./);
+    assert.match(second.body, /Selected: 2\/3/);
+  } finally { cap.restore(); }
+});
+
+test('large theory sections page through tappable rows and keep the page on each selection', async () => {
+  const { sid, phone, poolOrders } = openAtSelector({ quota: 3, pool: 12 });
+  const cap = captureWa();
+  try {
+    await examSvc.handleInbound(phone, 'START');
+    const firstPage = lists(cap.sent)[0];
+    assert.equal(firstPage.rows.length, 9, 'eight choices plus Next fit under WhatsApp\'s ten-row limit');
+    assert.equal(firstPage.rows.at(-1).id, 'sel:page:1');
+
+    await examSvc.handleInbound(phone, firstPage.rows.at(-1).title, { replyId: 'sel:page:1' });
+    assert.equal(sessionRow(sid).selection_page, 1);
+    const secondPage = lists(cap.sent).at(-1);
+    assert.match(secondPage.body, /Page 2 of 2/);
+    assert.equal(secondPage.rows[0].id, `sel:b:${poolOrders[8]}`);
+    assert.equal(secondPage.rows.at(-1).id, 'sel:page:0');
+
+    await examSvc.handleInbound(phone, '', { replyId: `sel:b:${poolOrders[8]}` });
+    assert.equal(sessionRow(sid).selection_page, 1, 'a question tap leaves the current page open');
+    assert.match(lists(cap.sent).at(-1).rows[0].title, /^☑ 9\./);
+    assert.deepEqual(tentative(sid), [poolOrders[8]]);
+
+    await examSvc.handleInbound(phone, '', { replyId: 'sel:page:0' });
+    assert.equal(sessionRow(sid).selection_page, 0);
+    assert.match(lists(cap.sent).at(-1).rows[0].title, /^☐ 1\./);
   } finally { cap.restore(); }
 });
 

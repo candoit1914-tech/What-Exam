@@ -97,6 +97,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   -- committed answer and is written only by a commit, so a student who taps two
   -- questions and goes quiet has silently deselected nothing.
   selection_tentative TEXT NOT NULL DEFAULT '',
+  selection_page     INTEGER NOT NULL DEFAULT 0,
   paper_total       REAL NOT NULL DEFAULT 0            -- compulsory + selected marks
 );
 
@@ -353,6 +354,7 @@ ensureColumn('question_pool', 'section_key', "TEXT NOT NULL DEFAULT ''");
 ensureColumn('sessions', 'selection_state', "TEXT NOT NULL DEFAULT ''");
 ensureColumn('sessions', 'selection_section', "TEXT NOT NULL DEFAULT ''");
 ensureColumn('sessions', 'selection_tentative', "TEXT NOT NULL DEFAULT ''");
+ensureColumn('sessions', 'selection_page', 'INTEGER NOT NULL DEFAULT 0');
 ensureColumn('sessions', 'paper_total', 'REAL NOT NULL DEFAULT 0');
 ensureColumn('session_questions', 'is_selected', 'INTEGER NOT NULL DEFAULT 1');
 ensureColumn('session_questions', 'section_key', "TEXT NOT NULL DEFAULT ''");
@@ -390,16 +392,17 @@ if (sessionsDdl && /UNIQUE\s*\(\s*exam_id\s*,\s*student_id\s*\)/i.test(sessionsD
         selection_state   TEXT NOT NULL DEFAULT '',
         selection_section TEXT NOT NULL DEFAULT '',
         selection_tentative TEXT NOT NULL DEFAULT '',
+        selection_page INTEGER NOT NULL DEFAULT 0,
         paper_total       REAL NOT NULL DEFAULT 0
       );
       INSERT INTO sessions_new
         (id, exam_id, student_id, current_q_order, status, started_at, last_active_at,
          ended_at, final_score, final_percentage, passed, retry_count, attempt_no,
-         selection_state, selection_section, selection_tentative, paper_total)
+         selection_state, selection_section, selection_tentative, selection_page, paper_total)
       SELECT
         id, exam_id, student_id, current_q_order, status, started_at, last_active_at,
         ended_at, final_score, final_percentage, passed, COALESCE(retry_count, 0), 1,
-        '', '', '', 0
+        '', '', '', 0, 0
       FROM sessions;
       DROP TABLE sessions;
       ALTER TABLE sessions_new RENAME TO sessions;
@@ -453,16 +456,17 @@ if (sessionsStartedDdl && /started_at\s+TEXT\s+NOT\s+NULL/i.test(sessionsStarted
         selection_state   TEXT NOT NULL DEFAULT '',
         selection_section TEXT NOT NULL DEFAULT '',
         selection_tentative TEXT NOT NULL DEFAULT '',
+        selection_page INTEGER NOT NULL DEFAULT 0,
         paper_total       REAL NOT NULL DEFAULT 0
       );
       INSERT INTO sessions_nullable_start
         (id, exam_id, student_id, current_q_order, status, started_at, last_active_at,
          ended_at, final_score, final_percentage, passed, retry_count, attempt_no,
-         selection_state, selection_section, selection_tentative, paper_total)
+         selection_state, selection_section, selection_tentative, selection_page, paper_total)
       SELECT
         id, exam_id, student_id, current_q_order, status, started_at, last_active_at,
         ended_at, final_score, final_percentage, passed, COALESCE(retry_count, 0), attempt_no,
-        selection_state, selection_section, selection_tentative, paper_total
+        selection_state, selection_section, selection_tentative, selection_page, paper_total
       FROM sessions;
       DROP TABLE sessions;
       ALTER TABLE sessions_nullable_start RENAME TO sessions;

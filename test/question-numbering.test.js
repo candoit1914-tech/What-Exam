@@ -257,27 +257,31 @@ test('the selector echoes the numbers the student typed, not the draw position',
   const session = db.prepare('SELECT * FROM sessions WHERE id = ?').get(sid);
   const student = db.prepare('SELECT * FROM students WHERE id = ?').get(session.student_id);
 
-  // The complete card goes out as the Continue button's message, an incomplete
-  // one as plain text — capture both so the echo is asserted on whichever the
-  // count produced, without a real gateway call in between.
+  // A one-use WhatsApp list is refreshed after the reply. Capture it to check
+  // that the visible count and ticks use the same numbers the student typed.
   const sent = [];
-  const originals = { sendText: wa.sendText, sendInteractiveButtons: wa.sendInteractiveButtons };
+  const originals = {
+    sendText: wa.sendText,
+    sendInteractiveButtons: wa.sendInteractiveButtons,
+    sendInteractiveList: wa.sendInteractiveList,
+  };
   wa.sendText = async (...args) => { sent.push(['text', ...args]); };
   wa.sendInteractiveButtons = async (...args) => { sent.push(['buttons', ...args]); };
+  wa.sendInteractiveList = async (...args) => { sent.push(['list', ...args]); };
   try {
     await selection.handleReply(session, student, '1,3', {});
   } finally {
     Object.assign(wa, originals);
   }
 
-  assert.equal(sent.length, 1, 'the echo is one message');
-  const echo = sent[0][2];
+  const echo = sent.find((m) => m[0] === 'list')?.[3];
+  assert.ok(echo, 'the refreshed choices arrive as a tappable list');
   assert.match(
     echo,
     /☑ 1\.[\s\S]*☑ 3\./,
     'the reply protocol speaks in listing numbers, so the echo does too'
   );
-  assert.match(echo, /\*Selected: 2\/2\*/, 'and it carries the live count');
+  assert.match(echo, /Selected: 2\/2/, 'and it carries the live count');
   assert.doesNotMatch(echo, /Q5|Q7/, 'a draw position the student never saw must not appear');
 });
 

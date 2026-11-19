@@ -561,28 +561,21 @@ test('a paid exam can deliver its first question in an approved start template',
   }
 });
 
-test('a paid first question that carries a figure still shows it, window or not', async () => {
-  // The start template is text: a question about a diagram can be handed over
-  // without the diagram, outside the 24-hour window where an image cannot be
-  // sent at all. The bubble is recorded as owed before the attempt, and the
-  // student's first reply — which is what opens the window — pays the debt
-  // before their answer to that question is graded.
+test('a paid first question with a figure waits for a reply, then sends the image before the question', async () => {
+  // A text-only template cannot show the uploaded figure above its question.
+  // It asks the student to reply first; the reply opens WhatsApp's service
+  // window, then the image/question pair is delivered without grading START.
   capture();
   paystackStub();
   const previous = config.whatsapp.paidStartTemplateName;
   config.whatsapp.paidStartTemplateName = 'paid_exam_start_test';
   const realSendImage = wa.sendImage;
   const images = [];
-  let rejectFirst = true;
   wa.sendTemplate = async (phone, name, language, params) => {
     sentTemplates.push({ phone, name, language, params });
     return { messages: [{ id: 'mock-template' }] };
   };
   wa.sendImage = async (phone, file) => {
-    if (rejectFirst) {
-      rejectFirst = false;
-      throw new Error('(#131047) Session expired');
-    }
     images.push(String(file).split(/[\\/]/).pop());
     return { messages: [{ id: 'mock-image' }] };
   };
@@ -602,20 +595,25 @@ test('a paid first question that carries a figure still shows it, window or not'
       'the approved paid exam start template'
     );
 
+    const start = sentTemplates.find((item) => item.name === 'paid_exam_start_test');
+    assert.match(start.params[1].text, /Reply START/);
+    assert.doesNotMatch(start.params[1].text, /QUESTION 1/);
     const owed = () =>
       db
         .prepare("SELECT * FROM message_outbox WHERE kind='figure' AND session_id = ?")
         .get(sessionFor(eid, student.id).id);
-    assert.ok(owed(), 'the figure is recorded as owed the moment the question goes out');
-    assert.equal(owed().state, 'queued', 'the rejection outside the window leaves it owed, not lost');
-    assert.deepEqual(images, [], 'and nothing was shown before the window opened');
+    assert.equal(owed(), undefined, 'there is no detached figure debt before its question can be sent');
+    assert.deepEqual(images, [], 'the image waits until WhatsApp can deliver it');
 
-    // The reply that opens the window arrives as an answer: the figure has to
-    // land first, so the student sees the diagram before their answer to the
-    // question it belongs to is graded.
-    await exam.handleInbound(student.phone, 'A');
+    await exam.handleInbound(student.phone, 'START');
     assert.deepEqual(images, ['q1-figure.png'], 'the first reply delivers the figure');
-    assert.equal(owed().state, 'sent', 'the debt retires itself');
+    assert.ok(sent.some((text) => /QUESTION 1/.test(text)), 'the question follows the image');
+    assert.equal(owed().state, 'sent', 'the image and question are recorded as delivered');
+    assert.equal(
+      db.prepare('SELECT COUNT(*) c FROM answers WHERE session_id = ?').get(sessionFor(eid, student.id).id).c,
+      0,
+      'START opens the paper instead of being graded as an answer'
+    );
   } finally {
     config.whatsapp.paidStartTemplateName = previous;
     wa.sendTemplate = realSendTemplate;
