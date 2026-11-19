@@ -167,9 +167,25 @@ async function api(method, body) {
 }
 
 function logOutbound(recipient, messageId, type) {
+  const id = String(messageId || '').trim();
+  // Meta may deliver the status callback before the request that created the
+  // message has returned. In that race, the webhook has already inserted the
+  // message row; fill in its recipient/type without resetting delivered/read
+  // back to sent or creating a duplicate row.
+  const existing = id && db.prepare(
+    'SELECT id FROM outbound_messages WHERE message_id = ? ORDER BY id DESC LIMIT 1'
+  ).get(id);
+  if (existing) {
+    db.prepare(
+      `UPDATE outbound_messages
+          SET recipient = ?, type = ?, updated_at = datetime('now')
+        WHERE id = ?`
+    ).run(recipient, type, existing.id);
+    return;
+  }
   db.prepare(
     'INSERT INTO outbound_messages (recipient, message_id, type, status) VALUES (?,?,?,?)'
-  ).run(recipient, messageId || '', type, 'sent');
+  ).run(recipient, id, type, 'sent');
 }
 
 async function sendText(to, text) {
@@ -422,41 +438,59 @@ async function sendTemplate(to, templateName, languageCode, params) {
 }
 
 function parseWebhook(body) {
-  const entry = body?.entry?.[0];
-  const changes = entry?.changes?.[0]?.value;
-  if (!changes) return [];
-  const messages = (changes.messages || []).map((m) => {
-    const isInteractive = m.type === 'interactive';
-    // Quick replies on approved message templates arrive as type="button"
-    // with a top-level `button` object, unlike freeform interactive messages,
-    // which use `interactive.button_reply`. Meta's Start tap was therefore
-    // being parsed as an empty message and dropped by the webhook.
-    const isTemplateButton = m.type === 'button';
-    return {
-      type: 'message',
-      phone: m.from,
-      messageId: m.id,
-      timestamp: m.timestamp,
-      interactiveType: isInteractive ? m.interactive?.type || '' : isTemplateButton ? 'button' : '',
-      replyId: isInteractive
-        ? m.interactive?.button_reply?.id || m.interactive?.list_reply?.id || ''
-        : isTemplateButton ? m.button?.payload || m.button?.text || '' : '',
-      mediaType: m.type === 'image' ? 'image' : m.type === 'audio' ? 'audio' : '',
-      mediaId: m.type === 'image' ? m.image?.id || '' : m.type === 'audio' ? m.audio?.id || '' : '',
-      body:
-        m.text?.body ||
-        (isInteractive ? m.interactive?.button_reply?.title || m.interactive?.button_reply?.text || m.interactive?.list_reply?.title : '') ||
-        (isTemplateButton ? m.button?.text || m.button?.payload : '') ||
-        (m.type === 'image' ? m.image?.caption || '' : ''),
-    };
-  });
-  const statuses = (changes.statuses || []).map((s) => ({
-    type: 'status',
-    phone: s.recipient_id,
-    messageId: s.id,
-    status: s.status,
-    error: s.errors?.map((e) => `${e.code || ''} ${e.title || ''}`).join('; ') || '',
-  }));
+  const messages = [];
+  const statuses = [];
+  const seen = new Set();
+  const addOnce = (target, event, key) => {
+    if (key && seen.has(key)) return;
+    if (key) seen.add(key);
+    target.push(event);
+  };
+
+  // Cloud API can batch several entries and changes into one POST. Reading
+  // only entry[0].changes[0] silently discarded replies and delivery receipts
+  // that happened to land in any later item in the batch.
+  for (const entry of Array.isArray(body?.entry) ? body.entry : []) {
+    for (const change of Array.isArray(entry?.changes) ? entry.changes : []) {
+      const value = change?.value;
+      if (!value) continue;
+      for (const m of Array.isArray(value.messages) ? value.messages : []) {
+        const isInteractive = m.type === 'interactive';
+        // Template quick replies arrive as type="button" with a top-level
+        // `button` object; freeform replies use interactive.button_reply.
+        const isTemplateButton = m.type === 'button';
+        const event = {
+          type: 'message',
+          phone: m.from,
+          messageId: m.id,
+          timestamp: m.timestamp,
+          interactiveType: isInteractive ? m.interactive?.type || '' : isTemplateButton ? 'button' : '',
+          replyId: isInteractive
+            ? m.interactive?.button_reply?.id || m.interactive?.list_reply?.id || ''
+            : isTemplateButton ? m.button?.payload || m.button?.text || '' : '',
+          mediaType: m.type === 'image' ? 'image' : m.type === 'audio' ? 'audio' : '',
+          mediaId: m.type === 'image' ? m.image?.id || '' : m.type === 'audio' ? m.audio?.id || '' : '',
+          body:
+            m.text?.body ||
+            (isInteractive ? m.interactive?.button_reply?.title || m.interactive?.button_reply?.text || m.interactive?.list_reply?.title : '') ||
+            (isTemplateButton ? m.button?.text || m.button?.payload : '') ||
+            (m.type === 'image' ? m.image?.caption || '' : ''),
+        };
+        addOnce(messages, event, event.messageId ? `message:${event.messageId}` : '');
+      }
+      for (const s of Array.isArray(value.statuses) ? value.statuses : []) {
+        const event = {
+          type: 'status',
+          phone: s.recipient_id,
+          messageId: s.id,
+          status: s.status,
+          error: s.errors?.map((e) => `${e.code || ''} ${e.title || ''}`).join('; ') || '',
+        };
+        const key = event.messageId ? `status:${event.messageId}:${event.status}:${event.error}` : '';
+        addOnce(statuses, event, key);
+      }
+    }
+  }
   return [...messages, ...statuses];
 }
 

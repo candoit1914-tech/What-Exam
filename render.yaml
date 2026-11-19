@@ -71,7 +71,7 @@ services:
       - key: AI_BLOCK_TIMEOUT_MS
         value: "600000"
       - key: AI_BLOCK_CONCURRENCY
-        value: "3"
+        value: "4"
       # How many question-generation batches run at once. Lower this if the
       # OpenAI project reaches its rate limit; chatJSON retries 429 responses.
       - key: AI_GENERATE_CONCURRENCY

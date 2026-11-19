@@ -1269,7 +1269,9 @@ async function generateQuestions({ subject, topics, count, objectiveCount, theor
   // Merge caller-provided `avoid` (existing questions in this exam) with
   // the full history of AI-generated questions for this subject/topic so
   // the AI never repeats questions it has produced before across exams.
-  const historicalTexts = getHistoricalQuestions(subject, topics, 200);
+  // Keep generation prompts lean: the newest 40 examples are enough to guide
+  // variety without repeating hundreds of long stems in every parallel call.
+  const historicalTexts = getHistoricalQuestions(subject, topics, 40);
   const allAvoid = [...new Set([...avoid, ...historicalTexts])];
   console.log(`[generate] avoid list: ${avoid.length} exam + ${historicalTexts.length} historical = ${allAvoid.length} total`);
 
@@ -1307,14 +1309,14 @@ async function generateQuestions({ subject, topics, count, objectiveCount, theor
   ];
   const spin = SPINS[Math.floor(Math.random() * SPINS.length)];
 
-  // Build the avoid block: limit to 80 entries (each truncated to 140 chars)
-  // so the prompt doesn't blow up. The AI still gets the full picture.
-  const avoidDisplay = allAvoid.slice(0, 80);
+  // Keep every existing question from this exam first, then use at most 40
+  // recent historical examples. This avoids repeating giant history prompts
+  // across all generation batches while preserving the current paper's rules.
+  const avoidDisplay = allAvoid.slice(0, Math.max(40, avoid.length));
   const avoidBlock =
     avoidDisplay.length > 0
       ? 'ABSOLUTELY DO NOT generate, reuse, or closely paraphrase any of these previously used questions:\n' +
-        avoidDisplay.map((t, i) => `${i + 1}. ${String(t).slice(0, 140)}`).join('\n') +
-        (allAvoid.length > 80 ? `\n... and ${allAvoid.length - 80} more similar questions to avoid.` : '')
+        avoidDisplay.map((t, i) => `${i + 1}. ${String(t).slice(0, 110)}`).join('\n')
       : '';
 
   const system = (objN, theoN, variety) => {
@@ -1964,6 +1966,11 @@ Rules:
   // it failed so a slow or lossy import can be explained from real numbers
   // instead of inferred from a comment. It changes no control flow.
   const blockStats = { blocks: 0, ok: 0, dropped: 0, toppedUp: 0, requested: 0, returned: 0, reasons: {} };
+  // A permanent provider failure (quota exhausted, invalid key) cannot be
+  // recovered by making the same request again. Remember affected blocks so
+  // the serial recovery pass goes straight to the local parser instead of
+  // waiting through a second identical network failure for every block.
+  const permanentBlockFailures = new Set();
   // `parseCounters` is a never-reset module singleton, so the import's own
   // parse outcomes have to be read as a delta from here, not as a total.
   const parseBaseline = parseStats();
@@ -2029,7 +2036,8 @@ Rules:
         const isTimeout = err && err.name === 'AIError' && /timed out/i.test(err.message);
         const reason = classifyBlockFailure(err);
         const took = Date.now() - startedAt;
-        if (attempt < retries) {
+        if (err && err.permanent) permanentBlockFailures.add(bp);
+        if (attempt < retries && !(err && err.permanent)) {
           console.warn(
             `[ai] ${label} failed in ${took}ms (attempt ${attempt + 1}/${retries + 1}) reason=${reason}` +
             ` - ${isTimeout ? 'timeout' : err.message}`
@@ -2070,9 +2078,10 @@ Rules:
   // transient failures and is what stops a whole theory section disappearing.
   const failed = [];
   for (let i = 0; i < settled.length; i++) if (!settled[i]) failed.push(i);
-  if (failed.length) {
-    const rerun = await mapLimit(failed.map((i) => blockPrompts[i]), 1, (bp) => runBlock(bp, BLOCK_RETRIES));
-    for (let k = 0; k < rerun.length; k++) if (rerun[k]) settled[failed[k]] = rerun[k];
+  const retryableFailed = failed.filter((i) => !permanentBlockFailures.has(blockPrompts[i]));
+  if (retryableFailed.length) {
+    const rerun = await mapLimit(retryableFailed.map((i) => blockPrompts[i]), 1, (bp) => runBlock(bp, BLOCK_RETRIES));
+    for (let k = 0; k < rerun.length; k++) if (rerun[k]) settled[retryableFailed[k]] = rerun[k];
   }
 
   // ── Last-resort recovery: an uploaded paper never loses a block ──────
