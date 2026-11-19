@@ -451,11 +451,9 @@ test('the shipped default provider pair is internally consistent', () => {
   // singleton other tests in this file poke at. Only hardcoded literals are
   // asserted here: config.js loads .env, so model/baseUrl/reasoningEffort
   // reflect the developer's local environment.
-  assert.equal(fresh.ai.defaultModel, 'gpt-5-mini');
-  // The default is a reasoning-family model (gpt-5*), so buildChatBody omits
-  // temperature and sends reasoning_effort instead. If the shipped effort were
-  // 'none' the extraction would be at its cheapest but the default would no
-  // longer be the measured quality/cost balance the comment describes.
-  assert.equal(fresh.ai.defaultReasoningEffort, 'low');
+  assert.equal(fresh.ai.provider, 'openai');
+  assert.equal(fresh.ai.defaultModel, 'gpt-4o-mini');
+  // The shipped model uses the standard chat-completions temperature field.
+  assert.equal(fresh.ai.defaultReasoningEffort, '');
   assert.ok(['none', 'low', 'medium', 'high', ''].includes(fresh.ai.defaultReasoningEffort));
 });

@@ -436,13 +436,13 @@ test('estimateQuestionCount counts question-numbered lines', () => {
   assert.equal(ai.estimateQuestionCount(text), 4);
 });
 
-test('completenessWarning is null when extraction is not far below the estimate and a message when it is', () => {
+test('completenessWarning reports every missing numbered question', () => {
   const many = (n) => Array(n).fill({});
-  assert.equal(ai.completenessWarning(60, many(55)), null, '55 of ~60 is close enough → no warning');
+  assert.match(ai.completenessWarning(60, many(55)), /Extracted 55 questions.*~60.*5 question\(s\) may be missing/);
   assert.equal(ai.completenessWarning(10, many(10)), null, 'complete extraction never warns');
-  assert.equal(ai.completenessWarning(2, many(0)), null, 'tiny estimates never warn');
+  assert.match(ai.completenessWarning(2, many(0)), /Extracted 0 questions.*~2/);
   const msg = ai.completenessWarning(60, many(5));
-  assert.match(msg, /Extracted 5 questions, but the document appears to contain ~60\./, 'warning message text');
+  assert.match(msg, /Extracted 5 questions, but the document appears to contain ~60/);
 });
 
 test('splitSolutionSections strips the answer-key section and returns a per-number answer map', () => {

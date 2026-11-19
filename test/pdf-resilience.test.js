@@ -1,9 +1,7 @@
 'use strict';
-// ANY PDF must import. A page pdfjs cannot open, a diagram stream that refuses
-// to be replayed, and a figure filter that throws are each a SKIP with a note
-// the admin can read — never a dead import. Only a document with nothing
-// readable at all fails, and then it fails in words that name the fix instead
-// of pdfjs' raw exception vanishing into a toast.
+// Keep PDF import failures actionable. Unreadable pages cannot yield a
+// complete question set, so they fail before saving; diagram-only failures
+// preserve readable question text and are reported as warnings.
 require('./helpers/isolate');
 
 const { test } = require('node:test');
@@ -109,8 +107,46 @@ test('a file that is not really a PDF fails with a message that names the fix', 
   assert.match(job.error, /re-upload/i, 'and what to do about it');
 });
 
-test('page skips and diagram failures land in the job note the dashboard shows', async () => {
+test('a page that cannot be read fails without saving an incomplete paper', async () => {
   const examId = newExam('__notes__');
+  const jobId = pdfImport.createJob(examId, 'scan.pdf');
+
+  const originalRead = pdf.textWithMarkers;
+  pdf.textWithMarkers = async () => ({
+    text: '1. What is the capital of Ghana?',
+    images: [],
+    markers: [],
+    mathExprs: [],
+    rowsByPage: [],
+    diagnostics: {
+      figures: {
+        pages: 3,
+        failedPages: [2],
+        figureScanFailedPages: [3],
+        kept: 0,
+        candidates: { raster: 0, vector: 0 },
+        paths: { raster: 0, vector: 0 },
+        dropped: {},
+        keptByPage: [],
+        rejections: [],
+      },
+    },
+  });
+  try {
+    await pdfImport.startJob(jobId, Buffer.from('unused'), {});
+  } finally {
+    pdf.textWithMarkers = originalRead;
+  }
+
+  const job = pdfImport.getJob(jobId);
+  assert.equal(job.status, 'error', 'the import cannot claim completeness when a page was unreadable');
+  assert.match(job.error, /page\(s\) 2 could not be read/i, 'the admin reads which page is missing');
+  assert.match(job.error, /no questions were imported/i, 'no partial paper is saved');
+  assert.equal(db.prepare('SELECT COUNT(*) c FROM questions WHERE exam_id = ?').get(examId).c, 0);
+});
+
+test('diagram scan failures land in the job note while readable questions are saved', async () => {
+  const examId = newExam('__diagram-note__');
   const jobId = pdfImport.createJob(examId, 'scan.pdf');
 
   const originalRead = pdf.textWithMarkers;
@@ -124,7 +160,6 @@ test('page skips and diagram failures land in the job note the dashboard shows',
     diagnostics: {
       figures: {
         pages: 3,
-        failedPages: [2],
         figureScanFailedPages: [3],
         kept: 0,
         candidates: { raster: 0, vector: 0 },
@@ -153,8 +188,7 @@ test('page skips and diagram failures land in the job note the dashboard shows',
   }
 
   const job = pdfImport.getJob(jobId);
-  assert.equal(job.status, 'done', 'a skipped page never fails the import');
-  assert.match(job.warning, /Page 2 could not be parsed and was skipped/, 'the admin reads which page is gone');
+  assert.equal(job.status, 'done', 'a diagram scan failure does not imply missing question text');
   assert.match(job.warning, /Diagram scanning failed on page 3/, 'and which page lost only its diagrams');
   const saved = db.prepare('SELECT text FROM questions WHERE exam_id = ?').all(examId);
   assert.equal(saved.length, 1, 'the question from the readable page was saved');

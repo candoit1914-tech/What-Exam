@@ -13,7 +13,21 @@ const { checkConfig } = require('./services/configCheck');
 // (services/backupWorker.js) that this call blocks on. No-op unless
 // BACKUP_GITHUB_TOKEN and BACKUP_GITHUB_REPO are set.
 if (require.main === module) {
-  require('./services/backup').restoreSync();
+  const backup = require('./services/backup');
+  const restore = backup.restoreSync();
+  const ephemeral = !!process.env.RENDER && require('./services/storageHealth')
+    .ephemeralPaths([config.dbPath, config.uploadsDir]).length > 0;
+  // A failed restore on diskless Render used to fall through, create a fresh
+  // database, seed a demo exam, and accept writes that vanished on the next
+  // deploy. Stop before requiring routes/api (which opens SQLite) so a bad
+  // backup credential cannot make an empty database look like production.
+  if (ephemeral && backup.isConfigured() && restore.status === 'error') {
+    console.error(
+      '[startup] Refusing to start: the GitHub backup could not be restored on ephemeral storage. ' +
+      'Fix BACKUP_GITHUB_TOKEN and redeploy; the app will not create a replacement database.'
+    );
+    process.exit(1);
+  }
 }
 
 const api = require('./routes/api');
@@ -189,6 +203,10 @@ function endpointLink(m, p) {
 // frontend.js does, so the committed fallback file never wins.
 app.get('/config.js', (req, res) => {
   res.type('application/javascript');
+  // The API host can change when the dashboard moves between Render aliases
+  // or a separate frontend and backend are reconfigured. Never let a cached
+  // config.js point the page at a different SQLite database.
+  res.set('Cache-Control', 'no-store');
   // The server that served the page IS the API — wherever the page was
   // opened from (onrender.com, a LAN address, localhost).
   res.send('window.API_BASE = window.location.origin;');
@@ -391,9 +409,8 @@ if (require.main === module) {
     // succeeded, and the banner below says exactly that instead.
     const onRender = !!process.env.RENDER;
     const unsetStorage = !process.env.DB_PATH && !process.env.UPLOADS_DIR;
-    const onEphemeralStorage = unsetStorage
-      || (onRender && require('./services/storageHealth')
-        .ephemeralPaths([config.dbPath, config.uploadsDir]).length > 0);
+    const onEphemeralStorage = onRender && require('./services/storageHealth')
+      .ephemeralPaths([config.dbPath, config.uploadsDir]).length > 0;
     const restoreStatus = (backup.getStatus().lastRestore || {}).status;
     if (onEphemeralStorage && !backup.isConfigured()) {
       console.warn('');
