@@ -10,29 +10,23 @@ class AIError extends Error {
 }
 
 function aiConfigured() {
-  return !!(config.ai.apiKey || config.ai.baseUrl);
+  return !!(config.ai.apiKey && config.ai.baseUrl);
 }
 
 /**
- * The admin's own paid OpenAI account (OPENAI_API_KEY). Separate from
- * `aiConfigured` because it answers a different question: not "can chat run"
- * but "can a voice note be transcribed, a photo answer read, and the chat
- * primary's failure rescued" — three jobs a chat gateway alone cannot do.
+ * OpenAI's platform account (OPENAI_API_KEY). It is separate from
+ * `aiConfigured` because compatible-provider mode can still use OpenAI for
+ * fallback chat, vision, and transcription.
  * Config-level only: the key is read at load, tests stub the functions that
  * use it.
  */
 function openaiConfigured() {
-  return !!(config.openai && config.openai.apiKey);
+  return !!(config.openai && config.openai.apiKey && config.openai.baseUrl);
 }
 
 /**
- * Whether a vision pass can be attempted at all: AI_VISION must be on AND some
- * provider must be able to see. The chat primary counts (AI_BASE_URL is set
- * even when it is only a gateway, and a gateway model may well do vision), and
- * so does the admin's paid OpenAI account on its own — a deployment that set
- * nothing but OPENAI_API_KEY has a working vision model, and gating this on
- * the chat primary alone is what left figure rescue switched off there while
- * the paid credit sat unused.
+ * A vision pass needs AI_VISION plus a configured image-capable chat primary or
+ * OpenAI vision account. A URL without a usable key cannot serve images.
  */
 function visionConfigured() {
   return !!config.ai.vision && (aiConfigured() || openaiConfigured());
@@ -417,23 +411,23 @@ function puterConfigured() {
 }
 
 async function chatJSON(messages, { temperature = 0.4, maxRetries = 2, timeoutMs = config.ai.timeoutMs, maxTokens = 8192, prefer = '' } = {}) {
-  // A paid OpenAI key on its own IS a configured AI. The guard used to name
-  // the chat primary only, so a deployment with nothing but OPENAI_API_KEY
-  // threw "AI is not configured" from the very call the paid account exists
-  // to answer.
+  // OpenAI is the default chat provider and a paid OpenAI key alone is enough
+  // to configure it. Compatible providers must supply both a key and URL.
   if (!aiConfigured() && !puterConfigured() && !openaiConfigured()) {
-    throw new AIError('AI is not configured. Set AI_API_KEY and AI_BASE_URL in .env');
+    throw new AIError(config.ai.provider === 'openai'
+      ? 'AI is not configured. Set OPENAI_API_KEY in the server environment.'
+      : 'AI is not configured. Set AI_API_KEY and AI_BASE_URL in the server environment.');
   }
 
   // Log configuration status
-  console.log(`[ai] Config: primary=${config.ai.model} @ ${config.ai.baseUrl} (key: ${config.ai.apiKey ? 'present' : 'NONE'})`);
+  console.log(`[ai] Config: primary=${config.ai.provider || 'compatible'}:${config.ai.model} @ ${config.ai.baseUrl} (key: ${config.ai.apiKey ? 'present' : 'NONE'})`);
   if (secondaryConfigured()) {
     console.log(`[ai] Config: secondary=${config.claude.model} @ ${config.claude.baseUrl} (key: ${config.claude.apiKey ? 'present' : 'NONE'})`);
   } else {
     console.log('[ai] Config: secondary=NOT configured');
   }
   if (openaiConfigured()) {
-    console.log(`[ai] Config: openai-fallback=${config.openai.model} @ ${config.openai.baseUrl} (key: present)`);
+    console.log(`[ai] Config: openai=${config.openai.model} @ ${config.openai.baseUrl} (key: present)`);
   }
 
   // Ensure every provider always has a timeout so a hanging endpoint can
@@ -476,18 +470,13 @@ async function chatJSON(messages, { temperature = 0.4, maxRetries = 2, timeoutMs
       timeoutMs: config.claude.timeoutMs || effectiveTimeout,
     });
 
-  // The admin's own paid OpenAI account as a CHAT fallback. It is only ever
-  // reached when the primary fails (or is cooling off on the breaker), so the
-  // gateway answer is still preferred and OpenAI is never billed for a call
-  // the primary would have made. This is the line between "the AI provider
-  // did not answer in time" killing an import and that same import quietly
-  // finishing on the account the admin already pays for.
+  // OpenAI is the default primary and also acts as a fallback when an
+  // OpenAI-compatible provider is selected. Identical requests are deduped
+  // below so the primary is never billed twice for the same attempt.
   //
   // `prefer: 'openai'` turns that around for the calls that need SIGHT: figure
-  // localisation is asked for on the vision model and goes first, because a
-  // text-only gateway model answers 200 with no boxes and the figure simply
-  // never reaches the chat. The primary stays queued behind it, so a paid key
-  // that is absent changes nothing about the ordinary order.
+  // localisation is asked for on the OpenAI vision model and goes first,
+  // because the primary could be a text-only compatible model.
   const openaiModel = prefer === 'openai'
     ? (config.openai.visionModel || config.openai.model)
     : config.openai.model;
@@ -513,26 +502,40 @@ async function chatJSON(messages, { temperature = 0.4, maxRetries = 2, timeoutMs
   // skipped; the last resort below still reaches the primary.
   const providers = [];
   const providerNames = [];
+  const providerSignatures = new Set();
+  const addProvider = (provider, { baseUrl, apiKey, model }) => {
+    const signature = [baseUrl, apiKey, model].join('\u0000');
+    if (providerSignatures.has(signature)) return;
+    providerSignatures.add(signature);
+    providers.push(provider);
+    providerNames.push(model || provider.name);
+  };
   const openaiFirst = prefer === 'openai' && openaiConfigured();
   if (openaiFirst && isProviderAvailable('openai')) {
-    providers.push({ fn: openaiFallback, name: 'openai' });
-    providerNames.push(openaiModel || 'openai');
+    addProvider({ fn: openaiFallback, name: 'openai' }, {
+      baseUrl: config.openai.baseUrl, apiKey: config.openai.apiKey, model: openaiModel,
+    });
   }
   if (primary && isProviderAvailable('primary')) {
-    providers.push({ fn: primary, name: 'primary' });
-    providerNames.push(config.ai.model);
+    addProvider({ fn: primary, name: 'primary' }, {
+      baseUrl: config.ai.baseUrl, apiKey: config.ai.apiKey, model: config.ai.model,
+    });
   }
   if (secondaryConfigured() && isProviderAvailable('secondary')) {
-    providers.push({ fn: secondary, name: 'secondary' });
-    providerNames.push(config.claude.model || 'secondary');
+    addProvider({ fn: secondary, name: 'secondary' }, {
+      baseUrl: config.claude.baseUrl, apiKey: config.claude.apiKey,
+      model: config.claude.model || config.ai.model,
+    });
   }
   if (openaiConfigured() && !openaiFirst && isProviderAvailable('openai')) {
-    providers.push({ fn: openaiFallback, name: 'openai' });
-    providerNames.push(config.openai.model || 'openai');
+    addProvider({ fn: openaiFallback, name: 'openai' }, {
+      baseUrl: config.openai.baseUrl, apiKey: config.openai.apiKey, model: openaiModel,
+    });
   }
   if (tertiaryConfigured() && isProviderAvailable('tertiary')) {
-    providers.push({ fn: tertiary, name: 'tertiary' });
-    providerNames.push(config.xai.model || 'tertiary');
+    addProvider({ fn: tertiary, name: 'tertiary' }, {
+      baseUrl: config.xai.baseUrl, apiKey: config.xai.apiKey, model: config.xai.model,
+    });
   }
 
   // Last resort: if every provider's breaker is open we would otherwise fail
@@ -540,8 +543,9 @@ async function chatJSON(messages, { temperature = 0.4, maxRetries = 2, timeoutMs
   // is guaranteed to have, so always fall back to it rather than serving an
   // avoidable outage.
   if (!providers.length && primary) {
-    providers.push({ fn: primary, name: 'primary' });
-    providerNames.push(config.ai.model);
+    addProvider({ fn: primary, name: 'primary' }, {
+      baseUrl: config.ai.baseUrl, apiKey: config.ai.apiKey, model: config.ai.model,
+    });
     console.warn('[ai] All provider breakers are open; falling back to the primary endpoint');
   }
 
@@ -2658,17 +2662,9 @@ function estimateNumberedQuestions(text) {
 /** Human-readable warning, or null when the extraction looks complete. */
 function completenessWarning(estimate, extracted) {
   const count = Array.isArray(extracted) ? extracted.length : 0;
-  if (estimate < 3 || count >= estimate) return null;
-  // Warn when fewer questions were extracted than the document holds.
-  // Threshold: anything under 90% of the paper, or more than 5 questions
-  // missing outright. The 90% line is what "every question of an uploaded PDF
-  // is imported" means in practice — a paper that lost a question or two of a
-  // long list is not reported (unusual numbering and section furniture can
-  // nudge the estimate), but a paper that lost a slice of itself always is.
-  const ratio = count / estimate;
+  if (estimate < 1 || count >= estimate) return null;
   const missing = estimate - count;
-  if (ratio >= 0.9 && missing <= 5) return null;
-  return `Extracted ${count} questions, but the document appears to contain ~${estimate}. Some questions (often the theory section) may have been missed.`;
+  return `Extracted ${count} questions, but the document appears to contain ~${estimate} — about ${missing} question(s) may be missing.`;
 }
 
 /** Detect a leading passage/context run at the start of a block. */
@@ -3451,7 +3447,9 @@ async function markImageTheory({ questionText, passage, modelAnswer, keyPoints, 
   // alone threw "AI is not configured" from the very feature the paid
   // account exists to serve.
   if (!aiConfigured() && !openaiConfigured()) {
-    throw new AIError('AI is not configured. Set AI_API_KEY or OPENAI_API_KEY in .env to mark theory questions.');
+    throw new AIError(config.ai.provider === 'openai'
+      ? 'AI is not configured. Set OPENAI_API_KEY in the server environment to mark theory questions.'
+      : 'AI is not configured. Set AI_API_KEY and AI_BASE_URL in the server environment to mark theory questions.');
   }
   const user = [
     'Grade the student attempt below against the model answer and rubric.',
@@ -3670,28 +3668,36 @@ RULES:
   // inputs, so it must be skipped for photo reads.  OpenAI gpt-4o-mini and
   // gpt-4o both support vision natively.
   const providers = [];
-  // The admin's own paid OpenAI account goes FIRST when it is configured: a
-  // photo answer is the one read that cannot fall back to text, the gateway
-  // primary is not guaranteed to be vision-capable, and a paid platform key
-  // sitting unused while photos fail is exactly what OPENAI_API_KEY exists to
-  // prevent. Every other provider stays behind it as fallback.
+  const providerSignatures = new Set();
+  const addVisionProvider = (provider) => {
+    if (!provider.baseUrl || !provider.apiKey) return;
+    const signature = [provider.baseUrl, provider.apiKey, provider.model].join('\u0000');
+    if (providerSignatures.has(signature)) return;
+    providerSignatures.add(signature);
+    providers.push(provider);
+  };
+  // OpenAI goes first when configured. A compatible primary may not accept
+  // images, so it is tried only as a distinct fallback endpoint/model.
   if (openaiConfigured()) {
-    providers.push({
+    addVisionProvider({
       baseUrl: config.openai.baseUrl,
       apiKey: config.openai.apiKey,
       model: config.openai.visionModel,
       name: 'openai',
     });
   }
-  providers.push(
-    { baseUrl: config.ai.baseUrl, apiKey: config.ai.apiKey, model: config.ai.model, name: 'primary' },
-  );
+  if (aiConfigured()) {
+    addVisionProvider({
+      baseUrl: config.ai.baseUrl, apiKey: config.ai.apiKey,
+      model: config.ai.model, name: 'primary',
+    });
+  }
   // Only add secondary/tertiary if they look like vision-capable models
   if (secondaryConfigured() && !config.claude.model?.includes('nemotron')) {
-    providers.push({ baseUrl: config.claude.baseUrl, apiKey: config.claude.apiKey, model: config.claude.model || config.ai.model, name: 'secondary' });
+    addVisionProvider({ baseUrl: config.claude.baseUrl, apiKey: config.claude.apiKey, model: config.claude.model || config.ai.model, name: 'secondary' });
   }
   if (tertiaryConfigured()) {
-    providers.push({ baseUrl: config.xai.baseUrl, apiKey: config.xai.apiKey, model: config.xai.model, name: 'tertiary' });
+    addVisionProvider({ baseUrl: config.xai.baseUrl, apiKey: config.xai.apiKey, model: config.xai.model, name: 'tertiary' });
   }
 
   let lastErr;

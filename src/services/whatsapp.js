@@ -427,20 +427,26 @@ function parseWebhook(body) {
   if (!changes) return [];
   const messages = (changes.messages || []).map((m) => {
     const isInteractive = m.type === 'interactive';
+    // Quick replies on approved message templates arrive as type="button"
+    // with a top-level `button` object, unlike freeform interactive messages,
+    // which use `interactive.button_reply`. Meta's Start tap was therefore
+    // being parsed as an empty message and dropped by the webhook.
+    const isTemplateButton = m.type === 'button';
     return {
       type: 'message',
       phone: m.from,
       messageId: m.id,
       timestamp: m.timestamp,
-      interactiveType: isInteractive ? m.interactive?.type || '' : '',
+      interactiveType: isInteractive ? m.interactive?.type || '' : isTemplateButton ? 'button' : '',
       replyId: isInteractive
         ? m.interactive?.button_reply?.id || m.interactive?.list_reply?.id || ''
-        : '',
+        : isTemplateButton ? m.button?.payload || m.button?.text || '' : '',
       mediaType: m.type === 'image' ? 'image' : m.type === 'audio' ? 'audio' : '',
       mediaId: m.type === 'image' ? m.image?.id || '' : m.type === 'audio' ? m.audio?.id || '' : '',
       body:
         m.text?.body ||
-        (isInteractive ? m.interactive?.button_reply?.text || m.interactive?.list_reply?.title : '') ||
+        (isInteractive ? m.interactive?.button_reply?.title || m.interactive?.button_reply?.text || m.interactive?.list_reply?.title : '') ||
+        (isTemplateButton ? m.button?.text || m.button?.payload : '') ||
         (m.type === 'image' ? m.image?.caption || '' : ''),
     };
   });

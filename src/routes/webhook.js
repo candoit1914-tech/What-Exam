@@ -7,6 +7,10 @@ const examService = require('../services/exam');
 
 const router = express.Router();
 
+function shouldProcessInbound(ev, bodyText = (ev && ev.body || '').trim()) {
+  return Boolean(bodyText || ev?.replyId || ev?.mediaType === 'image' || ev?.mediaType === 'audio');
+}
+
 // Warned once per boot that unsigned webhook POSTs are being accepted
 // (WHATSAPP_APP_SECRET unset). Repeating it per event would drown the logs.
 let warnedUnsigned = false;
@@ -84,7 +88,7 @@ router.post('/', express.raw({ type: () => true, limit: '1mb' }), async (req, re
     }
     if (ev.type !== 'message') continue;
     const bodyText = (ev.body || '').trim();
-    if (!bodyText && ev.mediaType !== 'image' && ev.mediaType !== 'audio') continue;
+    if (!shouldProcessInbound(ev, bodyText)) continue;
 
     try {
       await examService.handleInbound(ev.phone, bodyText, ev);
@@ -101,3 +105,4 @@ router.post('/', express.raw({ type: () => true, limit: '1mb' }), async (req, re
 });
 
 module.exports = router;
+module.exports.shouldProcessInbound = shouldProcessInbound;

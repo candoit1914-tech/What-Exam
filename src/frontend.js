@@ -7,6 +7,10 @@ app.disable('x-powered-by');
 
 app.get('/config.js', (req, res) => {
   res.type('application/javascript');
+  // This URL chooses the backend database for every dashboard action. Keep it
+  // fresh across frontend or API redeploys so the page cannot keep writing to
+  // an old service that does not have the selected exam.
+  res.set('Cache-Control', 'no-store');
   res.send(`window.API_BASE = ${JSON.stringify(config.appUrl)};`);
 });
 

@@ -49,13 +49,15 @@ services:
         value: "60"
       - key: OBJECTIVE_WEIGHT
         value: "40"
-      # ── AI provider (AshnaAI) ──────────────────────────────────────────
-      - key: AI_BASE_URL
-        value: https://api.ashna.ai/v1/api
-      - key: AI_MODEL
-        value: gpt-5-mini
-      - key: AI_REASONING_EFFORT
-        value: low
+      # ── Primary AI provider: OpenAI ───────────────────────────────────
+      - key: AI_PROVIDER
+        value: openai
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_BASE_URL
+        value: https://api.openai.com/v1
+      - key: OPENAI_MODEL
+        value: gpt-4o-mini
       - key: AI_VISION
         value: "true"
       # Every page of an uploaded PDF that asks for a figure gets its own
@@ -70,12 +72,16 @@ services:
         value: "600000"
       - key: AI_BLOCK_CONCURRENCY
         value: "3"
-      # How many question-generation batches run at once. Measured on AshnaAI:
-      # 4 concurrent batches finished in 29.5s and 8 in 29.6s with no 429s, so
-      # the old hardcoded 2 was serializing work the gateway absorbs at once.
-      # Lower this only if your account hits 429s; chatJSON retries with backoff.
+      # How many question-generation batches run at once. Lower this if the
+      # OpenAI project reaches its rate limit; chatJSON retries 429 responses.
       - key: AI_GENERATE_CONCURRENCY
         value: "6"
+      # NVIDIA fallback for when OpenAI is unavailable. Keep CLAUDE_API_KEY as
+      # a dashboard secret; OpenAI remains the first choice.
+      - key: CLAUDE_BASE_URL
+        value: https://integrate.api.nvidia.com/v1
+      - key: CLAUDE_MODEL
+        value: nvidia/nemotron-3.5-super-vl-120b-a12b
       # ── Secrets: set these in the Render dashboard, NOT here ────────────
       # BACKUP_GITHUB_TOKEN        (fine-grained PAT, Contents: Read and write,
       #                             scoped to ONE private repo; together with
@@ -85,12 +91,10 @@ services:
       #                             holds student answers and photos)
       # BACKUP_GITHUB_REPO         (e.g. you/what-exam-backup - never the
       #                             public app repo)
-      # AI_API_KEY                 (AshnaAI)
-      # OPENAI_API_KEY             (paid OpenAI platform key - transcribes voice
-      #                             notes with Whisper, reads photo answers
-      #                             with vision, and finds figures the PDF page
-      #                             scan missed; optional but the simplest way
-      #                             to enable all three media features)
+      # OPENAI_API_KEY             (required: OpenAI platform API key; used for
+      #                             AI exam generation, PDF extraction, marking,
+      #                             vision and voice transcription)
+      # CLAUDE_API_KEY             (NVIDIA API key for the fallback model above)
       # AI_TRANSCRIBE_API_KEY      (speech-to-text; chat gateway cannot do audio
       #                             and is NOT needed when OPENAI_API_KEY is set)
       # ADMIN_PASSWORD             (a STABLE value - without it a new one is

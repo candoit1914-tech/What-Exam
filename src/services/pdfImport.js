@@ -761,20 +761,16 @@ async function startJob(jobId, buffer, opts = {}) {
       console.log('[pdfImport] Document was scanned/image-based — used OCR to extract text');
       warnings.push('This PDF was scanned/image-based. Text was extracted via OCR and may contain minor errors.');
     }
-    // What the page scanner could not do, kept in the import note rather than
-    // only in a server log nobody opens: a skipped page loses its questions, a
-    // page whose diagram geometry refused to read loses only its diagrams, a
-    // dead figure filter loses only figures. Each is a different thing to act
-    // on — and none of them is a reason to fail an import that can still
-    // produce questions.
+    // A page without readable text can contain questions the scanner could
+    // not include, so do not save a partial paper as a successful import. A
+    // diagram scan failure is different: its question text survived and the
+    // admin can still use that paper with a clear note about the missing image.
     const scan = (sourceText.diagnostics && sourceText.diagnostics.figures) || {};
     if (Array.isArray(scan.failedPages) && scan.failedPages.length) {
-      const n = scan.failedPages.length;
-      warnings.push(
-        `${n === 1 ? 'Page' : 'Pages'} ${scan.failedPages.join(', ')} could not be parsed and ` +
-        `${n === 1 ? 'was' : 'were'} skipped — any questions printed only on ` +
-        `${n === 1 ? 'that page' : 'those pages'} are missing from this import. ` +
-        `Re-upload ${n === 1 ? 'that page as a scan to recover it' : 'those pages as scans to recover them'}.`
+      const pages = scan.failedPages.join(', ');
+      throw new Error(
+        `PDF page(s) ${pages} could not be read. No questions were imported because the paper could be incomplete. ` +
+        'Re-export the failed page(s) as a clear scan, then upload the PDF again.'
       );
     }
     if (Array.isArray(scan.figureScanFailedPages) && scan.figureScanFailedPages.length) {
@@ -899,19 +895,24 @@ async function startJob(jobId, buffer, opts = {}) {
     // counts EVERY question in the document, so a paper the admin filtered to
     // one type is compared against everything that was parsed: measuring the
     // filtered subset against the whole document would cry "questions missing"
-    // over a filter the admin chose on purpose.
+    // over a filter the admin chose on purpose. Compare before the later
+    // instruction cleanup too: numbered instructions count in the source
+    // estimate even though they are deliberately not saved as questions.
     //
     // The figure note is deliberately NOT written here: at this point nothing
     // has been rendered yet, so a sentence saying the figures were attached
     // would be a promise, not a report. attachmentSummary() writes it once the
     // files really exist (or really do not).
-    const warning = [
-      ai.completenessWarning(
-        ai.estimateQuestionCount(ai.cleanExamText(text)),
-        typeFilter ? parsed : filtered
-      ),
-      blockWarning,
-    ].filter(Boolean).join(' ');
+    const completeness = ai.completenessWarning(ai.estimateQuestionCount(ai.cleanExamText(text)), parsed);
+    const unparsedBlocks = /question block\(s\) could not be parsed/i.test(blockWarning);
+    if (completeness || unparsedBlocks) {
+      throw new Error([
+        completeness,
+        unparsedBlocks ? blockWarning : '',
+        'The incomplete question set was not saved. Re-upload a clearer PDF or retry the extraction.',
+      ].filter(Boolean).join(' '));
+    }
+    const warning = blockWarning;
     const jobWarning = [...warnings, warning].filter(Boolean).join(' ');
     if (jobWarning) updateJob(jobId, { warning: jobWarning });
 

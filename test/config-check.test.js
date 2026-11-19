@@ -30,8 +30,15 @@ test('unsafe public URLs warn once without exposing values',()=>{
  assert.equal(r.items.filter(i=>i.key==='APP_URL').length,1);
  }
 });
-test('AI absence warns without preventing manual exam delivery',()=>{
- const r=checkConfig(cfg,{...FULL,AI_API_KEY:''}); assert.equal(r.ok,true); assert.equal(find(r,'AI_API_KEY').level,'warning');
+test('missing OpenAI primary warns without preventing manual exam delivery',()=>{
+ const r=checkConfig(cfg,{...FULL,OPENAI_API_KEY:''}); assert.equal(r.ok,true); assert.equal(find(r,'OPENAI_API_KEY').level,'warning');
+});
+test('compatible provider mode checks its key and endpoint',()=>{
+ const missing=checkConfig(cfg,{...FULL,AI_PROVIDER:'compatible',AI_API_KEY:'',AI_BASE_URL:''});
+ assert.equal(find(missing,'AI_API_KEY').level,'warning');
+ assert.equal(find(missing,'OPENAI_API_KEY').level,'info');
+ const ready=checkConfig(cfg,{...FULL,AI_PROVIDER:'compatible',AI_API_KEY:'ai-private',AI_BASE_URL:'https://provider.test/v1'});
+ assert.equal(find(ready,'AI_API_KEY').level,'info');
 });
 test('reports never contain supplied values and counts agree',()=>{
  for(const r of [checkConfig(cfg,FULL),checkConfig({}, {})]) {

@@ -243,7 +243,7 @@ function restoreSync() {
   if (outcome.status === 'restored') {
     console.log(`[backup] restored from GitHub: database ${Math.round(outcome.dbBytes / 1024)} KB, ${outcome.uploadsFiles} uploaded file(s)`);
   } else if (outcome.status === 'error') {
-    console.error(`[backup] restore FAILED: ${outcome.error} — this boot starts empty; the next backup attempt will not lose the remote copy`);
+    console.error(`[backup] restore FAILED: ${outcome.error} — the remote backup could not be checked; do not rely on an empty boot database`);
   } else if (outcome.status !== 'not-configured') {
     console.log(`[backup] nothing to restore (${outcome.status})`);
   }
