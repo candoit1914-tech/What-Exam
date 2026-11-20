@@ -1,36 +1,19 @@
 {
   "name": "what-exam",
   "version": "1.0.0",
-  "description": "WhatsApp examination system with automatic marking scheme generation",
-  "main": "src/server.js",
+  "private": true,
+  "description": "WhatsApp-first AI exam creation and marking platform",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
-    "start": "node src/server.js",
-    "start:backend": "node src/server.js",
-    "start:frontend": "node src/frontend.js",
-    "start:all": "node scripts/start-all.js",
-    "dev": "node --watch src/server.js",
-    "init": "node src/server.js --init",
-    "test": "node --test test/*.test.js",
-    "config:check": "node scripts/config-check.js",
-    "figures": "node scripts/figure-report.js",
-    "seed": "node scripts/seed-exam.js",
-    "send": "node scripts/send-exam.js"
+    "start": "node server.js"
   },
   "dependencies": {
-    "@heyputer/puter.js": "^2.6.1",
-    "@napi-rs/canvas": "^1.0.3",
-    "@resvg/resvg-js": "^2.6.2",
-    "dotenv": "^16.4.5",
-    "express": "^4.21.2",
-    "multer": "^2.0.1",
-    "pdfjs-dist": "^4.10.38",
-    "sharp": "^0.35.3",
-    "tesseract.js": "^7.0.0"
-  },
-  "engines": {
-    "node": ">=22.16.0 <27"
-  },
-  "devDependencies": {
-    "pdfkit": "^0.19.1"
+    "dotenv": "^17.2.1",
+    "express": "^5.3.0",
+    "multer": "^2.0.2",
+    "pg": "^8.16.3"
   }
 }

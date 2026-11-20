@@ -1,129 +1,49 @@
-# Render Blueprint — configured for the FREE compute plan.
-#
-# A Free workspace cannot use the paid "starter" plan or attach a persistent
-# disk. Declaring either here makes the blueprint fail to APPLY in the dashboard
-# before the build even starts, so this file deliberately uses `plan: free` and
-# declares no `disk:`. Long-term storage on Free is provided by the GitHub
-# backup below instead.
 services:
   - type: web
-    name: what-exam
+    name: whats-web
     runtime: node
     plan: free
-    region: oregon
     buildCommand: npm install
-    startCommand: node src/server.js
+    startCommand: npm start
     healthCheckPath: /health
-    # ── Storage on the FREE plan ──────────────────────────────────────────
-    # Free web services have an EPHEMERAL filesystem: the SQLite database and
-    # uploads are erased on every deploy, restart, and 15-minute idle spin-down.
-    # Render does not offer disks on Free, so a `disk:` block would break the
-    # blueprint. Instead set BACKUP_GITHUB_TOKEN + BACKUP_GITHUB_REPO below:
-    # the app restores the last snapshot at boot before opening SQLite, then
-    # pushes a fresh one on an interval. That is the free-tier replacement for
-    # a disk. Without it, every deploy wipes students, sessions and uploads.
+    autoDeployTrigger: commit
     envVars:
-      # node:sqlite is only available WITHOUT --experimental-sqlite from Node
-      # 22.13.0, and src/db.js requires it at module load. 22.11.0 made the web
-      # service die on boot with ERR_UNKNOWN_BUILTIN_MODULE before /health could
-      # answer, which Render reports as a failed deploy.
-      - key: NODE_VERSION
-        value: "22.16.0"
-      # Keep both under src/data. On the Free plan this is on the container
-      # filesystem; the GitHub backup is what makes it survive redeploys. The
-      # same absolute paths also match a disk mount if this service is ever
-      # moved to a paid plan, so no variable needs to change then.
-      - key: DB_PATH
-        value: /opt/render/project/src/data/exams.db
-      - key: UPLOADS_DIR
-        value: /opt/render/project/src/data/uploads
-      # SEED_ON_BOOT only seeds when the table is empty, so after a backup is
-      # restored it is a no-op. It cannot re-seed over real data.
-      - key: SEED_ON_BOOT
-        value: "true"
-      # A paper with both theory and objectives scores out of 100: theory is
-      # worth this many of the 100 points, objectives the rest. Optional — the
-      # app defaults to 60/40 when they are absent, and a single-type paper
-      # still scores on its raw marks.
-      - key: THEORY_WEIGHT
-        value: "60"
-      - key: OBJECTIVE_WEIGHT
-        value: "40"
-      # ── Primary AI provider: OpenAI ───────────────────────────────────
-      - key: AI_PROVIDER
-        value: openai
-      - key: OPENAI_API_KEY
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: whats-db
+          property: connectionString
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: ADMIN_EMAIL
         sync: false
-      - key: OPENAI_BASE_URL
-        value: https://api.openai.com/v1
-      - key: OPENAI_MODEL
-        value: gpt-4o-mini
-      - key: AI_VISION
-        value: "true"
-      # Every page of an uploaded PDF that asks for a figure gets its own
-      # vision rescue pass (0 = no cap). A paid OPENAI_API_KEY (dashboard
-      # secret below) turns the rescue on even if AI_VISION is off, and is
-      # asked first, on its own vision model.
-      - key: AI_VISION_PAGE_LIMIT
-        value: "0"
-      - key: AI_TIMEOUT_MS
-        value: "120000"
-      - key: AI_BLOCK_TIMEOUT_MS
-        value: "600000"
-      - key: AI_BLOCK_CONCURRENCY
-        value: "4"
-      # How many question-generation batches run at once. Lower this if the
-      # OpenAI project reaches its rate limit; chatJSON retries 429 responses.
-      - key: AI_GENERATE_CONCURRENCY
-        value: "6"
-      # NVIDIA fallback for when OpenAI is unavailable. Keep CLAUDE_API_KEY as
-      # a dashboard secret; OpenAI remains the first choice.
-      - key: CLAUDE_BASE_URL
-        value: https://integrate.api.nvidia.com/v1
-      - key: CLAUDE_MODEL
-        value: nvidia/nemotron-3.5-super-vl-120b-a12b
-      # ── Secrets: Render prompts for these when the blueprint is applied ───
-      # No secret values belong in this file. sync:false makes Render ask for
-      # them in the dashboard and keeps them out of the repo.
-      #
-      # A STABLE admin password is required: otherwise a new one is generated
-      # on every boot and the dashboard becomes unreachable after a deploy.
       - key: ADMIN_PASSWORD
         sync: false
-      # Meta app secret: webhook POSTs are rejected with 403 without it.
-      - key: WHATSAPP_APP_SECRET
+      - key: OPENAI_API_KEY
         sync: false
+      - key: OPENAI_MODEL
+        value: gpt-6.2-astra
+      - key: OPENAI_TRANSCRIBE_MODEL
+        value: gpt-transcribe
       - key: WHATSAPP_ACCESS_TOKEN
         sync: false
       - key: WHATSAPP_PHONE_NUMBER_ID
         sync: false
       - key: WHATSAPP_VERIFY_TOKEN
         sync: false
-      # Approved Meta templates. A blank template means cold recipients cannot
-      # be invited outside WhatsApp's 24-hour customer service window.
+      - key: WHATSAPP_APP_SECRET
+        sync: false
       - key: WHATSAPP_TEMPLATE_NAME
         sync: false
-      - key: WHATSAPP_TEMPLATE_PARAMS
-        sync: false
-      - key: WHATSAPP_PAYMENT_TEMPLATE_NAME
-        sync: false
-      - key: WHATSAPP_PAID_START_TEMPLATE_NAME
-        sync: false
-      # Optional: NVIDIA fallback and paid exams. A blank value leaves that
-      # feature off. BACKUP_* is DIFFERENT: on the Free plan it is the only
-      # persistence the app has, so set both or data is lost on every deploy.
-      - key: CLAUDE_API_KEY
-        sync: false
-      - key: PAYSTACK_SECRET_KEY
-        sync: false
-      - key: BACKUP_GITHUB_TOKEN
-        sync: false
-      - key: BACKUP_GITHUB_REPO
-        sync: false
-      # Render sets RENDER_EXTERNAL_URL automatically; APP_URL is only needed
-      # for a custom domain. Left blank, config.js falls back to the Render URL.
-      - key: APP_URL
-        sync: false
-      # Older services may still use AI_BASE_URL + AI_API_KEY + AI_MODEL in the
-      # dashboard instead of OPENAI_*; config.js keeps those working as a
-      # compatible primary when no OPENAI_API_KEY is configured.
+      - key: WHATSAPP_TEMPLATE_LANGUAGE
+        value: en_US
+      - key: WHATSAPP_GRAPH_VERSION
+        value: v27.0
+
+databases:
+  - name: whats-db
+    databaseName: whats
+    user: whats
+    plan: free
+    postgresMajorVersion: "18"
